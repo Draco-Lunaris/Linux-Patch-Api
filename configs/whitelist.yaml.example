@@ -1,0 +1,14 @@
+# Linux Patch API - IP Whitelist Configuration
+# Copy to /etc/linux_patch_api/whitelist.yaml
+# Block all by default - only listed IPs can access the API
+
+# Supported entry types:
+# - Individual IPs: "192.168.1.100"
+# - CIDR subnets: "192.168.1.0/24"
+# - Hostnames: "admin-server.internal" (resolved at startup)
+
+# Example entries:
+entries:
+  - "192.168.1.0/24"      # Management network
+  - "10.0.0.50"          # Specific admin workstation
+  # - "admin-server.internal"  # Hostname example (uncomment to use)
