@@ -114,7 +114,7 @@
 |-----------|-------------|-------------|--------|
 | M0 | Phase 0 complete (scaffolding) | 2026-04-09 | ✅ Complete |
 | M1 | All spec documents complete | 2026-04-09 | ✅ Complete |
-| M2 | Development environment ready | 2026-04-15 | ⏳ Pending |
+| M2 | Development environment ready | 2026-04-09 | ✅ Complete |
 | M3 | CI/CD pipeline operational | 2026-04-22 | ⏳ Pending |
 | M4 | mTLS + IP whitelist working | 2026-05-03 | ⏳ Pending |
 | M5 | Core API functional (Alpha) | 2026-06-07 | ⏳ Pending |
