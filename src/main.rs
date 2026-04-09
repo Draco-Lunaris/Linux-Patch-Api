@@ -17,7 +17,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::{error, info};
 
-use linux_patch_api::{config::AppConfig, init_logging, JobManager};
+use linux_patch_api::{AppConfig, init_logging, JobManager};
 
 /// Linux Patch API CLI arguments
 #[derive(Parser, Debug)]
@@ -51,12 +51,12 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = match AppConfig::load(&args.config) {
         Ok(cfg) => {
-            info!(port = cfg.server.port, bind = cfg.server.bind, "Configuration loaded");
+            info!(port = cfg.server.port, bind = &cfg.server.bind, "Configuration loaded");
             cfg
         }
         Err(e) => {
             error!(error = %e, path = args.config, "Failed to load configuration");
-            return Err(e.into());
+            return Err(anyhow::anyhow!("Configuration error: {}", e));
         }
     };
 

@@ -1,4 +1,4 @@
-//! Jobs Module - Async job queue and management
+//! Jobs Module - Async job queue management
 //!
 //! Handles job lifecycle management as defined in ARCHITECTURE.md:
 //! - Job queue and status tracking

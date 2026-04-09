@@ -1,4 +1,4 @@
-//! Configuration Module - YAML config with auto-reload
+//! Config Module - YAML config with auto-reload
 //!
 //! Handles configuration management as defined in SPEC.md:
 //! - YAML config file loading and parsing

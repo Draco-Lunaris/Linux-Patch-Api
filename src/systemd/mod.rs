@@ -1,11 +1,3 @@
-//! Systemd Module - Systemd service integration
+//! Systemd Module - Placeholder
 //!
-//! Handles systemd integration as defined in ARCHITECTURE.md:
-//! - Service notification (Type=notify)
-//! - Journal logging integration
-//! - PID file management
-//! - Graceful shutdown handling
-
-pub mod service;
-pub mod journal;
-pub mod pid;
+//! Implementation in future phases

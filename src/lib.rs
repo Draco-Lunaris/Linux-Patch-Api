@@ -20,7 +20,7 @@ pub mod logging;
 pub mod packages;
 pub mod systemd;
 
-// Re-export commonly used types
-pub use config::AppConfig;
-pub use jobs::JobManager;
-pub use logging::init_logging;
+// Re-export commonly used types from submodules
+pub use config::loader::AppConfig;
+pub use jobs::manager::JobManager;
+pub use logging::init::init_logging;
