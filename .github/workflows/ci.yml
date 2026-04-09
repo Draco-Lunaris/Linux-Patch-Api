@@ -1,0 +1,111 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ master, develop ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Code Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy Lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --all-features
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run cargo-audit
+        run: |
+          cargo install cargo-audit
+          cargo audit
+
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-patch-api-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/linux-patch-api
+          retention-days: 30
+
+  build-ubuntu:
+    name: Build Ubuntu Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cargo debhelper pkg-config libsystemd-dev
+      - name: Build release
+        run: cargo build --release
+      - name: Create Debian package
+        run: |
+          mkdir -p debian/usr/bin
+          mkdir -p debian/etc/linux_patch_api
+          mkdir -p debian/lib/systemd/system
+          cp target/release/linux-patch-api debian/usr/bin/
+          # Add systemd service file
+          # Add conffiles for config
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-patch-api.deb
+          path: debian/*.deb
+          retention-days: 30
