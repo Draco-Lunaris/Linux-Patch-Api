@@ -3,6 +3,7 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [ master, develop ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ master ]
 
@@ -60,52 +61,164 @@ jobs:
           cargo install cargo-audit
           cargo audit
 
-  build:
-    name: Build Release
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-patch-api-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/linux-patch-api
-          retention-days: 30
-
-  build-ubuntu:
-    name: Build Ubuntu Package
+  # Debian/Ubuntu Package Build
+  build-deb:
+    name: Build Debian Package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install packaging tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cargo debhelper pkg-config libsystemd-dev
-      - name: Build release
-        run: cargo build --release
-      - name: Create Debian package
-        run: |
-          mkdir -p debian/usr/bin
-          mkdir -p debian/etc/linux_patch_api
-          mkdir -p debian/lib/systemd/system
-          cp target/release/linux-patch-api debian/usr/bin/
-          # Add systemd service file
-          # Add conffiles for config
-      - name: Upload .deb
+          sudo apt-get install -y debhelper cargo rustc libsystemd-dev pkg-config
+      - name: Build Debian package
+        run: dpkg-buildpackage -us -uc -b
+      - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-patch-api.deb
-          path: debian/*.deb
+          name: linux-patch-api-deb
+          path: ../linux-patch-api_*.deb
           retention-days: 30
+      - name: Upload to releases (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ../linux-patch-api_*.deb
+
+  # RHEL/CentOS/Fedora Package Build
+  build-rpm:
+    name: Build RPM Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install RPM build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm rpmbuild cargo rustc libsystemd-dev pkg-config
+      - name: Build RPM package
+        run: |
+          rpmbuild -ba linux-patch-api.spec
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-patch-api-rpm
+          path: ~/rpmbuild/RPMS/x86_64/*.rpm
+          retention-days: 30
+      - name: Upload to releases (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ~/rpmbuild/RPMS/x86_64/*.rpm
+
+  # Alpine Package Build
+  build-apk:
+    name: Build Alpine Package
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          apk add --no-cache rust cargo musl-dev openssl-dev systemd-dev git
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Create APK package
+        run: |
+          mkdir -p package/usr/bin
+          mkdir -p package/etc/linux_patch_api
+          mkdir -p package/lib/systemd/system
+          cp target/x86_64-unknown-linux-musl/release/linux-patch-api package/usr/bin/
+          cp configs/linux-patch-api.service package/lib/systemd/system/
+          cp configs/config.yaml.example package/etc/linux_patch_api/config.yaml
+          cp configs/whitelist.yaml.example package/etc/linux_patch_api/whitelist.yaml
+          # Create APKBUILD
+          cat > APKBUILD << 'EOF'
+          pkgname=linux-patch-api
+          pkgver=1.0.0
+          pkgrel=1
+          pkgdesc="Secure remote package management API for Linux systems"
+          url="https://gitea.internal/linux-patch-api"
+          arch="x86_64"
+          license="MIT"
+          depends="systemd"
+          source="package"
+          
+          package() {
+            cp -r "$srcdir"/package/* "$pkgdir"/
+          }
+          EOF
+          abuild -F -r
+      - name: Upload .apk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-patch-api-apk
+          path: ~/packages/x86_64/*.apk
+          retention-days: 30
+
+  # Arch Linux Package Build
+  build-arch:
+    name: Build Arch Package
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm rust cargo systemd git base-devel
+      - name: Build release binary
+        run: cargo build --release
+      - name: Create PKGBUILD package
+        run: |
+          mkdir -p package/usr/bin
+          mkdir -p package/etc/linux_patch_api
+          mkdir -p package/usr/lib/systemd/system
+          cp target/release/linux-patch-api package/usr/bin/
+          cp configs/linux-patch-api.service package/usr/lib/systemd/system/
+          cp configs/config.yaml.example package/etc/linux_patch_api/config.yaml
+          cp configs/whitelist.yaml.example package/etc/linux_patch_api/whitelist.yaml
+          # Create PKGBUILD
+          cat > PKGBUILD << 'EOF'
+          pkgname=linux-patch-api
+          pkgver=1.0.0
+          pkgrel=1
+          pkgdesc="Secure remote package management API for Linux systems"
+          url="https://gitea.internal/linux-patch-api"
+          arch=('x86_64')
+          license=('MIT')
+          depends=('systemd')
+          source=('package')
+          
+          package() {
+            cp -r "$srcdir"/package/* "$pkgdir"/
+          }
+          EOF
+          makepkg -f --noconfirm
+      - name: Upload .pkg.tar.zst artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-patch-api-arch
+          path: *.pkg.tar.zst
+          retention-days: 30
+
+  # Release - Collect all packages
+  release:
+    name: Create Release
+    needs: [build-deb, build-rpm, build-apk, build-arch]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linux-patch-api-*
+          merge-multiple: true
+          path: ./releases/
+      - name: List release artifacts
+        run: ls -la ./releases/
+      - name: Upload to Gitea releases
+        uses: softprops/action-gh-release@v1
+        with:
+          files: releases/*
