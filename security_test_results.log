@@ -1,0 +1,47 @@
+========================================
+Phase 3 Security Testing - Linux_Patch_API
+========================================
+
+=== SECTION 1: mTLS Enforcement Tests ===
+
+Test 1.1: Non-mTLS connection (should be silently dropped)... [0;32m[PASS][0m Non-mTLS connection silently dropped
+Test 1.2: Valid mTLS connection with client cert... [0;32m[PASS][0m Valid mTLS connection successful
+Test 1.3: Self-signed cert (not CA-signed) rejection... [0;32m[PASS][0m Self-signed cert rejected
+
+=== SECTION 2: IP Whitelist Enforcement Tests ===
+
+Test 2.1: Whitelisted IP access... [0;32m[PASS][0m Whitelisted IP has access
+
+=== SECTION 3: API Endpoint Security Tests ===
+
+Test 3.1: GET /health endpoint... [0;32m[PASS][0m Health endpoint responds correctly
+Test 3.2: GET /system/info endpoint... [0;32m[PASS][0m System info endpoint responds
+Test 3.3: GET /packages endpoint... [0;32m[PASS][0m Packages endpoint responds
+Test 3.4: GET /patches endpoint... [0;32m[PASS][0m Patches endpoint responds
+Test 3.5: GET /jobs endpoint... [0;32m[PASS][0m Jobs endpoint responds
+
+=== SECTION 4: Input Validation & Injection Tests ===
+
+Test 4.1: SQL injection in package name... [0;31m[FAIL][0m SQL injection test inconclusive
+Test 4.2: Command injection in package name... [0;31m[FAIL][0m Command injection test inconclusive
+Test 4.3: Path traversal in package name... [0;31m[FAIL][0m Path traversal test inconclusive
+
+=== SECTION 5: Certificate Security Tests ===
+
+Test 5.1: Client certificate validity check... Certificate will not expire
+[0;32m[PASS][0m Client certificate is valid
+Test 5.2: TLS 1.3 enforcement... [0;32m[PASS][0m TLS 1.3 is enforced
+
+=== SECTION 6: Configuration Security Tests ===
+
+Test 6.1: Config file permissions (should be 600/644)... [0;32m[PASS][0m Config file has secure permissions (644)
+Test 6.2: Private key permissions (should be 600)... [0;32m[PASS][0m Private key has secure permissions (600)
+
+========================================
+Security Test Summary
+========================================
+[0;32mPassed:[0m 13
+[0;31mFailed:[0m 3
+Total Tests: 16
+
+[1;33mSome security tests failed - review findings[0m

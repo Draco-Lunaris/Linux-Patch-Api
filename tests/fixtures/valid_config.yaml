@@ -1,0 +1,11 @@
+# Valid test configuration
+server:
+  port: 12443
+  bind: "127.0.0.1"
+
+jobs:
+  max_concurrent: 5
+  timeout_minutes: 30
+
+logging:
+  level: "info"

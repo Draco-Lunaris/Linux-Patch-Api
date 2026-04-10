@@ -1,0 +1,46 @@
+#!/bin/bash
+# preinst script for linux-patch-api
+# Created by package build system
+
+set -e
+
+# Check if this is an upgrade
+if [ -d "/etc/linux_patch_api" ]; then
+    echo "Detected existing installation - performing upgrade"
+fi
+
+# Create system user if it doesn't exist
+if ! getent group linux-patch-api > /dev/null 2>&1; then
+    echo "Creating group linux-patch-api..."
+    groupadd --system linux-patch-api
+fi
+
+if ! getent passwd linux-patch-api > /dev/null 2>&1; then
+    echo "Creating user linux-patch-api..."
+    useradd --system \
+        --gid linux-patch-api \
+        --home-dir /var/lib/linux_patch_api \
+        --no-create-home \
+        --shell /usr/sbin/nologin \
+        --comment "Linux Patch API Service" \
+        linux-patch-api
+fi
+
+# Create required directories
+mkdir -p /etc/linux_patch_api/certs
+mkdir -p /var/lib/linux_patch_api
+mkdir -p /var/log/linux_patch_api
+
+# Set proper ownership
+chown -R linux-patch-api:linux-patch-api /var/lib/linux_patch_api
+chown -R linux-patch-api:linux-patch-api /var/log/linux_patch_api
+
+# Set secure permissions
+chmod 750 /etc/linux_patch_api
+chmod 750 /etc/linux_patch_api/certs
+chmod 755 /var/lib/linux_patch_api
+chmod 755 /var/log/linux_patch_api
+
+echo "Pre-installation checks completed successfully"
+
+exit 0

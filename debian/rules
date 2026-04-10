@@ -1,0 +1,37 @@
+#!/usr/bin/make -f
+# debian/rules for linux-patch-api
+
+export DEB_CARGO_PACKAGE=linux-patch-api
+export DEB_CARGO_BUILD_FLAGS=--release
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --target x86_64-unknown-linux-gnu
+
+override_dh_auto_install:
+	dh_auto_install
+	# Create installation directories
+	mkdir -p debian/linux-patch-api/usr/bin
+	mkdir -p debian/linux-patch-api/etc/linux_patch_api
+	mkdir -p debian/linux-patch-api/lib/systemd/system
+	mkdir -p debian/linux-patch-api/var/log/linux_patch_api
+	mkdir -p debian/linux-patch-api/var/lib/linux_patch_api
+	# Install binary
+	cp target/x86_64-unknown-linux-gnu/release/linux-patch-api debian/linux-patch-api/usr/bin/
+	chmod 755 debian/linux-patch-api/usr/bin/linux-patch-api
+	# Install systemd service
+	cp configs/linux-patch-api.service debian/linux-patch-api/lib/systemd/system/
+	chmod 644 debian/linux-patch-api/lib/systemd/system/linux-patch-api.service
+	# Install example configs (will be copied to /etc on first install)
+	cp configs/config.yaml.example debian/linux-patch-api/etc/linux_patch_api/config.yaml.example
+	cp configs/whitelist.yaml.example debian/linux-patch-api/etc/linux_patch_api/whitelist.yaml.example
+	chmod 644 debian/linux-patch-api/etc/linux_patch_api/*.example
+
+override_dh_strip_nondeterminism:
+	# Disable for reproducible builds with cargo
+	dh_strip_nondeterminism --disable
+
+override_dh_shlibdeps:
+	dh_shlibdeps -- --dpkg-shlibdeps-params=--ignore-missing-info

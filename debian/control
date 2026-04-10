@@ -1,0 +1,34 @@
+Source: linux-patch-api
+Section: admin
+Priority: optional
+Maintainer: Echo <echo@moon-dragon.us>
+Build-Depends: debhelper (>= 12),
+               cargo,
+               rustc,
+               libsystemd-dev,
+               pkg-config
+Standards-Version: 4.6.0
+Homepage: https://gitea.moon-dragon.us/echo/linux_patch_api
+Vcs-Git: https://gitea.moon-dragon.us/echo/linux_patch_api.git
+Vcs-Browser: https://gitea.moon-dragon.us/echo/linux_patch_api
+
+Package: linux-patch-api
+Architecture: amd64
+Depends: systemd,
+         libsystemd0,
+         ${shlibs:Depends},
+         ${misc:Depends}
+Description: Secure remote package management API for Linux systems
+ Linux Patch API provides a secure, mTLS-authenticated REST API for
+ remote package management operations including:
+  - Package installation and removal
+  - Security patch application
+  - System health monitoring
+  - Job queue management with WebSocket status streaming
+ .
+ Features:
+  - Mutual TLS (mTLS) authentication
+  - IP whitelist enforcement
+  - Asynchronous job processing
+  - Comprehensive audit logging
+  - Systemd integration with security hardening

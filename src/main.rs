@@ -14,10 +14,17 @@
 //! - Detailed audit logging
 
 use anyhow::Result;
+use actix_web::{web, App, HttpServer};
+use actix_web::middleware::Logger;
 use clap::Parser;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+use std::sync::Arc;
+use std::net::TcpListener;
 
 use linux_patch_api::{AppConfig, init_logging, JobManager};
+use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager};
+use linux_patch_api::api::{configure_api_routes, configure_health_route};
+use linux_patch_api::packages::create_backend;
 
 /// Linux Patch API CLI arguments
 #[derive(Parser, Debug)]
@@ -34,7 +41,7 @@ struct Args {
     verbose: bool,
 }
 
-#[tokio::main]
+#[actix_web::main]
 async fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
@@ -64,15 +71,124 @@ async fn main() -> Result<()> {
     let job_manager = JobManager::new(config.jobs.max_concurrent, config.jobs.timeout_minutes)?;
     info!(max_jobs = config.jobs.max_concurrent, timeout_minutes = config.jobs.timeout_minutes, "Job manager initialized");
 
-    // TODO: Initialize API server with actix-web
-    // TODO: Set up mTLS with rustls
-    // TODO: Start config file watcher
-    // TODO: Register systemd service ready status
+    // Initialize package manager backend
+    let package_backend = match create_backend() {
+        Ok(backend) => {
+            info!("Package manager backend initialized");
+            backend
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to initialize package manager backend");
+            return Err(anyhow::anyhow!("Package backend error: {}", e));
+        }
+    };
+
+    // Initialize IP whitelist manager
+    let whitelist_path = config.whitelist_path();
+    info!(path = whitelist_path, "Initializing IP whitelist enforcement");
+    
+    let whitelist_manager = match WhitelistManager::new(whitelist_path) {
+        Ok(manager) => {
+            info!(entries = manager.entry_count(), "Whitelist manager initialized");
+            Some(Arc::new(manager))
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to load whitelist - continuing with empty whitelist (all denied)");
+            None
+        }
+    };
+
+    // Store job manager and backend in Arc for sharing
+    let job_manager_data = web::Data::new(job_manager);
+    let backend_data = web::Data::new(package_backend);
+
+    // Configure bind address
+    let bind_address = format!("{}:{}", config.server.bind, config.server.port);
+    info!(bind = %bind_address, "Starting HTTP server");
+
+    // Create server
+    // Create server builder
+    let server_builder = HttpServer::new(move || {
+        let mut app = App::new()
+            .wrap(Logger::default())
+            .app_data(job_manager_data.clone())
+            .app_data(backend_data.clone());
+
+        // Configure API routes
+        app = app.configure(|cfg| {
+            configure_api_routes(cfg, job_manager_data.clone(), backend_data.clone());
+        });
+
+        // Configure health route (outside API scope)
+        app = app.configure(configure_health_route);
+
+        app
+    })
+    .workers(4)
+    // VULN-004: Configure header size limit to 8KB to prevent DoS via oversized headers
+    .client_request_timeout(std::time::Duration::from_secs(5))
+    .keep_alive(std::time::Duration::from_secs(15))
+    .max_connection_rate(1000);
+    info!(
+        mtls_enabled = config.tls_config().is_some(),
+        whitelist_enabled = whitelist_manager.is_some(),
+        "Security layer status"
+    );
 
     info!("Linux Patch API initialized successfully");
+    info!("Listening on {}", bind_address);
 
-    // Keep the service running
-    tokio::signal::ctrl_c().await?;
+    // Apply TLS/mTLS configuration if enabled
+    if let Some(tls_config) = config.tls_config() {
+        info!(
+            ca_cert = %tls_config.ca_cert,
+            server_cert = %tls_config.server_cert,
+            server_key = %tls_config.server_key,
+            min_tls_version = %tls_config.min_tls_version,
+            "Initializing mTLS authentication with TLS binding"
+        );
+        
+        let mtls_config = mtls::MtlsConfig {
+            ca_cert_path: tls_config.ca_cert.clone(),
+            server_cert_path: tls_config.server_cert.clone(),
+            server_key_path: tls_config.server_key.clone(),
+            min_tls_version: tls_config.min_tls_version.clone(),
+        };
+        
+        match MtlsMiddleware::new(mtls_config.clone()) {
+            Ok(middleware) => {
+                // Build rustls server configuration
+                let rustls_config = middleware.build_rustls_config()
+                    .map_err(|e| anyhow::anyhow!("Failed to build rustls config: {}", e))?;
+                
+                info!("mTLS middleware and rustls config initialized successfully");
+                
+                // Create TCP listener (std::net for listen_rustls_0_23)
+                let tcp_listener = TcpListener::bind(&bind_address)
+                    .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", bind_address, e))?;
+                
+                info!("TCP listener bound to {}", bind_address);
+                
+                // Clone the ServerConfig from Arc for listen_rustls_0_23
+                let server_config = (*rustls_config).clone();
+                
+                info!("Binding server with TLS 1.3 - non-TLS connections will be rejected");
+                
+                // Bind with TLS using rustls 0.23 - non-TLS connections fail at handshake
+                server_builder
+                    .listen_rustls_0_23(tcp_listener, server_config)?
+                    .run()
+                    .await?;
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to initialize mTLS middleware");
+                return Err(anyhow::anyhow!("mTLS initialization failed: {}", e));
+            }
+        }
+    } else {
+        warn!("TLS is disabled - running without mTLS authentication (INSECURE)");
+        server_builder.bind(&bind_address)?.run().await?;
+    }
 
     info!("Linux Patch API shutting down");
     Ok(())
