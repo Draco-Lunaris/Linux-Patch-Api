@@ -15,6 +15,7 @@ jobs:
   fmt:
     name: Code Format
     runs-on: linux
+    container: node:18
     steps:
       - uses: actions/checkout@v2
         with:
@@ -28,6 +29,7 @@ jobs:
   clippy:
     name: Clippy Lints
     runs-on: linux
+    container: node:18
     steps:
       - uses: actions/checkout@v2
         with:
@@ -43,6 +45,7 @@ jobs:
   test:
     name: Unit Tests
     runs-on: linux
+    container: node:18
     steps:
       - uses: actions/checkout@v2
         with:
@@ -59,6 +62,7 @@ jobs:
   audit:
     name: Security Audit
     runs-on: linux
+    container: node:18
     steps:
       - uses: actions/checkout@v2
         with:
@@ -223,6 +227,7 @@ jobs:
     name: Create Release
     needs: [build-deb, build-rpm, build-apk, build-arch]
     runs-on: linux
+    container: node:18
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
