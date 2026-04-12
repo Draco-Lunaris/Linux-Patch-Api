@@ -13,18 +13,18 @@
 //! - IP whitelist enforced (deny by default)
 //! - Detailed audit logging
 
-use anyhow::Result;
-use actix_web::{web, App, HttpServer};
 use actix_web::middleware::Logger;
+use actix_web::{web, App, HttpServer};
+use anyhow::Result;
 use clap::Parser;
-use tracing::{error, info, warn};
-use std::sync::Arc;
 use std::net::TcpListener;
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
-use linux_patch_api::{AppConfig, init_logging, JobManager};
-use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager};
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
+use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager};
 use linux_patch_api::packages::create_backend;
+use linux_patch_api::{init_logging, AppConfig, JobManager};
 
 /// Linux Patch API CLI arguments
 #[derive(Parser, Debug)]
@@ -58,7 +58,11 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = match AppConfig::load(&args.config) {
         Ok(cfg) => {
-            info!(port = cfg.server.port, bind = &cfg.server.bind, "Configuration loaded");
+            info!(
+                port = cfg.server.port,
+                bind = &cfg.server.bind,
+                "Configuration loaded"
+            );
             cfg
         }
         Err(e) => {
@@ -69,7 +73,11 @@ async fn main() -> Result<()> {
 
     // Initialize job manager
     let job_manager = JobManager::new(config.jobs.max_concurrent, config.jobs.timeout_minutes)?;
-    info!(max_jobs = config.jobs.max_concurrent, timeout_minutes = config.jobs.timeout_minutes, "Job manager initialized");
+    info!(
+        max_jobs = config.jobs.max_concurrent,
+        timeout_minutes = config.jobs.timeout_minutes,
+        "Job manager initialized"
+    );
 
     // Initialize package manager backend
     let package_backend = match create_backend() {
@@ -85,11 +93,17 @@ async fn main() -> Result<()> {
 
     // Initialize IP whitelist manager
     let whitelist_path = config.whitelist_path();
-    info!(path = whitelist_path, "Initializing IP whitelist enforcement");
-    
+    info!(
+        path = whitelist_path,
+        "Initializing IP whitelist enforcement"
+    );
+
     let whitelist_manager = match WhitelistManager::new(whitelist_path) {
         Ok(manager) => {
-            info!(entries = manager.entry_count(), "Whitelist manager initialized");
+            info!(
+                entries = manager.entry_count(),
+                "Whitelist manager initialized"
+            );
             Some(Arc::new(manager))
         }
         Err(e) => {
@@ -147,33 +161,34 @@ async fn main() -> Result<()> {
             min_tls_version = %tls_config.min_tls_version,
             "Initializing mTLS authentication with TLS binding"
         );
-        
+
         let mtls_config = mtls::MtlsConfig {
             ca_cert_path: tls_config.ca_cert.clone(),
             server_cert_path: tls_config.server_cert.clone(),
             server_key_path: tls_config.server_key.clone(),
             min_tls_version: tls_config.min_tls_version.clone(),
         };
-        
+
         match MtlsMiddleware::new(mtls_config.clone()) {
             Ok(middleware) => {
                 // Build rustls server configuration
-                let rustls_config = middleware.build_rustls_config()
+                let rustls_config = middleware
+                    .build_rustls_config()
                     .map_err(|e| anyhow::anyhow!("Failed to build rustls config: {}", e))?;
-                
+
                 info!("mTLS middleware and rustls config initialized successfully");
-                
+
                 // Create TCP listener (std::net for listen_rustls_0_23)
                 let tcp_listener = TcpListener::bind(&bind_address)
                     .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", bind_address, e))?;
-                
+
                 info!("TCP listener bound to {}", bind_address);
-                
+
                 // Clone the ServerConfig from Arc for listen_rustls_0_23
                 let server_config = (*rustls_config).clone();
-                
+
                 info!("Binding server with TLS 1.3 - non-TLS connections will be rejected");
-                
+
                 // Bind with TLS using rustls 0.23 - non-TLS connections fail at handshake
                 server_builder
                     .listen_rustls_0_23(tcp_listener, server_config)?

@@ -42,19 +42,19 @@ impl WhitelistManager {
     /// Create a new whitelist manager
     pub fn new(config_path: &str) -> Result<Self> {
         let entries = Arc::new(RwLock::new(HashSet::new()));
-        
+
         let mut manager = Self {
             entries: entries.clone(),
             config_path: config_path.to_string(),
             watcher: None,
         };
-        
+
         // Load initial whitelist
         manager.reload()?;
-        
+
         // Set up file watcher for auto-reload
         manager.setup_watcher()?;
-        
+
         Ok(manager)
     }
 
@@ -62,26 +62,27 @@ impl WhitelistManager {
     pub fn reload(&self) -> Result<()> {
         let config = self.load_config()?;
         let entries = self.parse_entries(&config.entries)?;
-        
-        let mut current_entries = self.entries.write().map_err(|e| {
-            anyhow::anyhow!("Failed to acquire whitelist lock: {}", e)
-        })?;
-        
+
+        let mut current_entries = self
+            .entries
+            .write()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire whitelist lock: {}", e))?;
+
         *current_entries = entries;
-        
+
         info!(
             path = %self.config_path,
             count = current_entries.len(),
             "Whitelist reloaded successfully"
         );
-        
+
         Ok(())
     }
 
     /// Check if an IP address is allowed
     pub fn is_allowed(&self, ip: &Ipv4Addr) -> bool {
         let entries = self.entries.read().unwrap();
-        
+
         for entry in entries.iter() {
             match entry {
                 WhitelistEntry::Ip(allowed_ip) => {
@@ -101,7 +102,7 @@ impl WhitelistManager {
                 }
             }
         }
-        
+
         false
     }
 
@@ -126,38 +127,38 @@ impl WhitelistManager {
     fn load_config(&self) -> Result<WhitelistConfig> {
         let content = std::fs::read_to_string(&self.config_path)
             .with_context(|| format!("Failed to read whitelist config: {}", self.config_path))?;
-        
+
         let config: WhitelistConfig = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse whitelist config: {}", self.config_path))?;
-        
+
         Ok(config)
     }
 
     /// Parse whitelist entries from strings
     fn parse_entries(&self, entries: &[String]) -> Result<HashSet<WhitelistEntry>> {
         let mut parsed = HashSet::new();
-        
+
         for entry_str in entries {
             let entry_str = entry_str.trim();
-            
+
             // Skip comments and empty lines
             if entry_str.is_empty() || entry_str.starts_with('#') {
                 continue;
             }
-            
+
             // Check for CIDR notation
             if let Some((ip_str, prefix_str)) = entry_str.split_once('/') {
-                let ip: Ipv4Addr = ip_str.parse().with_context(|| {
-                    format!("Invalid IP in CIDR notation: {}", entry_str)
-                })?;
-                let prefix: u8 = prefix_str.parse().with_context(|| {
-                    format!("Invalid prefix in CIDR notation: {}", entry_str)
-                })?;
-                
+                let ip: Ipv4Addr = ip_str
+                    .parse()
+                    .with_context(|| format!("Invalid IP in CIDR notation: {}", entry_str))?;
+                let prefix: u8 = prefix_str
+                    .parse()
+                    .with_context(|| format!("Invalid prefix in CIDR notation: {}", entry_str))?;
+
                 if prefix > 32 {
                     anyhow::bail!("Invalid CIDR prefix (must be 0-32): {}", entry_str);
                 }
-                
+
                 parsed.insert(WhitelistEntry::Cidr {
                     network: ip,
                     prefix,
@@ -185,7 +186,7 @@ impl WhitelistManager {
                 }
             }
         }
-        
+
         Ok(parsed)
     }
 
@@ -193,7 +194,7 @@ impl WhitelistManager {
     fn setup_watcher(&mut self) -> Result<()> {
         let config_path = self.config_path.clone();
         let entries = self.entries.clone();
-        
+
         let watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res {
@@ -208,19 +209,19 @@ impl WhitelistManager {
             },
             Config::default().with_poll_interval(Duration::from_secs(5)),
         )?;
-        
+
         let mut watcher = watcher;
         let path = Path::new(&config_path);
-        
+
         if path.exists() {
             watcher.watch(path, RecursiveMode::NonRecursive)?;
             info!("Watching whitelist file for changes: {}", config_path);
         } else {
             warn!("Whitelist file does not exist yet: {}", config_path);
         }
-        
+
         self.watcher = Some(watcher);
-        
+
         Ok(())
     }
 }
@@ -234,24 +235,24 @@ fn ip_in_subnet(ip: &Ipv4Addr, network: Ipv4Addr, prefix: u8) -> bool {
     } else {
         !0u32 << (32 - prefix)
     };
-    
+
     (ip_bits & mask) == (network_bits & mask)
 }
 
 /// Resolve a hostname to an IPv4 address
 fn resolve_hostname(hostname: &str) -> Result<Ipv4Addr> {
     use std::net::ToSocketAddrs;
-    
+
     let addrs = (hostname, 0)
         .to_socket_addrs()
         .with_context(|| format!("Failed to resolve hostname: {}", hostname))?;
-    
+
     for addr in addrs {
         if let IpAddr::V4(ip) = addr.ip() {
             return Ok(ip);
         }
     }
-    
+
     anyhow::bail!("No IPv4 address found for hostname: {}", hostname)
 }
 
@@ -337,11 +338,11 @@ mod tests {
             std::fs::write(temp_path, "entries:\n  - \"192.168.1.0/24\"\n").unwrap();
             WhitelistManager::new(temp_path).unwrap()
         });
-        
+
         // Test IP entry
         let ip: Ipv4Addr = "192.168.1.100".parse().unwrap();
         assert!(manager.is_allowed(&ip));
-        
+
         // Test IP outside subnet
         let ip_outside: Ipv4Addr = "192.168.2.100".parse().unwrap();
         assert!(!manager.is_allowed(&ip_outside));

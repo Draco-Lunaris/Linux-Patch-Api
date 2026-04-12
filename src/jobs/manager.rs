@@ -3,12 +3,12 @@
 //! Manages async job execution with concurrency limits and timeout enforcement.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
-use std::collections::HashMap;
 
 /// Job status
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -141,10 +141,10 @@ impl JobManager {
     pub async fn create_job(&self, operation: JobOperation, packages: Vec<String>) -> Result<Uuid> {
         let job = Job::new(operation, packages);
         let job_id = job.id;
-        
+
         let mut jobs = self.jobs.write().await;
         jobs.insert(job_id, job);
-        
+
         Ok(job_id)
     }
 
@@ -155,9 +155,15 @@ impl JobManager {
     }
 
     /// Update a job's status
-    pub async fn update_job(&self, job_id: &Uuid, status: JobStatus, progress: Option<u8>, message: Option<String>) -> Result<()> {
+    pub async fn update_job(
+        &self,
+        job_id: &Uuid,
+        status: JobStatus,
+        progress: Option<u8>,
+        message: Option<String>,
+    ) -> Result<()> {
         let mut jobs = self.jobs.write().await;
-        
+
         if let Some(job) = jobs.get_mut(job_id) {
             job.status = status;
             if let Some(p) = progress {
@@ -168,40 +174,40 @@ impl JobManager {
             }
             job.updated_at = Utc::now();
         }
-        
+
         Ok(())
     }
 
     /// Add a log entry to a job
     pub async fn add_job_log(&self, job_id: &Uuid, message: String) -> Result<()> {
         let mut jobs = self.jobs.write().await;
-        
+
         if let Some(job) = jobs.get_mut(job_id) {
             job.add_log(message);
         }
-        
+
         Ok(())
     }
 
     /// Mark a job as completed
     pub async fn complete_job(&self, job_id: &Uuid) -> Result<()> {
         let mut jobs = self.jobs.write().await;
-        
+
         if let Some(job) = jobs.get_mut(job_id) {
             job.complete();
         }
-        
+
         Ok(())
     }
 
     /// Mark a job as failed
     pub async fn fail_job(&self, job_id: &Uuid, error: String) -> Result<()> {
         let mut jobs = self.jobs.write().await;
-        
+
         if let Some(job) = jobs.get_mut(job_id) {
             job.fail(error);
         }
-        
+
         Ok(())
     }
 
@@ -209,25 +215,27 @@ impl JobManager {
     pub async fn list_jobs(&self, status_filter: Option<JobStatus>, limit: usize) -> Vec<Job> {
         let jobs = self.jobs.read().await;
         let mut result: Vec<Job> = jobs.values().cloned().collect();
-        
+
         // Filter by status if provided
         if let Some(status) = status_filter {
             result.retain(|j| j.status == status);
         }
-        
+
         // Sort by created_at descending (newest first)
         result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        
+
         // Apply limit
         result.truncate(limit);
-        
+
         result
     }
 
     /// Get count of running jobs
     pub async fn running_count(&self) -> usize {
         let jobs = self.jobs.read().await;
-        jobs.values().filter(|j| j.status == JobStatus::Running).count()
+        jobs.values()
+            .filter(|j| j.status == JobStatus::Running)
+            .count()
     }
 
     /// Check if can accept new job (respecting max_concurrent)
@@ -238,15 +246,21 @@ impl JobManager {
     /// Delete a completed/failed job from history
     pub async fn delete_job(&self, job_id: &Uuid) -> Result<bool> {
         let mut jobs = self.jobs.write().await;
-        
+
         if let Some(job) = jobs.get(job_id) {
             // Only allow deletion of completed/failed/cancelled jobs
-            if matches!(job.status, JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled | JobStatus::TimedOut) {
+            if matches!(
+                job.status,
+                JobStatus::Completed
+                    | JobStatus::Failed
+                    | JobStatus::Cancelled
+                    | JobStatus::TimedOut
+            ) {
                 jobs.remove(job_id);
                 return Ok(true);
             }
         }
-        
+
         Ok(false)
     }
 
@@ -256,15 +270,17 @@ impl JobManager {
             let jobs = self.jobs.read().await;
             jobs.get(original_job_id).cloned()
         };
-        
+
         if let Some(original_job) = original_job {
             // Only allow rollback of failed/completed jobs
-            if matches!(original_job.status, JobStatus::Failed | JobStatus::Completed) {
-                let rollback_job_id = self.create_job(
-                    JobOperation::Rollback,
-                    original_job.packages.clone()
-                ).await?;
-                
+            if matches!(
+                original_job.status,
+                JobStatus::Failed | JobStatus::Completed
+            ) {
+                let rollback_job_id = self
+                    .create_job(JobOperation::Rollback, original_job.packages.clone())
+                    .await?;
+
                 // Mark as exclusive mode
                 {
                     let mut jobs = self.jobs.write().await;
@@ -273,11 +289,11 @@ impl JobManager {
                         rollback_job.rollback_job_id = Some(*original_job_id);
                     }
                 }
-                
+
                 return Ok(Some(rollback_job_id));
             }
         }
-        
+
         Ok(None)
     }
 }

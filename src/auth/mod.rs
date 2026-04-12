@@ -9,8 +9,8 @@
 pub mod mtls;
 pub mod whitelist;
 
-pub use mtls::{MtlsConfig, MtlsMiddleware, MtlsError, ClientCertInfo};
-pub use whitelist::{WhitelistManager, WhitelistMiddleware, WhitelistEntry, WhitelistConfig};
+pub use mtls::{ClientCertInfo, MtlsConfig, MtlsError, MtlsMiddleware};
+pub use whitelist::{WhitelistConfig, WhitelistEntry, WhitelistManager, WhitelistMiddleware};
 
 /// Combined authentication result
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ mod tests {
             cert_info: None,
             client_ip: Some("192.168.1.100".parse().unwrap()),
         };
-        
+
         assert!(result.is_authenticated());
         assert!(result.mtls_valid);
         assert!(result.ip_allowed);
@@ -58,7 +58,7 @@ mod tests {
             cert_info: None,
             client_ip: Some("192.168.1.100".parse().unwrap()),
         };
-        
+
         assert!(!result.is_authenticated());
     }
 
@@ -70,7 +70,7 @@ mod tests {
             cert_info: None,
             client_ip: Some("192.168.1.100".parse().unwrap()),
         };
-        
+
         assert!(!result.is_authenticated());
     }
 }

@@ -4,9 +4,9 @@ usr/bin/linux-patch-api usr/bin/
 # Systemd service
 lib/systemd/system/linux-patch-api.service lib/systemd/system/
 
-# Configuration files (examples, actual configs managed by conffiles)
-etc/linux_patch_api/config.yaml.example etc/linux_patch_api/
-etc/linux_patch_api/whitelist.yaml.example etc/linux_patch_api/
+# Configuration files
+etc/linux_patch_api/config.yaml etc/linux_patch_api/
+etc/linux_patch_api/whitelist.yaml etc/linux_patch_api/
 
 # Create directories (handled by maintainer scripts)
 # var/log/linux_patch_api/

@@ -6,11 +6,11 @@
 //! Note: Full WebSocket implementation requires actix-web-actors compatibility.
 //! This stub provides the endpoint structure for future enhancement.
 
-use actix_web::{web, HttpRequest, HttpResponse, Error, http::StatusCode};
+use actix_web::{http::StatusCode, web, Error, HttpRequest, HttpResponse};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use uuid::Uuid;
-use chrono::Utc;
 
 use crate::jobs::manager::JobManager;
 
@@ -24,9 +24,7 @@ pub enum WsClientMessage {
         job_id: Option<String>,
     },
     #[serde(rename = "unsubscribe")]
-    Unsubscribe {
-        job_id: String,
-    },
+    Unsubscribe { job_id: String },
 }
 
 /// WebSocket message to client
@@ -72,7 +70,7 @@ pub async fn websocket_handler(
 ) -> Result<HttpResponse, Error> {
     let ws_id = Uuid::new_v4();
     info!(ws_id = %ws_id, "WebSocket connection request");
-    
+
     // Check if this is a WebSocket upgrade request
     if req
         .headers()
@@ -84,7 +82,7 @@ pub async fn websocket_handler(
         // WebSocket upgrade requested
         // In full implementation, this would use actix-web-actors::ws::start()
         // For now, return a response indicating WebSocket support
-        
+
         let response_msg = serde_json::json!({
             "event": "connected",
             "ws_id": ws_id.to_string(),
@@ -92,7 +90,7 @@ pub async fn websocket_handler(
             "message": "WebSocket endpoint ready. Full implementation requires actix-web-actors compatibility.",
             "polling_alternative": "Use GET /api/v1/jobs/{id} for job status polling"
         });
-        
+
         // Return HTTP 101 Switching Protocols for WebSocket upgrade
         // In production, this would be handled by actix-web-actors
         Ok(HttpResponse::build(StatusCode::SWITCHING_PROTOCOLS)
@@ -113,7 +111,7 @@ pub async fn websocket_handler(
             },
             "alternative": "Use GET /api/v1/jobs/{id} for job status polling"
         });
-        
+
         Ok(HttpResponse::Ok().json(info_msg))
     }
 }

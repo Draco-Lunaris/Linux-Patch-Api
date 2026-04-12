@@ -3,13 +3,15 @@
 //! Provides mutual TLS authentication middleware for Actix-web.
 //! Non-mTLS connections are silently dropped (no response).
 
+use actix_web::http::header;
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpMessage,
 };
+use chrono::{DateTime, Duration, Utc};
 use futures_util::future::LocalBoxFuture;
 use rustls::{
-    server::{WebPkiClientVerifier, ServerConfig},
+    server::{ServerConfig, WebPkiClientVerifier},
     RootCertStore,
 };
 use rustls_pemfile::{certs, private_key};
@@ -20,14 +22,12 @@ use std::{
     task::{Context, Poll},
 };
 use tracing::{debug, info, warn};
-use chrono::{DateTime, Utc, Duration};
-use actix_web::http::header;
 
 /// Check for duplicate critical headers (VULN-006)
 /// Returns true if duplicate headers are detected
 fn has_duplicate_critical_headers(req: &ServiceRequest) -> bool {
     let critical_headers = ["content-type", "authorization", "host"];
-    
+
     for header_name in critical_headers.iter() {
         // Count occurrences of this header
         let mut count = 0;
@@ -67,7 +67,7 @@ impl MtlsMiddleware {
     /// Create a new mTLS middleware
     pub fn new(config: MtlsConfig) -> Result<Self, MtlsError> {
         let cert_store = load_ca_certs(&config.ca_cert_path)?;
-        
+
         Ok(Self {
             config: Arc::new(config),
             cert_store: Arc::new(cert_store),
@@ -95,21 +95,21 @@ impl MtlsMiddleware {
 /// Load CA certificates from PEM file
 fn load_ca_certs(path: &str) -> Result<RootCertStore, MtlsError> {
     let mut cert_store = RootCertStore::empty();
-    
+
     let cert_file = File::open(path)
         .map_err(|e| MtlsError::IoError(format!("Failed to open CA cert {}: {}", path, e)))?;
     let mut reader = BufReader::new(cert_file);
-    
+
     let certs = certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| MtlsError::ParseError(format!("Failed to parse CA certs: {}", e)))?;
-    
+
     for cert in certs {
-        cert_store.add(cert).map_err(|e| {
-            MtlsError::StoreError(format!("Failed to add CA cert to store: {}", e))
-        })?;
+        cert_store
+            .add(cert)
+            .map_err(|e| MtlsError::StoreError(format!("Failed to add CA cert to store: {}", e)))?;
     }
-    
+
     info!("Loaded CA certificates from {}", path);
     Ok(cert_store)
 }
@@ -119,11 +119,11 @@ fn load_certs(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'stati
     let cert_file = File::open(path)
         .map_err(|e| MtlsError::IoError(format!("Failed to open cert {}: {}", path, e)))?;
     let mut reader = BufReader::new(cert_file);
-    
+
     let certs = certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| MtlsError::ParseError(format!("Failed to parse server certs: {}", e)))?;
-    
+
     Ok(certs)
 }
 
@@ -132,11 +132,11 @@ fn load_private_key(path: &str) -> Result<rustls::pki_types::PrivateKeyDer<'stat
     let key_file = File::open(path)
         .map_err(|e| MtlsError::IoError(format!("Failed to open key {}: {}", path, e)))?;
     let mut reader = BufReader::new(key_file);
-    
+
     let key = private_key(&mut reader)
         .map_err(|e| MtlsError::ParseError(format!("Failed to parse private key: {}", e)))?
         .ok_or_else(|| MtlsError::ParseError("No private key found in file".to_string()))?;
-    
+
     Ok(key)
 }
 
@@ -199,7 +199,7 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let cert_store = self.cert_store.clone();
         let peer_addr = req.peer_addr();
-        
+
         // VULN-006: Check for duplicate critical headers before processing
         if has_duplicate_critical_headers(&req) {
             warn!(
@@ -207,15 +207,17 @@ where
                 "Duplicate critical headers detected - rejecting request (VULN-006)"
             );
             return Box::pin(async move {
-                Err(actix_web::error::ErrorBadRequest("Duplicate critical headers not allowed"))
+                Err(actix_web::error::ErrorBadRequest(
+                    "Duplicate critical headers not allowed",
+                ))
             });
         }
-        
+
         // Check for client certificate in request extensions
         // In a proper mTLS setup with Actix-web + rustls, the certificate
         // would be extracted from the TLS connection before reaching this middleware
         let has_client_cert = req.extensions().get::<ClientCertInfo>().is_some();
-        
+
         if !has_client_cert {
             // No client certificate provided - silent drop
             warn!(
@@ -224,13 +226,15 @@ where
             );
             // Return error immediately without calling service
             return Box::pin(async move {
-                Err(actix_web::error::ErrorBadRequest("Client certificate required"))
+                Err(actix_web::error::ErrorBadRequest(
+                    "Client certificate required",
+                ))
             });
         }
-        
+
         // Certificate present - validate it
         let cert_info = req.extensions().get::<ClientCertInfo>().cloned();
-        
+
         if let Some(info) = cert_info {
             // Validate certificate against CA store
             match validate_client_certificate(&info, &cert_store) {
@@ -249,7 +253,9 @@ where
                         "mTLS client certificate validation failed - dropping connection"
                     );
                     return Box::pin(async move {
-                        Err(actix_web::error::ErrorBadRequest("Certificate validation failed"))
+                        Err(actix_web::error::ErrorBadRequest(
+                            "Certificate validation failed",
+                        ))
                     });
                 }
             }
@@ -259,17 +265,17 @@ where
                 "No client certificate provided - dropping connection (mTLS required)"
             );
             return Box::pin(async move {
-                Err(actix_web::error::ErrorBadRequest("Client certificate required"))
+                Err(actix_web::error::ErrorBadRequest(
+                    "Client certificate required",
+                ))
             });
         }
-        
+
         debug!("mTLS authentication passed for request");
-        
+
         // All checks passed - call the service
         let fut = self.service.call(req);
-        Box::pin(async move {
-            fut.await
-        })
+        Box::pin(async move { fut.await })
     }
 }
 
@@ -290,22 +296,22 @@ fn validate_client_certificate(
 ) -> Result<(), MtlsError> {
     // Check certificate validity period
     let now = Utc::now();
-    
+
     if now < cert_info.not_before {
         return Err(MtlsError::ValidationError(
-            "Certificate is not yet valid".to_string()
+            "Certificate is not yet valid".to_string(),
         ));
     }
-    
+
     if now > cert_info.not_after {
         return Err(MtlsError::ValidationError(
-            "Certificate has expired".to_string()
+            "Certificate has expired".to_string(),
         ));
     }
-    
+
     // In production, would verify certificate chain against CA store
     // For now, we trust certificates that were extracted from the TLS connection
-    
+
     Ok(())
 }
 
@@ -321,7 +327,7 @@ mod tests {
             server_key_path: "/etc/linux_patch_api/certs/server.key".to_string(),
             min_tls_version: "1.3".to_string(),
         };
-        
+
         assert_eq!(config.ca_cert_path, "/etc/linux_patch_api/certs/ca.pem");
         assert_eq!(config.min_tls_version, "1.3");
     }
@@ -335,15 +341,15 @@ mod tests {
             not_before: Utc::now() - Duration::days(1),
             not_after: Utc::now() + Duration::days(365),
         };
-        
+
         assert!(info.subject.contains("CN="));
         assert!(info.issuer.contains("CN="));
-        
+
         // Test validation with valid cert
         let cert_store = RootCertStore::empty();
         assert!(validate_client_certificate(&info, &cert_store).is_ok());
     }
-    
+
     #[test]
     fn test_client_cert_expired() {
         let info = ClientCertInfo {
@@ -353,7 +359,7 @@ mod tests {
             not_before: Utc::now() - Duration::days(365),
             not_after: Utc::now() - Duration::days(1),
         };
-        
+
         let cert_store = RootCertStore::empty();
         let result = validate_client_certificate(&info, &cert_store);
         assert!(result.is_err());

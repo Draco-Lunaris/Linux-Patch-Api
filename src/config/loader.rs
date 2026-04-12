@@ -122,10 +122,10 @@ impl AppConfig {
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
-        
+
         let config: AppConfig = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path))?;
-        
+
         // Validate TLS configuration if enabled
         if let Some(ref tls) = config.tls {
             if tls.enabled {
@@ -140,7 +140,7 @@ impl AppConfig {
                 }
             }
         }
-        
+
         Ok(config)
     }
 
@@ -165,8 +165,12 @@ mod tests {
     #[test]
     fn test_config_load_valid_yaml() {
         let result = AppConfig::load("tests/fixtures/valid_config.yaml");
-        assert!(result.is_ok(), "Failed to load valid config: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Failed to load valid config: {:?}",
+            result.err()
+        );
+
         let config = result.unwrap();
         assert_eq!(config.server.port, 12443);
         assert_eq!(config.server.bind, "127.0.0.1");
@@ -187,10 +191,10 @@ mod tests {
     fn test_config_load_invalid_yaml() {
         let invalid_path = "/tmp/invalid_config_test.yaml";
         std::fs::write(invalid_path, "invalid: yaml: content: [").unwrap();
-        
+
         let result = AppConfig::load(invalid_path);
         assert!(result.is_err(), "Should fail for invalid yaml");
-        
+
         std::fs::remove_file(invalid_path).unwrap();
     }
 
@@ -263,6 +267,9 @@ mod tests {
 
         assert!(config.tls_config().is_some());
         assert_eq!(config.tls_config().unwrap().min_tls_version, "1.3");
-        assert_eq!(config.whitelist_path(), "/etc/linux_patch_api/whitelist.yaml");
+        assert_eq!(
+            config.whitelist_path(),
+            "/etc/linux_patch_api/whitelist.yaml"
+        );
     }
 }

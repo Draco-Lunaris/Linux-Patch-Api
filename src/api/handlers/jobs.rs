@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::jobs::manager::{JobManager, JobOperation, JobStatus, Job};
+use crate::jobs::manager::{Job, JobManager, JobOperation, JobStatus};
 
 use super::packages::{ApiResponse, JobResponseData};
 

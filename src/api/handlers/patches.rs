@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
 use crate::packages::PackageManagerBackend;
 
-use super::packages::{ApiResponse, ApiError, JobResponseData};
+use super::packages::{ApiError, ApiResponse, JobResponseData};
 
 /// Patch list response data
 #[derive(Debug, Serialize)]
@@ -48,11 +48,11 @@ pub async fn list_patches(
     match backend.list_patches() {
         Ok(patches) => {
             let total = patches.len();
-            let security_updates = patches.iter()
+            let security_updates = patches
+                .iter()
                 .filter(|p| p.severity == "critical" || p.severity == "high")
                 .count();
-            let requires_reboot = patches.iter()
-                .any(|p| p.name.contains("kernel"));
+            let requires_reboot = patches.iter().any(|p| p.name.contains("kernel"));
 
             let response = ApiResponse::success(PatchListData {
                 patches,
@@ -96,7 +96,10 @@ pub async fn apply_patches(
 
     // Create async job
     let package_list = body.packages.clone().unwrap_or_default();
-    match job_manager.create_job(JobOperation::PatchApply, package_list).await {
+    match job_manager
+        .create_job(JobOperation::PatchApply, package_list)
+        .await
+    {
         Ok(job_id) => {
             // Spawn background task to execute the patching
             let backend_clone = backend.clone();
@@ -105,10 +108,19 @@ pub async fn apply_patches(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
-                
+
                 // Update job to running
-                let _ = job_manager_clone.update_job(&job_id_clone, JobStatus::Running, Some(0), Some("Starting patch application...".to_string())).await;
-                let _ = job_manager_clone.add_job_log(&job_id_clone, "Job started".to_string()).await;
+                let _ = job_manager_clone
+                    .update_job(
+                        &job_id_clone,
+                        JobStatus::Running,
+                        Some(0),
+                        Some("Starting patch application...".to_string()),
+                    )
+                    .await;
+                let _ = job_manager_clone
+                    .add_job_log(&job_id_clone, "Job started".to_string())
+                    .await;
 
                 // Execute patching
                 match backend_clone.apply_patches(request.packages.as_deref()) {
@@ -118,12 +130,22 @@ pub async fn apply_patches(
 
                         // Handle reboot if requested
                         if request.reboot {
-                            let _ = job_manager_clone.add_job_log(&job_id_clone, format!("Reboot scheduled in {} seconds", request.reboot_delay_seconds)).await;
+                            let _ = job_manager_clone
+                                .add_job_log(
+                                    &job_id_clone,
+                                    format!(
+                                        "Reboot scheduled in {} seconds",
+                                        request.reboot_delay_seconds
+                                    ),
+                                )
+                                .await;
                             // In production, would trigger actual reboot via system handler
                         }
                     }
                     Err(e) => {
-                        let _ = job_manager_clone.fail_job(&job_id_clone, e.to_string()).await;
+                        let _ = job_manager_clone
+                            .fail_job(&job_id_clone, e.to_string())
+                            .await;
                         error!(job_id = %job_id_clone, error = %e, "Patch application failed");
                     }
                 }

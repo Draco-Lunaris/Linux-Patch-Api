@@ -11,10 +11,10 @@ pub mod handlers;
 pub mod routes;
 
 // Re-export handlers for convenience
+pub use handlers::jobs;
 pub use handlers::packages;
 pub use handlers::patches;
 pub use handlers::system;
-pub use handlers::jobs;
 pub use handlers::websocket;
 
 // Re-export routes configuration

@@ -138,14 +138,14 @@ impl AptBackend {
     /// Parse package list from apt output
     fn parse_package_list(&self, output: &str) -> Vec<Package> {
         let mut packages = Vec::new();
-        
+
         for line in output.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
                 let name = parts[0].to_string();
                 let status_str = parts[1];
                 let version = parts[2].to_string();
-                
+
                 let status = if status_str.starts_with("ii") {
                     PackageStatus::Installed
                 } else if status_str.starts_with("iU") {
@@ -171,7 +171,7 @@ impl AptBackend {
                 });
             }
         }
-        
+
         packages
     }
 }
@@ -182,7 +182,7 @@ impl PackageManagerBackend for AptBackend {
             Some(f) => vec!["list", f],
             None => vec!["list", "--installed"],
         };
-        
+
         let output = self.run_apt(&args)?;
         Ok(self.parse_package_list(&output))
     }
@@ -190,17 +190,18 @@ impl PackageManagerBackend for AptBackend {
     fn get_package(&self, name: &str) -> Result<Option<Package>> {
         // Check if installed
         let dpkg_output = self.run_dpkg(&["-s", name]);
-        
+
         if let Err(_) = dpkg_output {
             // Package not installed, check if available
             let list_output = self.run_apt(&["list", name])?;
             if list_output.contains(name) {
-                let parts: Vec<&str> = list_output.lines()
+                let parts: Vec<&str> = list_output
+                    .lines()
                     .find(|l| l.contains(name))
                     .unwrap_or("")
                     .split_whitespace()
                     .collect();
-                
+
                 if parts.len() >= 3 {
                     return Ok(Some(Package {
                         name: name.to_string(),
@@ -220,7 +221,7 @@ impl PackageManagerBackend for AptBackend {
         }
 
         let dpkg_info = dpkg_output?;
-        
+
         // Parse dpkg status output
         let mut version = String::new();
         let mut status = PackageStatus::Installed;
@@ -239,30 +240,33 @@ impl PackageManagerBackend for AptBackend {
             } else if line.starts_with("Description:") {
                 description = line.trim_start_matches("Description:").trim().to_string();
             } else if line.starts_with("Depends:") {
-                dependencies = line.trim_start_matches("Depends:")
+                dependencies = line
+                    .trim_start_matches("Depends:")
                     .trim()
                     .split(',')
                     .map(|s| s.trim().split_whitespace().next().unwrap_or("").to_string())
                     .collect();
             } else if line.starts_with("Installed-Size:") {
-                size_installed = Some(format!("{} KB", line.trim_start_matches("Installed-Size:").trim()));
+                size_installed = Some(format!(
+                    "{} KB",
+                    line.trim_start_matches("Installed-Size:").trim()
+                ));
             }
         }
 
         // Check if upgradable
-        let upgradable = self.run_apt(&["list", "--upgradable", name])
+        let upgradable = self
+            .run_apt(&["list", "--upgradable", name])
             .map(|o| o.contains(name))
             .unwrap_or(false);
 
         let latest_version = if upgradable {
-            self.run_apt(&["policy", name])
-                .ok()
-                .and_then(|o| {
-                    o.lines()
-                        .find(|l| l.contains("Candidate"))
-                        .and_then(|l| l.split_whitespace().nth(1))
-                        .map(|s| s.to_string())
-                })
+            self.run_apt(&["policy", name]).ok().and_then(|o| {
+                o.lines()
+                    .find(|l| l.contains("Candidate"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .map(|s| s.to_string())
+            })
         } else {
             Some(version.clone())
         };
@@ -283,11 +287,11 @@ impl PackageManagerBackend for AptBackend {
 
     fn install_packages(&self, packages: &[PackageSpec], options: &InstallOptions) -> Result<()> {
         let mut args: Vec<String> = vec!["install".to_string(), "-y".to_string()];
-        
+
         if options.no_recommends {
             args.push("--no-install-recommends".to_string());
         }
-        
+
         if options.force {
             args.push("--force-yes".to_string());
         }
@@ -303,7 +307,10 @@ impl PackageManagerBackend for AptBackend {
 
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         self.run_apt(&args_ref)?;
-        info!("Installed packages: {:?}", packages.iter().map(|p| &p.name).collect::<Vec<_>>());
+        info!(
+            "Installed packages: {:?}",
+            packages.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
         Ok(())
     }
 
@@ -319,7 +326,7 @@ impl PackageManagerBackend for AptBackend {
         } else {
             vec!["remove", "-y", name]
         };
-        
+
         self.run_apt(&args)?;
         info!("Removed package: {} (purge={})", name, purge);
         Ok(())
@@ -337,13 +344,15 @@ impl PackageManagerBackend for AptBackend {
                 let available_version = parts[2].to_string();
 
                 // Determine severity based on package name heuristics
-                let severity = if name.contains("kernel") || name.contains("ssl") || name.contains("security") {
-                    "critical".to_string()
-                } else if name.contains("lib") {
-                    "high".to_string()
-                } else {
-                    "medium".to_string()
-                };
+                let severity =
+                    if name.contains("kernel") || name.contains("ssl") || name.contains("security")
+                    {
+                        "critical".to_string()
+                    } else if name.contains("lib") {
+                        "high".to_string()
+                    } else {
+                        "medium".to_string()
+                    };
 
                 patches.push(Patch {
                     name,
@@ -392,17 +401,29 @@ impl PackageManagerBackend for AptBackend {
             .map(|content| {
                 let mut os = "Linux".to_string();
                 let mut version = "unknown".to_string();
-                
+
                 for line in content.lines() {
                     if line.starts_with("PRETTY_NAME=") {
-                        os = line.trim_start_matches("PRETTY_NAME=").trim().trim_matches('"').to_string();
+                        os = line
+                            .trim_start_matches("PRETTY_NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
                     } else if line.starts_with("NAME=") {
-                        os = line.trim_start_matches("NAME=").trim().trim_matches('"').to_string();
+                        os = line
+                            .trim_start_matches("NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
                     } else if line.starts_with("VERSION=") {
-                        version = line.trim_start_matches("VERSION=").trim().trim_matches('"').to_string();
+                        version = line
+                            .trim_start_matches("VERSION=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
                     }
                 }
-                
+
                 (os, version)
             })
             .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
@@ -444,12 +465,12 @@ impl PackageManagerBackend for AptBackend {
             // In production, would use systemd shutdown scheduler
             warn!("Delayed reboot not fully implemented - would use systemd in production");
         }
-        
+
         Command::new("systemctl")
             .arg("reboot")
             .status()
             .context("Failed to execute reboot command")?;
-        
+
         info!("System reboot initiated");
         Ok(())
     }

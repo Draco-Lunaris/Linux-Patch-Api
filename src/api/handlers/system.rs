@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use super::packages::{ApiResponse, JobResponseData};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
 use crate::packages::PackageManagerBackend;
-use super::packages::{ApiResponse, JobResponseData};
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
 /// Returns None if path contains traversal patterns
@@ -22,7 +22,7 @@ fn normalize_path(path: &str) -> Option<String> {
     if path.contains("..") || path.contains("//") {
         return None;
     }
-    
+
     // Decode common URL-encoded traversal attempts
     let decoded = path
         .replace("%2e", ".")
@@ -31,12 +31,12 @@ fn normalize_path(path: &str) -> Option<String> {
         .replace("%2F", "/")
         .replace("%5c", "\\")
         .replace("%5C", "\\");
-    
+
     // Check decoded path for traversal
     if decoded.contains("..") || decoded.contains("//") || decoded.contains("\\") {
         return None;
     }
-    
+
     // Ensure path starts with expected prefix or is relative
     Some(path.to_string())
 }
@@ -115,9 +115,7 @@ pub async fn get_system_info(
 }
 
 /// Health check endpoint
-pub async fn health_check(
-    _req: HttpRequest,
-) -> impl Responder {
+pub async fn health_check(_req: HttpRequest) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
 
@@ -125,7 +123,9 @@ pub async fn health_check(
     let uptime_seconds = std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|content| {
-            content.split_whitespace().next()
+            content
+                .split_whitespace()
+                .next()
                 .and_then(|s| s.parse::<f64>().ok())
                 .map(|f| f as u64)
         })
@@ -186,20 +186,33 @@ pub async fn reboot_system(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
-                
+
                 // Update job to running
-                let _ = job_manager_clone.update_job(&job_id_clone, JobStatus::Running, Some(0), Some("Preparing system reboot...".to_string())).await;
-                let _ = job_manager_clone.add_job_log(&job_id_clone, "Job started".to_string()).await;
+                let _ = job_manager_clone
+                    .update_job(
+                        &job_id_clone,
+                        JobStatus::Running,
+                        Some(0),
+                        Some("Preparing system reboot...".to_string()),
+                    )
+                    .await;
+                let _ = job_manager_clone
+                    .add_job_log(&job_id_clone, "Job started".to_string())
+                    .await;
 
                 // Execute reboot
                 match backend_clone.reboot_system(delay_clone) {
                     Ok(_) => {
-                        let _ = job_manager_clone.add_job_log(&job_id_clone, "Reboot command executed".to_string()).await;
+                        let _ = job_manager_clone
+                            .add_job_log(&job_id_clone, "Reboot command executed".to_string())
+                            .await;
                         // Note: Job won't complete normally since system reboots
                         info!(job_id = %job_id_clone, "System reboot initiated");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone.fail_job(&job_id_clone, e.to_string()).await;
+                        let _ = job_manager_clone
+                            .fail_job(&job_id_clone, e.to_string())
+                            .await;
                         error!(job_id = %job_id_clone, error = %e, "System reboot failed");
                     }
                 }

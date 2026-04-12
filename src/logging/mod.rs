@@ -7,5 +7,5 @@
 //! - 30-day retention with daily rotation
 
 pub mod appender;
-pub mod journal;
 pub mod init;
+pub mod journal;

@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages::{Package, PackageManagerBackend, PackageSpec, InstallOptions};
+use crate::packages::{InstallOptions, Package, PackageManagerBackend, PackageSpec};
 
 /// Maximum allowed length for package names
 const MAX_PACKAGE_NAME_LENGTH: usize = 256;
@@ -25,7 +25,10 @@ fn validate_package_name(name: &str) -> Result<(), String> {
         return Err("Package name cannot be empty".to_string());
     }
     if name.len() > MAX_PACKAGE_NAME_LENGTH {
-        return Err(format!("Package name exceeds maximum length of {} characters", MAX_PACKAGE_NAME_LENGTH));
+        return Err(format!(
+            "Package name exceeds maximum length of {} characters",
+            MAX_PACKAGE_NAME_LENGTH
+        ));
     }
     Ok(())
 }
@@ -59,7 +62,12 @@ impl<T: Serialize> ApiResponse<T> {
         }
     }
 
-    pub fn error(code: &str, message: &str, details: Option<serde_json::Value>, retryable: bool) -> Self {
+    pub fn error(
+        code: &str,
+        message: &str,
+        details: Option<serde_json::Value>,
+        retryable: bool,
+    ) -> Self {
         Self {
             success: false,
             request_id: Uuid::new_v4().to_string(),
@@ -134,13 +142,11 @@ pub async fn list_packages(
         Ok(mut packages) => {
             // Apply filters
             if let Some(status) = &query.status {
-                packages.retain(|p| {
-                    match status.as_str() {
-                        "installed" => p.status == crate::packages::PackageStatus::Installed,
-                        "upgradable" => p.upgradable,
-                        "available" => p.status == crate::packages::PackageStatus::Available,
-                        _ => true,
-                    }
+                packages.retain(|p| match status.as_str() {
+                    "installed" => p.status == crate::packages::PackageStatus::Installed,
+                    "upgradable" => p.upgradable,
+                    "available" => p.status == crate::packages::PackageStatus::Available,
+                    _ => true,
                 });
             }
 
@@ -153,7 +159,7 @@ pub async fn list_packages(
             // Apply sorting
             let sort_field = query.sort.as_deref().unwrap_or("name");
             let ascending = query.order.as_deref().unwrap_or("asc") == "asc";
-            
+
             packages.sort_by(|a, b| {
                 let cmp = match sort_field {
                     "name" => a.name.cmp(&b.name),
@@ -161,7 +167,11 @@ pub async fn list_packages(
                     "status" => format!("{:?}", a.status).cmp(&format!("{:?}", b.status)),
                     _ => a.name.cmp(&b.name),
                 };
-                if ascending { cmp } else { cmp.reverse() }
+                if ascending {
+                    cmp
+                } else {
+                    cmp.reverse()
+                }
             });
 
             let total = packages.len();
@@ -200,12 +210,7 @@ pub async fn get_package(
 
     // VULN-001, VULN-003: Validate package name (length and empty string)
     if let Err(e) = validate_package_name(&package_name) {
-        let response = ApiResponse::<()>::error(
-            "VALIDATION_ERROR",
-            &e,
-            None,
-            false,
-        );
+        let response = ApiResponse::<()>::error("VALIDATION_ERROR", &e, None, false);
         return HttpResponse::BadRequest().json(response);
     }
 
@@ -252,19 +257,17 @@ pub async fn install_packages(
 
     // VULN-001, VULN-003: Validate all package names (length and empty string)
     if let Err(e) = validate_package_names(&body.packages) {
-        let response = ApiResponse::<()>::error(
-            "VALIDATION_ERROR",
-            &e,
-            None,
-            false,
-        );
+        let response = ApiResponse::<()>::error("VALIDATION_ERROR", &e, None, false);
         return HttpResponse::BadRequest().json(response);
     }
 
     info!(request_id = %request_id, packages = ?package_names, "Installing packages");
 
     // Create async job
-    match job_manager.create_job(JobOperation::Install, package_names.clone()).await {
+    match job_manager
+        .create_job(JobOperation::Install, package_names.clone())
+        .await
+    {
         Ok(job_id) => {
             // Spawn background task to execute the installation
             let backend_clone = backend.clone();
@@ -274,10 +277,19 @@ pub async fn install_packages(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
-                
+
                 // Update job to running
-                let _ = job_manager_clone.update_job(&job_id_clone, JobStatus::Running, Some(0), Some("Starting installation...".to_string())).await;
-                let _ = job_manager_clone.add_job_log(&job_id_clone, "Job started".to_string()).await;
+                let _ = job_manager_clone
+                    .update_job(
+                        &job_id_clone,
+                        JobStatus::Running,
+                        Some(0),
+                        Some("Starting installation...".to_string()),
+                    )
+                    .await;
+                let _ = job_manager_clone
+                    .add_job_log(&job_id_clone, "Job started".to_string())
+                    .await;
 
                 // Execute installation
                 match backend_clone.install_packages(&packages, &options) {
@@ -286,7 +298,9 @@ pub async fn install_packages(
                         info!(job_id = %job_id_clone, "Package installation completed");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone.fail_job(&job_id_clone, e.to_string()).await;
+                        let _ = job_manager_clone
+                            .fail_job(&job_id_clone, e.to_string())
+                            .await;
                         error!(job_id = %job_id_clone, error = %e, "Package installation failed");
                     }
                 }
@@ -328,19 +342,17 @@ pub async fn update_package(
 
     // VULN-001, VULN-003: Validate package name (length and empty string)
     if let Err(e) = validate_package_name(&package_name) {
-        let response = ApiResponse::<()>::error(
-            "VALIDATION_ERROR",
-            &e,
-            None,
-            false,
-        );
+        let response = ApiResponse::<()>::error("VALIDATION_ERROR", &e, None, false);
         return HttpResponse::BadRequest().json(response);
     }
 
     info!(request_id = %request_id, package = %package_name, "Updating package");
 
     // Create async job
-    match job_manager.create_job(JobOperation::Update, vec![package_name.clone()]).await {
+    match job_manager
+        .create_job(JobOperation::Update, vec![package_name.clone()])
+        .await
+    {
         Ok(job_id) => {
             // Spawn background task to execute the update
             let backend_clone = backend.clone();
@@ -349,10 +361,19 @@ pub async fn update_package(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
-                
+
                 // Update job to running
-                let _ = job_manager_clone.update_job(&job_id_clone, JobStatus::Running, Some(0), Some("Starting update...".to_string())).await;
-                let _ = job_manager_clone.add_job_log(&job_id_clone, "Job started".to_string()).await;
+                let _ = job_manager_clone
+                    .update_job(
+                        &job_id_clone,
+                        JobStatus::Running,
+                        Some(0),
+                        Some("Starting update...".to_string()),
+                    )
+                    .await;
+                let _ = job_manager_clone
+                    .add_job_log(&job_id_clone, "Job started".to_string())
+                    .await;
 
                 // Execute update
                 match backend_clone.update_package(&pkg_name) {
@@ -361,7 +382,9 @@ pub async fn update_package(
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package update completed");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone.fail_job(&job_id_clone, e.to_string()).await;
+                        let _ = job_manager_clone
+                            .fail_job(&job_id_clone, e.to_string())
+                            .await;
                         error!(job_id = %job_id_clone, package = %pkg_name, error = %e, "Package update failed");
                     }
                 }
@@ -403,17 +426,15 @@ pub async fn remove_package(
 
     // VULN-001, VULN-003: Validate package name (length and empty string)
     if let Err(e) = validate_package_name(&package_name) {
-        let response = ApiResponse::<()>::error(
-            "VALIDATION_ERROR",
-            &e,
-            None,
-            false,
-        );
+        let response = ApiResponse::<()>::error("VALIDATION_ERROR", &e, None, false);
         return HttpResponse::BadRequest().json(response);
     }
 
     info!(request_id = %request_id, package = %package_name, "Removing package");
-    match job_manager.create_job(JobOperation::Remove, vec![package_name.clone()]).await {
+    match job_manager
+        .create_job(JobOperation::Remove, vec![package_name.clone()])
+        .await
+    {
         Ok(job_id) => {
             // Spawn background task to execute the removal
             let backend_clone = backend.clone();
@@ -422,10 +443,19 @@ pub async fn remove_package(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
-                
+
                 // Update job to running
-                let _ = job_manager_clone.update_job(&job_id_clone, JobStatus::Running, Some(0), Some("Starting removal...".to_string())).await;
-                let _ = job_manager_clone.add_job_log(&job_id_clone, "Job started".to_string()).await;
+                let _ = job_manager_clone
+                    .update_job(
+                        &job_id_clone,
+                        JobStatus::Running,
+                        Some(0),
+                        Some("Starting removal...".to_string()),
+                    )
+                    .await;
+                let _ = job_manager_clone
+                    .add_job_log(&job_id_clone, "Job started".to_string())
+                    .await;
 
                 // Execute removal (purge=false for standard removal)
                 match backend_clone.remove_package(&pkg_name, false) {
@@ -434,7 +464,9 @@ pub async fn remove_package(
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package removal completed");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone.fail_job(&job_id_clone, e.to_string()).await;
+                        let _ = job_manager_clone
+                            .fail_job(&job_id_clone, e.to_string())
+                            .await;
                         error!(job_id = %job_id_clone, package = %pkg_name, error = %e, "Package removal failed");
                     }
                 }
@@ -490,7 +522,8 @@ mod tests {
 
     #[test]
     fn test_api_response_error() {
-        let response: ApiResponse<()> = ApiResponse::error("TEST_CODE", "Test message", None, false);
+        let response: ApiResponse<()> =
+            ApiResponse::error("TEST_CODE", "Test message", None, false);
         assert!(!response.success);
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, "TEST_CODE");

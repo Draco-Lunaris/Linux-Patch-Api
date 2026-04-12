@@ -7,12 +7,12 @@
 //! - jobs: Job management endpoints
 //! - websocket: Real-time job status streaming
 
+pub mod jobs;
 pub mod packages;
 pub mod patches;
 pub mod system;
-pub mod jobs;
 pub mod websocket;
 
 // Re-export commonly used types
-pub use packages::{ApiResponse, ApiError};
+pub use packages::{ApiError, ApiResponse};
 pub use websocket::{WsClientMessage, WsServerMessage};

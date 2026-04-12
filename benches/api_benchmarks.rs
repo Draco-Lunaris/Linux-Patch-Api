@@ -6,7 +6,7 @@
 //! - Memory usage under load
 //! - TLS handshake overhead
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
 
 // Benchmark configuration
@@ -18,7 +18,7 @@ fn benchmark_endpoint_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("endpoint_latency");
     group.measurement_time(BENCH_DURATION);
     group.warm_up_time(WARMUP_DURATION);
-    
+
     // Package Management Endpoints
     group.bench_function("GET /api/v1/packages", |b| {
         b.iter(|| {
@@ -26,95 +26,71 @@ fn benchmark_endpoint_latency(c: &mut Criterion) {
             black_box(list_packages_simulated())
         })
     });
-    
+
     group.bench_function("GET /api/v1/packages/{name}", |b| {
-        b.iter(|| {
-            black_box(get_package_simulated("nginx"))
-        })
+        b.iter(|| black_box(get_package_simulated("nginx")))
     });
-    
+
     group.bench_function("POST /api/v1/packages (install)", |b| {
-        b.iter(|| {
-            black_box(install_package_simulated(&["nginx"]))
-        })
+        b.iter(|| black_box(install_package_simulated(&["nginx"])))
     });
-    
+
     group.bench_function("PUT /api/v1/packages/{name} (update)", |b| {
-        b.iter(|| {
-            black_box(update_package_simulated("nginx"))
-        })
+        b.iter(|| black_box(update_package_simulated("nginx")))
     });
-    
+
     group.bench_function("DELETE /api/v1/packages/{name}", |b| {
-        b.iter(|| {
-            black_box(remove_package_simulated("nginx"))
-        })
+        b.iter(|| black_box(remove_package_simulated("nginx")))
     });
-    
+
     // Patch Management Endpoints
     group.bench_function("GET /api/v1/patches", |b| {
-        b.iter(|| {
-            black_box(list_patches_simulated())
-        })
+        b.iter(|| black_box(list_patches_simulated()))
     });
-    
+
     group.bench_function("POST /api/v1/patches/apply", |b| {
-        b.iter(|| {
-            black_box(apply_patches_simulated(&[]))
-        })
+        b.iter(|| black_box(apply_patches_simulated(&[])))
     });
-    
+
     // System Management Endpoints
     group.bench_function("GET /api/v1/system/info", |b| {
-        b.iter(|| {
-            black_box(get_system_info_simulated())
-        })
+        b.iter(|| black_box(get_system_info_simulated()))
     });
-    
+
     group.bench_function("GET /health", |b| {
-        b.iter(|| {
-            black_box(health_check_simulated())
-        })
+        b.iter(|| black_box(health_check_simulated()))
     });
-    
+
     group.bench_function("POST /api/v1/system/reboot", |b| {
-        b.iter(|| {
-            black_box(reboot_system_simulated(0))
-        })
+        b.iter(|| black_box(reboot_system_simulated(0)))
     });
-    
+
     // Job Management Endpoints
     group.bench_function("GET /api/v1/jobs", |b| {
-        b.iter(|| {
-            black_box(list_jobs_simulated())
-        })
+        b.iter(|| black_box(list_jobs_simulated()))
     });
-    
+
     group.bench_function("GET /api/v1/jobs/{id}", |b| {
-        b.iter(|| {
-            black_box(get_job_simulated("550e8400-e29b-41d4-a716-446655440000"))
-        })
+        b.iter(|| black_box(get_job_simulated("550e8400-e29b-41d4-a716-446655440000")))
     });
-    
+
     group.bench_function("POST /api/v1/jobs/{id}/rollback", |b| {
         b.iter(|| {
-            black_box(rollback_job_simulated("550e8400-e29b-41d4-a716-446655440000"))
+            black_box(rollback_job_simulated(
+                "550e8400-e29b-41d4-a716-446655440000",
+            ))
         })
     });
-    
+
     group.bench_function("DELETE /api/v1/jobs/{id}", |b| {
-        b.iter(|| {
-            black_box(delete_job_simulated("550e8400-e29b-41d4-a716-446655440000"))
-        })
+        b.iter(|| black_box(delete_job_simulated("550e8400-e29b-41d4-a716-446655440000")))
     });
-    
+
     // WebSocket Endpoint
     group.bench_function("WS /api/v1/ws/jobs (connection)", |b| {
-        b.iter(|| {
-            black_box(websocket_connect_simulated())
-        })
+        b.iter(|| black_box(websocket_connect_simulated()))
     });
-    
+
     group.finish();
 }
 
@@ -123,39 +99,27 @@ fn benchmark_concurrency(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrency");
     group.measurement_time(BENCH_DURATION);
     group.warm_up_time(WARMUP_DURATION);
-    
+
     for concurrent in [1, 10, 50, 100].iter() {
         group.bench_with_input(
             BenchmarkId::new("concurrent_health_checks", concurrent),
             concurrent,
-            |b, &concurrent| {
-                b.iter(|| {
-                    black_box(concurrent_health_checks_simulated(concurrent))
-                })
-            },
+            |b, &concurrent| b.iter(|| black_box(concurrent_health_checks_simulated(concurrent))),
         );
-        
+
         group.bench_with_input(
             BenchmarkId::new("concurrent_package_list", concurrent),
             concurrent,
-            |b, &concurrent| {
-                b.iter(|| {
-                    black_box(concurrent_package_list_simulated(concurrent))
-                })
-            },
+            |b, &concurrent| b.iter(|| black_box(concurrent_package_list_simulated(concurrent))),
         );
-        
+
         group.bench_with_input(
             BenchmarkId::new("concurrent_job_status", concurrent),
             concurrent,
-            |b, &concurrent| {
-                b.iter(|| {
-                    black_box(concurrent_job_status_simulated(concurrent))
-                })
-            },
+            |b, &concurrent| b.iter(|| black_box(concurrent_job_status_simulated(concurrent))),
         );
     }
-    
+
     group.finish();
 }
 
@@ -164,19 +128,15 @@ fn benchmark_tls_handshake(c: &mut Criterion) {
     let mut group = c.benchmark_group("tls_overhead");
     group.measurement_time(BENCH_DURATION);
     group.warm_up_time(WARMUP_DURATION);
-    
+
     group.bench_function("TLS 1.3 handshake (mTLS)", |b| {
-        b.iter(|| {
-            black_box(tls_handshake_simulated())
-        })
+        b.iter(|| black_box(tls_handshake_simulated()))
     });
-    
+
     group.bench_function("TLS session resumption", |b| {
-        b.iter(|| {
-            black_box(tls_session_resumption_simulated())
-        })
+        b.iter(|| black_box(tls_session_resumption_simulated()))
     });
-    
+
     group.finish();
 }
 
@@ -184,25 +144,19 @@ fn benchmark_tls_handshake(c: &mut Criterion) {
 fn benchmark_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("memory_allocation");
     group.measurement_time(BENCH_DURATION);
-    
+
     group.bench_function("JSON serialization (ApiResponse)", |b| {
-        b.iter(|| {
-            black_box(json_serialize_simulated())
-        })
+        b.iter(|| black_box(json_serialize_simulated()))
     });
-    
+
     group.bench_function("JSON deserialization (InstallRequest)", |b| {
-        b.iter(|| {
-            black_box(json_deserialize_simulated())
-        })
+        b.iter(|| black_box(json_deserialize_simulated()))
     });
-    
+
     group.bench_function("Job manager state update", |b| {
-        b.iter(|| {
-            black_box(job_state_update_simulated())
-        })
+        b.iter(|| black_box(job_state_update_simulated()))
     });
-    
+
     group.finish();
 }
 
