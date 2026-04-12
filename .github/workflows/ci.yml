@@ -124,17 +124,7 @@ jobs:
           apt-get update
           apt-get install -y rpm cargo rustc libsystemd-dev pkg-config
       - name: Build RPM package
-        run: |
-          mkdir -p $HOME/rpmbuild/SPECS
-          mkdir -p $HOME/rpmbuild/SOURCES
-          mkdir -p $HOME/rpmbuild/BUILD
-          mkdir -p $HOME/rpmbuild/RPMS
-          mkdir -p $HOME/rpmbuild/SRPMS
-          cp linux-patch-api.spec $HOME/rpmbuild/SPECS/
-          tar -czf $HOME/rpmbuild/SOURCES/linux-patch-api.tar.gz \
-            Cargo.toml Cargo.lock src/ configs/ debian/ \
-            linux-patch-api.spec build-rpm.sh
-          rpmbuild -ba $HOME/rpmbuild/SPECS/linux-patch-api.spec
+        run: ./build-rpm.sh
       - name: Upload to releases (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
