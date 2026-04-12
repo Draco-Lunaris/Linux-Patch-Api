@@ -103,17 +103,11 @@ jobs:
         run: dpkg-buildpackage -us -uc -b
       - name: Copy .deb to workspace
         run: cp ../linux-patch-api_*.deb .
-      - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-patch-api-deb
-          path: linux-patch-api_*.deb
-          retention-days: 30
       - name: Upload to releases (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: ../linux-patch-api_*.deb
+          files: linux-patch-api_*.deb
 
   # RHEL/CentOS/Fedora Package Build
   build-rpm:
@@ -132,12 +126,6 @@ jobs:
       - name: Build RPM package
         run: |
           rpmbuild -ba linux-patch-api.spec
-      - name: Upload .rpm artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-patch-api-rpm
-          path: ~/rpmbuild/RPMS/x86_64/*.rpm
-          retention-days: 30
       - name: Upload to releases (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
@@ -184,12 +172,11 @@ jobs:
           }
           EOF
           abuild -F -r
-      - name: Upload .apk artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload to releases (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
         with:
-          name: linux-patch-api-apk
-          path: ~/packages/x86_64/*.apk
-          retention-days: 30
+          files: ~/packages/x86_64/*.apk
 
   # Arch Linux Package Build
   build-arch:
@@ -231,31 +218,9 @@ jobs:
           }
           EOF
           makepkg -f --noconfirm
-      - name: Upload .pkg.tar.zst artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-patch-api-arch
-          path: '*.pkg.tar.zst'
-          retention-days: 30
-
-  # Release - Collect all packages
-  release:
-    name: Create Release
-    needs: [build-deb, build-rpm, build-apk, build-arch]
-    runs-on: linux
-    container: node:18
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download all packages
-        uses: actions/download-artifact@v4
-        with:
-          pattern: linux-patch-api-*
-          merge-multiple: true
-          path: ./releases/
-      - name: List release artifacts
-        run: ls -la ./releases/
-      - name: Upload to Gitea releases
+      - name: Upload to releases (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: releases/*
+          files: '*.pkg.tar.zst'
+
