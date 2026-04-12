@@ -8,40 +8,15 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
-use super::packages::{ApiResponse, JobResponseData};
+use super::packages::ApiResponse;
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
 /// Returns None if path contains traversal patterns
-fn normalize_path(path: &str) -> Option<String> {
-    // Reject obvious traversal patterns
-    if path.contains("..") || path.contains("//") {
-        return None;
-    }
-
-    // Decode common URL-encoded traversal attempts
-    let decoded = path
-        .replace("%2e", ".")
-        .replace("%2E", ".")
-        .replace("%2f", "/")
-        .replace("%2F", "/")
-        .replace("%5c", "\\")
-        .replace("%5C", "\\");
-
-    // Check decoded path for traversal
-    if decoded.contains("..") || decoded.contains("//") || decoded.contains("\\") {
-        return None;
-    }
-
-    // Ensure path starts with expected prefix or is relative
-    Some(path.to_string())
-}
-
-/// Validate path input for traversal attacks
 fn validate_path_no_traversal(path: &str) -> bool {
     normalize_path(path).is_some()
 }
@@ -82,7 +57,7 @@ pub async fn get_system_info(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
 
     info!(request_id = %request_id, "Getting system information");
 
@@ -116,8 +91,8 @@ pub async fn get_system_info(
 
 /// Health check endpoint
 pub async fn health_check(_req: HttpRequest) -> impl Responder {
-    let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _request_id = Uuid::new_v4().to_string();
+    let _timestamp = Utc::now().to_rfc3339();
 
     // Calculate uptime from /proc/uptime
     let uptime_seconds = std::fs::read_to_string("/proc/uptime")
@@ -150,7 +125,7 @@ pub async fn reboot_system(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let delay = body.delay_seconds;
     let force = body.force;
 

@@ -2,11 +2,10 @@
 //!
 //! Aggregates all endpoint routes and configures the Actix-web application.
 
-use actix_web::{http::Method, web, HttpResponse};
+use actix_web::{web, HttpResponse};
 use tracing::info;
 
 use crate::jobs::manager::JobManager;
-use crate::packages::create_backend;
 
 use super::handlers::{jobs, packages, patches, system, websocket};
 

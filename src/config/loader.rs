@@ -203,7 +203,7 @@ mod tests {
         let result = AppConfig::load("tests/fixtures/valid_config.yaml");
         assert!(result.is_ok());
         let config = result.unwrap();
-        assert!(config.server.port >= 1 && config.server.port <= 65535);
+        assert!(config.server.port >= 1);
     }
 
     #[test]

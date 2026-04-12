@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::jobs::manager::{Job, JobManager, JobOperation, JobStatus};
+use crate::jobs::manager::{Job, JobManager, JobStatus};
 
-use super::packages::{ApiResponse, JobResponseData};
+use super::packages::ApiResponse;
 
 /// Job list response data
 #[derive(Debug, Serialize)]
@@ -110,7 +110,7 @@ pub async fn list_jobs(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
 
     let status_filter = query.status.as_ref().and_then(|s| parse_job_status(s));
     let limit = query.limit.unwrap_or(50);
@@ -141,7 +141,7 @@ pub async fn get_job(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let job_id_str = path.into_inner();
 
     info!(request_id = %request_id, job_id = %job_id_str, "Getting job details");
@@ -185,7 +185,7 @@ pub async fn rollback_job(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let job_id_str = path.into_inner();
 
     info!(request_id = %request_id, job_id = %job_id_str, "Initiating job rollback");
@@ -253,7 +253,7 @@ pub async fn delete_job(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let job_id_str = path.into_inner();
 
     info!(request_id = %request_id, job_id = %job_id_str, "Deleting job from history");

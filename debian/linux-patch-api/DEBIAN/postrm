@@ -1,0 +1,64 @@
+#!/bin/bash
+# postrm script for linux-patch-api
+# Created by package build system
+
+set -e
+
+# Handle purge - remove all configuration and data
+if [ "$1" = "purge" ]; then
+    echo "Purging linux-patch-api configuration and data..."
+    
+    # Stop service if still running
+    if systemctl is-active --quiet linux-patch-api.service 2>/dev/null; then
+        systemctl stop linux-patch-api.service
+    fi
+    
+    # Disable service
+    if systemctl is-enabled --quiet linux-patch-api.service 2>/dev/null; then
+        systemctl disable linux-patch-api.service
+    fi
+    
+    # Reload systemd to remove service file
+    systemctl daemon-reload
+    
+    # Remove configuration directory (preserved by conffiles during normal remove)
+    if [ -d "/etc/linux_patch_api" ]; then
+        echo "Removing /etc/linux_patch_api..."
+        rm -rf /etc/linux_patch_api
+    fi
+    
+    # Remove data directory
+    if [ -d "/var/lib/linux_patch_api" ]; then
+        echo "Removing /var/lib/linux_patch_api..."
+        rm -rf /var/lib/linux_patch_api
+    fi
+    
+    # Remove log directory
+    if [ -d "/var/log/linux_patch_api" ]; then
+        echo "Removing /var/log/linux_patch_api..."
+        rm -rf /var/log/linux_patch_api
+    fi
+    
+    # Remove system user
+    if getent passwd linux-patch-api > /dev/null 2>&1; then
+        echo "Removing user linux-patch-api..."
+        userdel linux-patch-api 2>/dev/null || true
+    fi
+    
+    # Remove system group
+    if getent group linux-patch-api > /dev/null 2>&1; then
+        echo "Removing group linux-patch-api..."
+        groupdel linux-patch-api 2>/dev/null || true
+    fi
+    
+    echo "linux-patch-api purged successfully"
+fi
+
+# Handle upgrade/remove - just ensure service is disabled
+if [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; then
+    # Service should already be stopped by prerm
+    # Just reload systemd to remove the service file
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
+exit 0

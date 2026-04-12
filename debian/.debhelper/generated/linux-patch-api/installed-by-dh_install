@@ -1,0 +1,4 @@
+debian/tmp/usr/bin/linux-patch-api
+debian/tmp/lib/systemd/system/linux-patch-api.service
+debian/tmp/etc/linux_patch_api/config.yaml
+debian/tmp/etc/linux_patch_api/whitelist.yaml

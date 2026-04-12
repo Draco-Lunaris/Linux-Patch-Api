@@ -3,12 +3,11 @@
 //! Provides mutual TLS authentication middleware for Actix-web.
 //! Non-mTLS connections are silently dropped (no response).
 
-use actix_web::http::header;
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpMessage,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use futures_util::future::LocalBoxFuture;
 use rustls::{
     server::{ServerConfig, WebPkiClientVerifier},
@@ -19,9 +18,8 @@ use std::{
     fs::File,
     io::BufReader,
     sync::Arc,
-    task::{Context, Poll},
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Check for duplicate critical headers (VULN-006)
 /// Returns true if duplicate headers are detected
@@ -275,7 +273,7 @@ where
 
         // All checks passed - call the service
         let fut = self.service.call(req);
-        Box::pin(async move { fut.await })
+        Box::pin(fut)
     }
 }
 

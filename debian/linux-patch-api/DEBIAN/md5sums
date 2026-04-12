@@ -1,0 +1,5 @@
+23b89eecc51f46c6813658dd615d13a9  lib/systemd/system/linux-patch-api.service
+d64a80e2a796561c39c6941c6b9e268c  usr/bin/linux-patch-api
+154c7ae7e01ae22cdc8ceea1fd0956e2  usr/share/doc/linux-patch-api/changelog.Debian.gz
+978478c6c7f1e9dcb38eb1f2454535c0  usr/share/doc/linux-patch-api/changelog.gz
+c2fab316c94aa61adb70d79365cfe08f  usr/share/doc/linux-patch-api/copyright

@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Whitelist entry types
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -193,7 +193,7 @@ impl WhitelistManager {
     /// Set up file watcher for auto-reload
     fn setup_watcher(&mut self) -> Result<()> {
         let config_path = self.config_path.clone();
-        let entries = self.entries.clone();
+        let _entries = self.entries.clone();
 
         let watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {

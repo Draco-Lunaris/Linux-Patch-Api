@@ -7,13 +7,13 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
 use crate::packages::PackageManagerBackend;
 
-use super::packages::{ApiError, ApiResponse, JobResponseData};
+use super::packages::{ApiResponse, JobResponseData};
 
 /// Patch list response data
 #[derive(Debug, Serialize)]
@@ -41,7 +41,7 @@ pub async fn list_patches(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
 
     info!(request_id = %request_id, "Listing available patches");
 
@@ -84,7 +84,7 @@ pub async fn apply_patches(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let packages_count = body.packages.as_ref().map(|p| p.len()).unwrap_or(0);
 
     info!(

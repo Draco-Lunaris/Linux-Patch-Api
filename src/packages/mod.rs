@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 /// Package status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -33,20 +33,12 @@ pub struct Package {
 }
 
 /// Package installation options
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InstallOptions {
     pub force: bool,
     pub no_recommends: bool,
 }
 
-impl Default for InstallOptions {
-    fn default() -> Self {
-        Self {
-            force: false,
-            no_recommends: false,
-        }
-    }
-}
 
 /// Patch information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +183,7 @@ impl PackageManagerBackend for AptBackend {
         // Check if installed
         let dpkg_output = self.run_dpkg(&["-s", name]);
 
-        if let Err(_) = dpkg_output {
+        if dpkg_output.is_err() {
             // Package not installed, check if available
             let list_output = self.run_apt(&["list", name])?;
             if list_output.contains(name) {
@@ -227,7 +219,7 @@ impl PackageManagerBackend for AptBackend {
         let mut status = PackageStatus::Installed;
         let mut description = String::new();
         let mut dependencies = Vec::new();
-        let mut install_date = None;
+        let install_date = None;
         let mut size_installed = None;
 
         for line in dpkg_info.lines() {
@@ -244,7 +236,7 @@ impl PackageManagerBackend for AptBackend {
                     .trim_start_matches("Depends:")
                     .trim()
                     .split(',')
-                    .map(|s| s.trim().split_whitespace().next().unwrap_or("").to_string())
+                    .map(|s| s.split_whitespace().next().unwrap_or("").to_string())
                     .collect();
             } else if line.starts_with("Installed-Size:") {
                 size_installed = Some(format!(
@@ -507,8 +499,8 @@ mod tests {
 
     #[test]
     fn test_apt_backend_creation() {
-        let backend = AptBackend::new();
-        assert!(std::path::Path::new("/usr/bin/apt").exists() || true); // Test passes regardless
+        let _backend = AptBackend::new();
+        assert!(true); // Test passes regardless
     }
 
     #[test]
