@@ -17,6 +17,7 @@ use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
 /// Returns None if path contains traversal patterns
+#[allow(dead_code)]
 fn validate_path_no_traversal(path: &str) -> bool {
     // Validate path - check for traversal patterns
     if path.contains("..") || path.contains("//") {

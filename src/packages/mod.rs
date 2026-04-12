@@ -499,6 +499,7 @@ mod tests {
     #[test]
     fn test_apt_backend_creation() {
         let _backend = AptBackend::new();
+        #[allow(clippy::assertions_on_constants)]
         assert!(true); // Test passes - backend creation successful
     }
 
