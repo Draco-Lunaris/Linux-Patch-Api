@@ -98,7 +98,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install -y debhelper cargo rustc libsystemd-dev pkg-config
+          apt-get install -y build-essential debhelper cargo rustc libsystemd-dev pkg-config
       - name: Build Debian package
         run: dpkg-buildpackage -us -uc -b
       - name: Upload .deb artifact
