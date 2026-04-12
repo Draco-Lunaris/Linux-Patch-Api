@@ -502,7 +502,6 @@ mod tests {
         // Test passes if backend creation doesn't panic
     }
 
-
     #[test]
     fn test_package_status_serialization() {
         let status = PackageStatus::Installed;
