@@ -14,7 +14,7 @@ env:
 jobs:
   fmt:
     name: Code Format
-    runs-on: self-hosted
+    runs-on: linux
     steps:
       - uses: actions/checkout@v2
         with:
@@ -27,7 +27,7 @@ jobs:
 
   clippy:
     name: Clippy Lints
-    runs-on: self-hosted
+    runs-on: linux
     steps:
       - uses: actions/checkout@v2
         with:
@@ -42,7 +42,7 @@ jobs:
 
   test:
     name: Unit Tests
-    runs-on: self-hosted
+    runs-on: linux
     steps:
       - uses: actions/checkout@v2
         with:
@@ -58,7 +58,7 @@ jobs:
 
   audit:
     name: Security Audit
-    runs-on: self-hosted
+    runs-on: linux
     steps:
       - uses: actions/checkout@v2
         with:
@@ -72,7 +72,7 @@ jobs:
   # Debian/Ubuntu Package Build
   build-deb:
     name: Build Debian Package
-    runs-on: self-hosted
+    runs-on: linux
     steps:
       - uses: actions/checkout@v2
         with:
@@ -99,7 +99,7 @@ jobs:
   # RHEL/CentOS/Fedora Package Build
   build-rpm:
     name: Build RPM Package
-    runs-on: self-hosted
+    runs-on: linux
     steps:
       - uses: actions/checkout@v2
         with:
@@ -127,7 +127,7 @@ jobs:
   # Alpine Package Build
   build-apk:
     name: Build Alpine Package
-    runs-on: self-hosted
+    runs-on: linux
     container: alpine:latest
     steps:
       - uses: actions/checkout@v2
@@ -174,7 +174,7 @@ jobs:
   # Arch Linux Package Build
   build-arch:
     name: Build Arch Package
-    runs-on: self-hosted
+    runs-on: linux
     container: archlinux:latest
     steps:
       - uses: actions/checkout@v2
@@ -222,7 +222,7 @@ jobs:
   release:
     name: Create Release
     needs: [build-deb, build-rpm, build-apk, build-arch]
-    runs-on: self-hosted
+    runs-on: linux
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
