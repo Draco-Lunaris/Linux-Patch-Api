@@ -17,7 +17,7 @@ fi
 
 # Install build dependencies
 echo "Installing build dependencies..."
-sudo pacman -Syu --noconfirm rust cargo systemd git base-devel
+pacman -Syu --noconfirm rust cargo systemd git base-devel
 
 # Build release binary
 echo "Building release binary..."

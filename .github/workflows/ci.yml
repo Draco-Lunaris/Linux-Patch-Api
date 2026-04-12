@@ -123,6 +123,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y rpm cargo rustc libsystemd-dev pkg-config
+      - name: Build release binary
+        run: cargo build --release
       - name: Build RPM package
         run: ./build-rpm.sh
       - name: Upload to releases (on tag)
@@ -142,40 +144,14 @@ jobs:
           fetch-depth: 0
       - name: Install build dependencies
         run: |
-          apk add --no-cache rust cargo musl-dev openssl-dev systemd-dev git nodejs npm
-      - name: Build release binary
-        run: cargo build --release --target x86_64-unknown-linux-musl
-      - name: Create APK package
-        run: |
-          mkdir -p package/usr/bin
-          mkdir -p package/etc/linux_patch_api
-          mkdir -p package/lib/systemd/system
-          cp target/x86_64-unknown-linux-musl/release/linux-patch-api package/usr/bin/
-          cp configs/linux-patch-api.service package/lib/systemd/system/
-          cp configs/config.yaml.example package/etc/linux_patch_api/config.yaml
-          cp configs/whitelist.yaml.example package/etc/linux_patch_api/whitelist.yaml
-          # Create APKBUILD
-          cat > APKBUILD << 'EOF'
-          pkgname=linux-patch-api
-          pkgver=1.0.0
-          pkgrel=1
-          pkgdesc="Secure remote package management API for Linux systems"
-          url="https://gitea.internal/linux-patch-api"
-          arch="x86_64"
-          license="MIT"
-          depends="systemd"
-          source="package"
-          
-          package() {
-            cp -r "$srcdir"/package/* "$pkgdir"/
-          }
-          EOF
-          abuild -F -r
+          apk add --no-cache rust cargo musl-dev openssl-dev systemd-dev git nodejs npm abuild
+      - name: Build APK package
+        run: ./build-alpine.sh
       - name: Upload to releases (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: ~/packages/x86_64/*.apk
+          files: releases/*.apk
 
   # Arch Linux Package Build
   build-arch:
@@ -191,35 +167,11 @@ jobs:
           pacman -Syu --noconfirm rust cargo systemd git base-devel nodejs npm
       - name: Build release binary
         run: cargo build --release
-      - name: Create PKGBUILD package
-        run: |
-          mkdir -p package/usr/bin
-          mkdir -p package/etc/linux_patch_api
-          mkdir -p package/usr/lib/systemd/system
-          cp target/release/linux-patch-api package/usr/bin/
-          cp configs/linux-patch-api.service package/usr/lib/systemd/system/
-          cp configs/config.yaml.example package/etc/linux_patch_api/config.yaml
-          cp configs/whitelist.yaml.example package/etc/linux_patch_api/whitelist.yaml
-          # Create PKGBUILD
-          cat > PKGBUILD << 'EOF'
-          pkgname=linux-patch-api
-          pkgver=1.0.0
-          pkgrel=1
-          pkgdesc="Secure remote package management API for Linux systems"
-          url="https://gitea.internal/linux-patch-api"
-          arch=('x86_64')
-          license=('MIT')
-          depends=('systemd')
-          source=('package')
-          
-          package() {
-            cp -r "$srcdir"/package/* "$pkgdir"/
-          }
-          EOF
-          makepkg -f --noconfirm
+      - name: Build Arch package
+        run: ./build-arch.sh
       - name: Upload to releases (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: '*.pkg.tar.zst'
+          files: releases/*.pkg.tar.zst
 
