@@ -23,12 +23,20 @@ fi
 # Setup RPM build directory structure
 mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
-# Copy source files
-echo "Preparing source files..."
+# Create source tarball (required by %autosetup in spec file)
+echo "Creating source tarball..."
+VERSION="1.0.0"
+tar -czf ~/rpmbuild/SOURCES/linux-patch-api-${VERSION}.tar.gz \
+    --exclude='target' \
+    --exclude='.git' \
+    --exclude='releases' \
+    --exclude='.github' \
+    --exclude='debian' \
+    .
+
+# Copy spec file
+echo "Preparing spec file..."
 cp linux-patch-api.spec ~/rpmbuild/SPECS/
-cp -r target/release/linux-patch-api ~/rpmbuild/SOURCES/ 2>/dev/null || cargo build --release
-cp -r configs ~/rpmbuild/SOURCES/
-cp -r debian ~/rpmbuild/SOURCES/
 
 # Build RPM
 echo "Building RPM package..."
