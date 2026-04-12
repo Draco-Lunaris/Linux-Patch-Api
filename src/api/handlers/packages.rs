@@ -205,7 +205,7 @@ pub async fn get_package(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let package_name = path.into_inner();
 
     // VULN-001, VULN-003: Validate package name (length and empty string)
@@ -252,7 +252,7 @@ pub async fn install_packages(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let package_names: Vec<String> = body.packages.iter().map(|p| p.name.clone()).collect();
 
     // VULN-001, VULN-003: Validate all package names (length and empty string)
@@ -337,7 +337,7 @@ pub async fn update_package(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let package_name = path.into_inner();
 
     // VULN-001, VULN-003: Validate package name (length and empty string)
@@ -421,7 +421,7 @@ pub async fn remove_package(
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let _timestamp = Utc::now().to_rfc3339();
     let package_name = path.into_inner();
 
     // VULN-001, VULN-003: Validate package name (length and empty string)

@@ -66,7 +66,7 @@ impl WsServerMessage {
 /// Returns upgrade response for WebSocket handshake
 pub async fn websocket_handler(
     req: HttpRequest,
-    job_manager: web::Data<JobManager>,
+    _job_manager: web::Data<JobManager>,
 ) -> Result<HttpResponse, Error> {
     let ws_id = Uuid::new_v4();
     info!(ws_id = %ws_id, "WebSocket connection request");
@@ -121,7 +121,7 @@ pub async fn broadcast_job_update(
     job_id: &Uuid,
     status: &crate::jobs::manager::JobStatus,
     progress: u8,
-    message: &str,
+    _message: &str,
 ) {
     info!(job_id = %job_id, status = ?status, progress = progress, "Job status update available for broadcast");
     // In production, would use a broadcast channel to notify all subscribed WebSocket clients

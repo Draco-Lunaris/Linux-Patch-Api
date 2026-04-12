@@ -8,7 +8,7 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::packages::ApiResponse;
@@ -18,7 +18,11 @@ use crate::packages::PackageManagerBackend;
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
 /// Returns None if path contains traversal patterns
 fn validate_path_no_traversal(path: &str) -> bool {
-    normalize_path(path).is_some()
+    // Validate path - check for traversal patterns
+    if path.contains("..") || path.contains("//") {
+        return false;
+    }
+    true
 }
 
 /// System info response data

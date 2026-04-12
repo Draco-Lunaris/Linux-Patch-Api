@@ -7,7 +7,7 @@ use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
     Error, HttpMessage,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures_util::future::LocalBoxFuture;
 use rustls::{
     server::{ServerConfig, WebPkiClientVerifier},
@@ -15,7 +15,7 @@ use rustls::{
 };
 use rustls_pemfile::{certs, private_key};
 use std::{fs::File, io::BufReader, sync::Arc};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Check for duplicate critical headers (VULN-006)
 /// Returns true if duplicate headers are detected
