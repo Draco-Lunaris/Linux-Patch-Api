@@ -14,11 +14,7 @@ use rustls::{
     RootCertStore,
 };
 use rustls_pemfile::{certs, private_key};
-use std::{
-    fs::File,
-    io::BufReader,
-    sync::Arc,
-};
+use std::{fs::File, io::BufReader, sync::Arc};
 use tracing::{info, warn};
 
 /// Check for duplicate critical headers (VULN-006)

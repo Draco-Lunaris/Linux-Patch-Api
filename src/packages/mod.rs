@@ -39,7 +39,6 @@ pub struct InstallOptions {
     pub no_recommends: bool,
 }
 
-
 /// Patch information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Patch {
