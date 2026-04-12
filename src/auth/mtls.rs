@@ -174,6 +174,7 @@ where
 
 pub struct MtlsMiddlewareService<S> {
     service: S,
+    #[allow(dead_code)]
     config: Arc<MtlsConfig>,
     cert_store: Arc<RootCertStore>,
 }

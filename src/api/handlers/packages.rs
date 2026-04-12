@@ -515,7 +515,7 @@ mod tests {
     fn test_api_response_success() {
         let response = ApiResponse::success("test data".to_string());
         assert!(response.success);
-        assert!(response.request_id.len() > 0);
+        assert!(!response.request_id.is_empty());
         assert!(response.data.is_some());
         assert!(response.error.is_none());
     }

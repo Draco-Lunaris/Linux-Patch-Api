@@ -174,17 +174,17 @@ fn get_package_simulated(name: &str) -> Option<String> {
     Some(format!("{}:1.0.0", name))
 }
 
-fn install_package_simulated(packages: &[&str]) -> String {
+fn install_package_simulated(_packages: &[&str]) -> String {
     // Simulates POST /api/v1/packages - returns job_id
     "550e8400-e29b-41d4-a716-446655440000".to_string()
 }
 
-fn update_package_simulated(name: &str) -> String {
+fn update_package_simulated(_name: &str) -> String {
     // Simulates PUT /api/v1/packages/{name}
     "550e8400-e29b-41d4-a716-446655440001".to_string()
 }
 
-fn remove_package_simulated(name: &str) -> String {
+fn remove_package_simulated(_name: &str) -> String {
     // Simulates DELETE /api/v1/packages/{name}
     "550e8400-e29b-41d4-a716-446655440002".to_string()
 }
@@ -194,7 +194,7 @@ fn list_patches_simulated() -> usize {
     42
 }
 
-fn apply_patches_simulated(packages: &[&str]) -> String {
+fn apply_patches_simulated(_packages: &[&str]) -> String {
     // Simulates POST /api/v1/patches/apply
     "550e8400-e29b-41d4-a716-446655440003".to_string()
 }
@@ -209,7 +209,7 @@ fn health_check_simulated() -> &'static str {
     "healthy"
 }
 
-fn reboot_system_simulated(delay: u64) -> String {
+fn reboot_system_simulated(_delay: u64) -> String {
     // Simulates POST /api/v1/system/reboot
     "550e8400-e29b-41d4-a716-446655440004".to_string()
 }
@@ -219,17 +219,17 @@ fn list_jobs_simulated() -> usize {
     25
 }
 
-fn get_job_simulated(job_id: &str) -> Option<String> {
+fn get_job_simulated(_job_id: &str) -> Option<String> {
     // Simulates GET /api/v1/jobs/{id}
     Some("running".to_string())
 }
 
-fn rollback_job_simulated(job_id: &str) -> String {
+fn rollback_job_simulated(_job_id: &str) -> String {
     // Simulates POST /api/v1/jobs/{id}/rollback
     "550e8400-e29b-41d4-a716-446655440005".to_string()
 }
 
-fn delete_job_simulated(job_id: &str) -> String {
+fn delete_job_simulated(_job_id: &str) -> String {
     // Simulates DELETE /api/v1/jobs/{id}
     "deleted".to_string()
 }
