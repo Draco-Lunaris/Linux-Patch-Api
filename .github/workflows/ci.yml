@@ -113,7 +113,7 @@ jobs:
   build-rpm:
     name: Build RPM Package
     runs-on: linux
-    container: node:18
+    container: linux-patch-api-rpm:latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,8 +121,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install RPM build tools
         run: |
-          apt-get update
-          apt-get install -y rpm rpm-common rpmbuild gcc cargo rust libsystemd-dev pkg-config
+          dnf install -y rpm-build gcc cargo rust libsystemd-devel pkg-config
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
