@@ -113,15 +113,16 @@ jobs:
   build-rpm:
     name: Build RPM Package
     runs-on: linux
-    container: fedora:latest
+    container: node:18
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Install RPM build tools
         run: |
-          dnf install -y rpm-build gcc cargo rust libsystemd-devel pkgconfig-pkg-config
+          apt-get update
+          apt-get install -y rpm rpm-common gcc build-essential cargo rustc libsystemd-dev pkg-config
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
