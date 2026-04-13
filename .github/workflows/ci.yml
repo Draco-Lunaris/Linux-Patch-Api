@@ -89,9 +89,9 @@ jobs:
   build-deb:
     name: Build Debian Package
     runs-on: linux
-    container: debian:bookworm
+    container: node:18
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
