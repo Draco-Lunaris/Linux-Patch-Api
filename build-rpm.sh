@@ -28,7 +28,13 @@ echo "Creating source tarball..."
 VERSION="1.0.0"
 TMPDIR=$(mktemp -d)
 mkdir -p "$TMPDIR/linux-patch-api-${VERSION}"
-rsync -a --exclude='target' --exclude='.git' --exclude='releases' --exclude='.github' --exclude='debian' ./ "$TMPDIR/linux-patch-api-${VERSION}/"
+# Copy files excluding unwanted directories using find
+cp -r . "$TMPDIR/linux-patch-api-${VERSION}/"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/target"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.git"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/releases"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.github"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/debian"
 tar -czf ~/rpmbuild/SOURCES/linux-patch-api-${VERSION}.tar.gz -C "$TMPDIR" "linux-patch-api-${VERSION}"
 rm -rf "$TMPDIR"
 
