@@ -8,6 +8,13 @@ set -e
 echo "=== Linux Patch API - Alpine Build Script ==="
 echo ""
 
+# Source cargo environment (for rustup-installed toolchain in CI)
+if [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+fi
+
+# Check if running on Alpine
+
 # Check if running on Alpine
 if ! command -v abuild &> /dev/null; then
     echo "Installing Alpine build tools..."
