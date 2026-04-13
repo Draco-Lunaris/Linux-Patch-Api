@@ -61,6 +61,10 @@ package() {
 }
 EOF
 
+# Generate checksums for APKBUILD sources
+echo "Generating checksums..."
+abuild checksum
+
 # Build APK package
 echo "Building APK package..."
 abuild -F -r
