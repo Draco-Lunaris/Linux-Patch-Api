@@ -47,10 +47,10 @@ url="https://gitea.moon-dragon.us/echo/linux_patch_api"
 arch=('x86_64')
 license=('MIT')
 depends=('systemd')
-source=('arch-package')
 
 package() {
-    cp -r "$srcdir"/arch-package/* "$pkgdir"/
+    # Copy from current working directory (not srcdir)
+    cp -r "$(pwd)"/arch-package/* "$pkgdir"/
 }
 EOF
 
