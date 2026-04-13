@@ -60,7 +60,7 @@ makepkg --printsrcinfo > .SRCINFO
 
 # Build package
 echo "Building Arch package..."
-makepkg -f --noconfirm
+makepkg -f --noconfirm --allow-root
 
 # Copy to releases directory
 echo ""
