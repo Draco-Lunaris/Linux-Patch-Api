@@ -1,3 +1,5 @@
+%global debug_package %{nil}
+
 Name:           linux-patch-api
 Version:        1.0.0
 Release:        1%{?dist}
