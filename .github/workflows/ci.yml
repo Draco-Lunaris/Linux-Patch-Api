@@ -121,7 +121,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install RPM build tools
         run: |
-          dnf install -y rpm-build gcc cargo rust libsystemd-devel pkg-config
+          dnf install -y rpm-build gcc cargo rust systemd-devel pkg-config
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
