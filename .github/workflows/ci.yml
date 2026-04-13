@@ -89,7 +89,7 @@ jobs:
   build-deb:
     name: Build Debian Package
     runs-on: linux
-    container: node:18
+    container: debian:bookworm
     steps:
       - uses: actions/checkout@v2
         with:
