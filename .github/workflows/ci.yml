@@ -89,7 +89,7 @@ jobs:
   build-deb:
     name: Build Debian Package
     runs-on: linux
-    container: node:18
+    container: debian:bookworm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,7 +113,7 @@ jobs:
   build-rpm:
     name: Build RPM Package
     runs-on: linux
-    container: node:18
+    container: fedora:latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,8 +121,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install RPM build tools
         run: |
-          apt-get update
-          apt-get install -y rpm rpm-common gcc build-essential cargo rustc libsystemd-dev pkg-config
+          dnf install -y rpm-build gcc cargo rust libsystemd-devel pkgconfig-pkg-config
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
@@ -137,7 +136,7 @@ jobs:
   build-apk:
     name: Build Alpine Package
     runs-on: linux
-    container: alpine/node:latest
+    container: alpine:latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -162,8 +161,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Install Node.js for GitHub Actions
-        run: pacman -Sy --noconfirm nodejs npm
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm rust cargo systemd git base-devel
