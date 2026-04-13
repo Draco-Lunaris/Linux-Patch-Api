@@ -56,7 +56,7 @@ EOF
 
 # Create .SRCINFO
 echo "Creating .SRCINFO..."
-makepkg --printsrcinfo > .SRCINFO
+makepkg --printsrcinfo --allow-root > .SRCINFO
 
 # Build package
 echo "Building Arch package..."
