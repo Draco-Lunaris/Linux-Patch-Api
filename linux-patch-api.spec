@@ -4,6 +4,7 @@ Release:        1%{?dist}
 Summary:        Secure remote package management API for Linux systems
 License:        MIT
 URL:            https://gitea.moon-dragon.us/echo/linux_patch_api
+Source0:        linux-patch-api-%{version}.tar.gz
 BuildArch:      x86_64
 
 # Build requirements

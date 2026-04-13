@@ -26,13 +26,11 @@ mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 # Create source tarball (required by %autosetup in spec file)
 echo "Creating source tarball..."
 VERSION="1.0.0"
-tar -czf ~/rpmbuild/SOURCES/linux-patch-api-${VERSION}.tar.gz \
-    --exclude='target' \
-    --exclude='.git' \
-    --exclude='releases' \
-    --exclude='.github' \
-    --exclude='debian' \
-    .
+TMPDIR=$(mktemp -d)
+mkdir -p "$TMPDIR/linux-patch-api-${VERSION}"
+rsync -a --exclude='target' --exclude='.git' --exclude='releases' --exclude='.github' --exclude='debian' ./ "$TMPDIR/linux-patch-api-${VERSION}/"
+tar -czf ~/rpmbuild/SOURCES/linux-patch-api-${VERSION}.tar.gz -C "$TMPDIR" "linux-patch-api-${VERSION}"
+rm -rf "$TMPDIR"
 
 # Copy spec file
 echo "Preparing spec file..."
