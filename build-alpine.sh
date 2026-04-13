@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Build Alpine Package (.apk)
 # Run on: Alpine Linux 3.18+
 # Or in Docker: docker run -v $(pwd):/build alpine:latest /build/build-alpine.sh
