@@ -2,7 +2,7 @@
 
 ## System Overview
 
-The Linux_Patch_API is a secure, single-host API service that enables remote package and patch management on Linux systems. Each instance runs as a systemd service on the managed host, providing a REST API over mTLS with strict IP whitelist enforcement.
+The Linux_Patch_API is a secure, single-host API service that enables remote package and patch management on Linux systems. Each instance runs as a system service on the managed host (systemd on most distributions, OpenRC on Alpine), providing a REST API over mTLS with strict IP whitelist enforcement.
 
 **Architecture Type:** Agent Per Host (Option B)  
 **Deployment:** One instance per managed Linux host  
@@ -45,8 +45,9 @@ The Linux_Patch_API is a secure, single-host API service that enables remote pac
    - Distribution detection and adapter selection
 
 6. **Audit Logger**
-   - systemd journal integration (primary)
-   - Optional remote syslog server
+   - System logging integration (primary)
+     - systemd journal on systemd-based systems
+     - syslog/local files on OpenRC-based systems
    - Local file fallback (`/var/log/linux_patch_api/`)
    - 30-day retention with daily rotation and gzip compression
 
@@ -59,9 +60,10 @@ The Linux_Patch_API is a secure, single-host API service that enables remote pac
 ### External Integrations
 
 - **Package Managers:** apt, dnf, yum, apk, pacman (via system commands)
-- **systemd:** Service management and journal logging
+- **Init System:** Service management and logging
+  - systemd (Debian, Ubuntu, RHEL, CentOS, Fedora)
+  - OpenRC (Alpine Linux)
 - **Internal CA:** Certificate validation against self-hosted CA
-- **Remote Syslog:** Optional external log aggregation
 
 ---
 
@@ -74,14 +76,17 @@ The Linux_Patch_API is a secure, single-host API service that enables remote pac
 - **mTLS:** Rust TLS library (rustls or native-tls)
 
 ### Infrastructure
-- **Service Manager:** systemd
+- **Service Manager:** Distribution-dependent
+  - systemd (most distributions)
+  - OpenRC (Alpine Linux)
 - **Configuration:** YAML
-- **Logging:** systemd journal + optional syslog
 
 ### Deployment
 - **Package Format:** Native Linux packages (deb, rpm, apk, pkg.tar.zst)
 - **Distribution:** Via target system package manager (apt, dnf, apk, pacman)
-- **Installation:** Package installs binary, systemd service, and default config structure
+- **Installation:** Package installs binary, init script/service, and default config structure
+  - systemd unit file for systemd distributions
+  - OpenRC init script for Alpine
 - **Updates:** Handled through system package manager
 
 ---
@@ -99,16 +104,21 @@ The Linux_Patch_API is a secure, single-host API service that enables remote pac
 - No granular permissions (binary access: allowed or denied)
 - Whitelisted IP + valid cert = full API access
 
-### Process Security (systemd Hardening)
+### Process Security (Init System Hardening)
 - **User:** root (required for package management)
-- **NoNewPrivileges:** true (prevent privilege escalation)
-- **ProtectSystem:** strict (read-only filesystem except allowed paths)
-- **ProtectHome:** true (no access to /home, /root, /run/user)
-- **PrivateTmp:** true (isolated /tmp)
-- **SystemCallFilter:** Restrict to required syscalls only (application whitelist)
-- **RestrictAddressFamilies:** AF_INET, AF_INET6, AF_UNIX (network restrictions)
-- **CapabilityBoundingSet:** CAP_NET_BIND_SERVICE, CAP_SYS_ADMIN (minimal capabilities)
 
+**systemd Hardening Options:**
+- NoNewPrivileges: true (prevent privilege escalation)
+- ProtectSystem: strict (read-only filesystem except allowed paths)
+- ProtectHome: true (no access to /home, /root, /run/user)
+- PrivateTmp: true (isolated /tmp)
+- SystemCallFilter: Restrict to required syscalls only (application whitelist)
+
+**OpenRC Hardening Options:**
+- Run as dedicated service user
+- File permission restrictions
+- chroot isolation (optional)
+- Equivalent security via rc.conf and init script options
 ### Data Security
 - All communications encrypted via TLS
 - Certificates stored securely with restricted permissions
@@ -149,7 +159,9 @@ The Linux_Patch_API is a secure, single-host API service that enables remote pac
 └── audit.log           # Local audit log fallback
 
 /usr/bin/linux-patch-api  # Binary location
-/etc/systemd/system/linux-patch-api.service  # Systemd service
+Init scripts (distribution-dependent):
+- /etc/systemd/system/linux-patch-api.service  # systemd
+- /etc/init.d/linux-patch-api  # OpenRC (Alpine)
 ```
 ---
 

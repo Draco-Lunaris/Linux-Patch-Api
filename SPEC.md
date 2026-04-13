@@ -41,7 +41,9 @@
 **Primary Objective:** Provide secure API for remote patch/package management on individual Linux hosts
 
 **Key Goals:**
-- Run as systemd service on each managed machine (Option B: Agent Per Host)
+- Run as a system service on each managed machine (Option B: Agent Per Host)
+  - systemd for Debian/Ubuntu, RHEL/CentOS/Fedora
+  - OpenRC for Alpine Linux
 - Internal network access only (no internet exposure)
 - Support Debian/Ubuntu first, then expand to other distributions
 - Maintain audit trail of all operations
@@ -55,7 +57,9 @@
 - One API instance per host
 - Internal network only (LAN/private network)
 - No public internet exposure
-- Must run as systemd service
+- Must run as a system service (init system determined by distribution)
+  - systemd: Debian, Ubuntu, RHEL, CentOS, Fedora
+  - OpenRC: Alpine Linux
 
 **Technical:**
 - Must run with elevated privileges for package management (root/sudo)
@@ -119,7 +123,9 @@
 ## Dependencies
 
 - Linux OS with package manager support
-- systemd for service management
+- Init system for service management (distribution-dependent)
+  - systemd (most distributions)
+  - OpenRC (Alpine Linux)
 - Network access for API communication
 - mTLS certificate infrastructure (CA, client certs)
 - IP whitelist configuration
@@ -147,8 +153,10 @@
   - Configuration changes (whitelist updates, cert renewals)
 
 - **Log Storage:**
-  - Primary: systemd journal (`journalctl`)
-  - Secondary: Optional remote syslog server
+  - Primary: Distribution-appropriate logging
+    - systemd journal (journalctl) on systemd systems
+    - syslog/local files on OpenRC systems
+  - Secondary: Optional remote syslog server (universal)
   - Local file logs as fallback (`/var/log/linux_patch_api/`)
 
 - **Log Retention:**

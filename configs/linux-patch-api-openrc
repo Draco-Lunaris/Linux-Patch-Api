@@ -1,0 +1,72 @@
+#!/sbin/openrc-run
+# OpenRC init script for linux-patch-api
+# Used on Alpine Linux and other OpenRC-based systems
+
+name="linux_patch_api"
+command="/usr/bin/linux-patch-api"
+command_args="--config /etc/linux_patch_api/config.yaml"
+command_background=true
+pidfile="/run/linux-patch-api/linux-patch-api.pid"
+output_log="/var/log/linux_patch_api/linux-patch-api.log"
+error_log="/var/log/linux_patch_api/linux-patch-api.err"
+
+# Required dependencies
+depend() {
+    use net logger
+}
+
+# Create required directories before starting
+start_pre() {
+    checkpath --directory --owner linux-patch-api:linux-patch-api --mode 0755 \
+        /run/linux-patch-api \
+        /var/log/linux-patch-api \
+        /var/lib/linux-patch-api \
+        /etc/linux_patch_api/certs
+    
+    # Ensure config files exist
+    if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
+        eerror "Configuration file missing: /etc/linux_patch_api/config.yaml"
+        eerror "Please create config.yaml before starting the service"
+        return 1
+    fi
+    
+    if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
+        eerror "Whitelist file missing: /etc/linux_patch_api/whitelist.yaml"
+        eerror "Please create whitelist.yaml before starting the service"
+        return 1
+    fi
+}
+
+# Verify service started successfully
+start_post() {
+    sleep 2
+    if [ -f "$pidfile" ]; then
+        einfo "linux-patch-api started successfully (PID: $(cat $pidfile))"
+    else
+        ewarn "linux-patch-api may not have started correctly - pidfile not found"
+    fi
+}
+
+# Clean shutdown
+stop_pre() {
+    einfo "Stopping linux-patch-api service..."
+}
+
+# Verify service stopped
+stop_post() {
+    if [ -f "$pidfile" ]; then
+        rm -f "$pidfile"
+    fi
+    einfo "linux-patch-api stopped"
+}
+
+# Service status
+status() {
+    if [ -f "$pidfile" ] && kill -0 $(cat "$pidfile") 2>/dev/null; then
+        einfo "linux-patch-api is running (PID: $(cat $pidfile))"
+        return 0
+    else
+        eerror "linux-patch-api is not running"
+        return 1
+    fi
+}

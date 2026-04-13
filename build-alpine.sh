@@ -11,7 +11,7 @@ echo ""
 # Check if running on Alpine
 if ! command -v abuild &> /dev/null; then
     echo "Installing Alpine build tools..."
-    apk add --no-cache alpine-sdk rust cargo openssl-dev systemd-dev git
+    apk add --no-cache alpine-sdk rust cargo openssl-dev openrc git
 fi
 
 # Setup build environment
@@ -27,13 +27,13 @@ cargo build --release --target x86_64-unknown-linux-musl
 PKGDIR=$(pwd)/apk-package
 mkdir -p "$PKGDIR"/usr/bin
 mkdir -p "$PKGDIR"/etc/linux_patch_api
-mkdir -p "$PKGDIR"/lib/systemd/system
+mkdir -p "$PKGDIR"/etc/init.d
 
 # Copy files
 cp target/x86_64-unknown-linux-musl/release/linux-patch-api "$PKGDIR"/usr/bin/
 chmod 755 "$PKGDIR"/usr/bin/linux-patch-api
-cp configs/linux-patch-api.service "$PKGDIR"/lib/systemd/system/
-cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml
+cp configs/linux-patch-api-openrc "$PKGDIR"/etc/init.d/linux-patch-api
+chmod 755 "$PKGDIR"/etc/init.d/linux-patch-api
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
 
 # Create APKBUILD
@@ -46,7 +46,7 @@ pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.internal/linux-patch-api"
 arch="x86_64"
 license="MIT"
-depends="systemd"
+depends="openrc"
 source="apk-package"
 
 package() {
