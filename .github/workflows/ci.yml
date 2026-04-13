@@ -150,7 +150,7 @@ jobs:
           cargo --version
       - name: Install build dependencies
         run: |
-          apk add --no-cache musl-dev openssl-dev git abuild
+          apk add --no-cache musl-dev openssl-dev git abuild gcc
       - name: Build APK package
         run: ./build-alpine.sh
       - name: Upload to releases (on tag)
