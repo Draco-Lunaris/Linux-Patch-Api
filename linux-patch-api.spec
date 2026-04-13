@@ -8,13 +8,13 @@ Source0:        linux-patch-api-%{version}.tar.gz
 BuildArch:      x86_64
 
 # Build requirements
-# NOTE: Building in Fedora container (fedora:latest) - native RPM environment
-# BuildRequires validate against Fedora's RPM database
-BuildRequires:  cargo >= 1.75
-BuildRequires:  rust >= 1.75
+# NOTE: Building in Debian container (node:18) - apt packages don't register in RPM db
+# Build tools ARE available (installed via apt-get in ci.yml), just won't validate
+# BuildRequires:  cargo >= 1.75
+# BuildRequires:  rust >= 1.75
 # BuildRequires:  systemd-rpm-macros  # Handling systemd manually
-BuildRequires:  pkgconfig(systemd)
-BuildRequires:  gcc
+# BuildRequires:  pkgconfig(systemd)
+# BuildRequires:  gcc
 
 # Runtime requirements
 Requires:       systemd
