@@ -49,8 +49,8 @@ license=('MIT')
 depends=('systemd')
 
 package() {
-    # Copy from current working directory (not srcdir)
-    cp -r "$(pwd)"/arch-package/* "$pkgdir"/
+    # Use absolute path since makepkg changes working directory to srcdir
+    cp -r /workspace/echo/linux_patch_api/arch-package/* "$pkgdir"/
 }
 EOF
 
