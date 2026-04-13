@@ -10,7 +10,7 @@ BuildArch:      x86_64
 # Build requirements
 BuildRequires:  cargo >= 1.75
 BuildRequires:  rust >= 1.75
-BuildRequires:  systemd-rpm-macros
+# BuildRequires:  systemd-rpm-macros  # Not available on Debian - handling systemd manually
 BuildRequires:  pkgconfig(systemd)
 BuildRequires:  gcc
 

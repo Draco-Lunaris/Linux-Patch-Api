@@ -122,7 +122,7 @@ jobs:
       - name: Install RPM build tools
         run: |
           apt-get update
-          apt-get install -y rpm rpm-common gcc build-essential systemd-rpm-macros cargo rustc libsystemd-dev pkg-config
+          apt-get install -y rpm rpm-common gcc build-essential cargo rustc libsystemd-dev pkg-config
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
