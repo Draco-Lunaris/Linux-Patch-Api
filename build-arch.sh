@@ -43,7 +43,7 @@ pkgname=linux-patch-api
 pkgver=1.0.0
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
-url="https://gitea.internal/linux-patch-api"
+url="https://gitea.moon-dragon.us/echo/linux_patch_api"
 arch=('x86_64')
 license=('MIT')
 depends=('systemd')
@@ -56,11 +56,21 @@ EOF
 
 # Create .SRCINFO
 echo "Creating .SRCINFO..."
-makepkg --printsrcinfo --allow-root > .SRCINFO
 
 # Build package
 echo "Building Arch package..."
-makepkg -f --noconfirm --allow-root
+
+# For CI/container environments where we run as root, create a build user
+if [ "$(id -u)" = "0" ]; then
+    echo "Running as root - creating build user for makepkg..."
+    useradd -m builduser 2>/dev/null || true
+    chown -R builduser:builduser "$(pwd)"
+    su - builduser -c "cd $(pwd) && makepkg --printsrcinfo > .SRCINFO"
+    su - builduser -c "cd $(pwd) && makepkg -f --noconfirm"
+else
+    makepkg --printsrcinfo > .SRCINFO
+    makepkg -f --noconfirm
+fi
 
 # Copy to releases directory
 echo ""
