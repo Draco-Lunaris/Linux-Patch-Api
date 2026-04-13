@@ -136,7 +136,7 @@ jobs:
   build-apk:
     name: Build Alpine Package
     runs-on: linux
-    container: alpine:latest
+    container: node:18-alpine
     steps:
       - uses: actions/checkout@v4
         with:
