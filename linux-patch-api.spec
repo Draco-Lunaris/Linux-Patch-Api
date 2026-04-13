@@ -49,6 +49,7 @@ cargo build --release --target x86_64-unknown-linux-gnu
 %install
 mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/etc/linux_patch_api
+mkdir -p %{buildroot}/etc/linux_patch_api/certs
 mkdir -p %{buildroot}/lib/systemd/system
 mkdir -p %{buildroot}/var/log/linux_patch_api
 mkdir -p %{buildroot}/var/lib/linux_patch_api
