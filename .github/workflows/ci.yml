@@ -152,6 +152,10 @@ jobs:
         run: |
           apk add --no-cache musl-dev openssl-dev git abuild gcc elogind-dev
           abuild-keygen -a -n
+          # Find the generated key and set PACKAGER_PRIVKEY
+          export PACKAGER_PRIVKEY=$(ls /root/.abuild/*.rsa | head -1)
+          echo "PACKAGER_PRIVKEY=$PACKAGER_PRIVKEY" >> $GITHUB_ENV
+          echo "Using key: $PACKAGER_PRIVKEY"
       - name: Build APK package
         run: ./build-alpine.sh
       - name: Upload to releases (on tag)
