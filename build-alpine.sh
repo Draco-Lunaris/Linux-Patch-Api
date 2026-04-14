@@ -116,12 +116,11 @@ if [ "$(id -u)" = "0" ]; then
     # abuild reads this when running as builduser - standard behavior, no shell quoting issues!
     echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
     chown builduser:builduser /home/builduser/.abuild/abuild.conf
-    su - builduser -c "cd $(pwd) && abuild checksum && abuild -d -F"
-    cat /home/builduser/.abuild/abuild.conf
-    
+    su - builduser -c "cd $(pwd) && abuild checksum && abuild -d -F && cp /home/builduser/packages/x86_64/*.apk ./releases/ 2>/dev/null || cp /home/builduser/packages/*.apk ./releases/ 2>/dev/null || ls -la /home/builduser/packages/"
 else
     abuild checksum
     abuild -F -r
+    cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || true
 fi
 
 # Copy to releases directory
