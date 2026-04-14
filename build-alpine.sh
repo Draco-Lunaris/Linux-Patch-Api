@@ -103,8 +103,13 @@ if [ "$(id -u)" = "0" ]; then
     echo "Key file: $KEYFILE"
     echo "Key file exists: $(test -f "$KEYFILE" && echo YES || echo NO)"
     
-    # CRITICAL: Export PACKAGER_PRIVKEY (double quotes for variable expansion!)
-    export PACKAGER_PRIVKEY="$KEYFILE"
+    # CRITICAL: Write to builduser's PERSONAL abuild.conf (~/.abuild/abuild.conf)
+    # abuild reads this when running as builduser - standard behavior, no shell quoting issues!
+    echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
+    chown builduser:builduser /home/builduser/.abuild/abuild.conf
+    echo "builduser abuild.conf:"
+    cat /home/builduser/.abuild/abuild.conf
+    
     su - builduser -c "cd $(pwd) && abuild checksum && abuild -F -r"
 else
     abuild checksum
