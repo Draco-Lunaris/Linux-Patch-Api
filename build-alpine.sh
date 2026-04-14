@@ -63,11 +63,21 @@ EOF
 
 # Generate checksums for APKBUILD sources
 echo "Generating checksums..."
-abuild checksum
 
 # Build APK package
 echo "Building APK package..."
-abuild -F -r
+
+# For CI/container environments where we run as root, create a build user
+if [ "$(id -u)" = "0" ]; then
+    echo "Running as root - creating build user for abuild..."
+    adduser -D -s /bin/sh builduser 2>/dev/null || true
+    chown -R builduser:builduser "$(pwd)"
+    chown -R builduser:builduser /root/packages 2>/dev/null || true
+    su - builduser -c "cd $(pwd) && abuild checksum && abuild -F -r"
+else
+    abuild checksum
+    abuild -F -r
+fi
 
 # Copy to releases directory
 echo ""
