@@ -16,9 +16,26 @@ fi
 # Check if running on Alpine
 
 # Check if running on Alpine
+# Check if running on Alpine
 if ! command -v abuild &> /dev/null; then
     echo "Installing Alpine build tools..."
     apk add --no-cache alpine-sdk rust cargo openssl-dev openrc git
+fi
+
+# Generate abuild signing keys (must be done in same shell session as abuild commands)
+if [ ! -f /etc/abuild.conf ] || ! grep -q PACKAGER_PRIVKEY /etc/abuild.conf 2>/dev/null; then
+    echo "Generating abuild signing keys..."
+    apk add --no-cache abuild
+    abuild-keygen -a -n 2>&1 | tee /tmp/keygen.log
+    # Find the actual key file (handles missing username prefix)
+    KEYFILE=$(ls /root/.abuild/*.rsa 2>/dev/null | head -1)
+    if [ -z "$KEYFILE" ]; then
+        KEYFILE=$(ls /root/.abuild/-*.rsa 2>/dev/null | head -1)
+    fi
+    echo "Found key: $KEYFILE"
+    # Write directly to abuild.conf
+    echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" >> /etc/abuild.conf
+    cat /etc/abuild.conf
 fi
 
 # Setup build environment
