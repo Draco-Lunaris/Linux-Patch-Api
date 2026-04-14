@@ -1,0 +1,13 @@
+# Arch Linux container with Node.js for GitHub Actions support
+# Used for Arch package builds in CI/CD
+FROM archlinux:latest
+
+# Update system and install Node.js (required for GitHub Actions JavaScript-based actions)
+RUN pacman -Syu --noconfirm nodejs npm && \
+    pacman -Scc --noconfirm
+
+# Verify node is available
+RUN node --version
+
+# Default command (not used in CI, but good for testing)
+CMD ["/bin/bash"]

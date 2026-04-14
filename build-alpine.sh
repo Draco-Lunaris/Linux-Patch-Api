@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Build Alpine Package (.apk)
 # Run on: Alpine Linux 3.18+
 # Or in Docker: docker run -v $(pwd):/build alpine:latest /build/build-alpine.sh
@@ -8,11 +8,33 @@ set -e
 echo "=== Linux Patch API - Alpine Build Script ==="
 echo ""
 
+# Source cargo environment (for rustup-installed toolchain in CI)
+if [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+fi
+
+# Check if running on Alpine
+
+# Check if running on Alpine
 # Check if running on Alpine
 if ! command -v abuild &> /dev/null; then
     echo "Installing Alpine build tools..."
-    apk add --no-cache alpine-sdk rust cargo openssl-dev systemd-dev git
+    apk add --no-cache alpine-sdk rust cargo openssl-dev openrc git
 fi
+
+# Generate abuild signing keys (ALWAYS generate fresh - same shell session as abuild commands)
+echo "Generating abuild signing keys..."
+apk add --no-cache abuild
+abuild-keygen -a -n 2>&1 | tee /tmp/keygen.log
+# Find the actual key file (handles missing username prefix)
+KEYFILE=$(ls /root/.abuild/*.rsa 2>/dev/null | head -1)
+if [ -z "$KEYFILE" ]; then
+    KEYFILE=$(ls /root/.abuild/-*.rsa 2>/dev/null | head -1)
+fi
+echo "Found key: $KEYFILE"
+# Write directly to abuild.conf (overwrite any stale config)
+echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /etc/abuild.conf
+cat /etc/abuild.conf
 
 # Setup build environment
 echo "Setting up build environment..."
@@ -27,13 +49,13 @@ cargo build --release --target x86_64-unknown-linux-musl
 PKGDIR=$(pwd)/apk-package
 mkdir -p "$PKGDIR"/usr/bin
 mkdir -p "$PKGDIR"/etc/linux_patch_api
-mkdir -p "$PKGDIR"/lib/systemd/system
+mkdir -p "$PKGDIR"/etc/init.d
 
 # Copy files
 cp target/x86_64-unknown-linux-musl/release/linux-patch-api "$PKGDIR"/usr/bin/
 chmod 755 "$PKGDIR"/usr/bin/linux-patch-api
-cp configs/linux-patch-api.service "$PKGDIR"/lib/systemd/system/
-cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml
+cp configs/linux-patch-api-openrc "$PKGDIR"/etc/init.d/linux-patch-api
+chmod 755 "$PKGDIR"/etc/init.d/linux-patch-api
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
 
 # Create APKBUILD
@@ -46,17 +68,60 @@ pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.internal/linux-patch-api"
 arch="x86_64"
 license="MIT"
-depends="systemd"
-source="apk-package"
+makedepends=""
+depends="openrc"
+source=""
 
 package() {
-    cp -r "$srcdir"/apk-package/* "$pkgdir"/
+    # Create directory structure in pkgdir
+    install -d "$pkgdir"/usr/bin
+    install -d "$pkgdir"/etc/linux_patch_api
+    install -d "$pkgdir"/etc/init.d
+    # Copy from pre-built apk-package directory
+    cp -r /workspace/echo/linux_patch_api/apk-package/usr/bin/* "$pkgdir"/usr/bin/
+    cp -r /workspace/echo/linux_patch_api/apk-package/etc/linux_patch_api/* "$pkgdir"/etc/linux_patch_api/
+    cp -r /workspace/echo/linux_patch_api/apk-package/etc/init.d/* "$pkgdir"/etc/init.d/
 }
 EOF
 
+# Generate checksums for APKBUILD sources
+echo "Generating checksums..."
+
 # Build APK package
 echo "Building APK package..."
-abuild -F -r
+
+# For CI/container environments where we run as root, create a build user
+if [ "$(id -u)" = "0" ]; then
+    echo "Running as root - creating build user for abuild..."
+    adduser -D -s /bin/sh builduser 2>/dev/null || true
+    # CRITICAL: Add builduser to abuild group (required for apk install permissions)
+    addgroup builduser abuild 2>/dev/null || usermod -aG abuild builduser
+    chown -R builduser:builduser "$(pwd)"
+    chown -R builduser:builduser /root/packages 2>/dev/null || true
+    # Copy abuild keys from root to builduser home
+    mkdir -p /home/builduser/.abuild
+    cp /root/.abuild/* /home/builduser/.abuild/
+    chown -R builduser:builduser /home/builduser/.abuild
+    
+    # Find the actual key file
+    KEYFILE=$(ls /home/builduser/.abuild/*.rsa 2>/dev/null | head -1)
+    if [ -z "$KEYFILE" ]; then
+        KEYFILE=$(ls /home/builduser/.abuild/-*.rsa 2>/dev/null | head -1)
+    fi
+    
+    echo "Key file: $KEYFILE"
+    echo "Key file exists: $(test -f "$KEYFILE" && echo YES || echo NO)"
+    
+    # CRITICAL: Write to builduser's PERSONAL abuild.conf (~/.abuild/abuild.conf)
+    # abuild reads this when running as builduser - standard behavior, no shell quoting issues!
+    echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
+    chown builduser:builduser /home/builduser/.abuild/abuild.conf
+    su - builduser -c "cd $(pwd) && abuild checksum && abuild -d -F && cp /home/builduser/packages/x86_64/*.apk ./releases/ 2>/dev/null || cp /home/builduser/packages/*.apk ./releases/ 2>/dev/null || ls -la /home/builduser/packages/"
+else
+    abuild checksum
+    abuild -F -r
+    cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || true
+fi
 
 # Copy to releases directory
 echo ""

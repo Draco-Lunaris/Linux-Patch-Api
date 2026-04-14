@@ -1,0 +1,14 @@
+# Fedora container with Node.js for GitHub Actions support
+# Used for RPM package builds in CI/CD
+FROM fedora:latest
+
+# Install Node.js (required for GitHub Actions JavaScript-based actions)
+# Also install dnf-plugins-core for potential multiarch support
+RUN dnf install -y nodejs dnf-plugins-core && \
+    dnf clean all
+
+# Verify node is available
+RUN node --version
+
+# Default command (not used in CI, but good for testing)
+CMD ["/bin/bash"]
