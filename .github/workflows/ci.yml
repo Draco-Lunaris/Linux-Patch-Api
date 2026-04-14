@@ -113,7 +113,15 @@ jobs:
             RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
             RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
           fi
-          [ -n "$RELEASE_ID" ] && curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -F "name=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)" && echo "Uploaded $FILE"
+          if [ -n "$RELEASE_ID" ]; then
+            echo "Uploading $FILE to release $RELEASE_ID..."
+            UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+              -H "Authorization: token $GITEA_TOKEN" \
+              -F "attachment=@$FILE" \
+              "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+            echo "Response: $UPLOAD_RESPONSE"
+            echo "Uploaded $FILE"
+          fi
 
   # RHEL/CentOS/Fedora Package Build
   build-rpm:
@@ -146,7 +154,15 @@ jobs:
             RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
             RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
           fi
-          [ -n "$RELEASE_ID" ] && curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -F "name=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)" && echo "Uploaded $FILE"
+          if [ -n "$RELEASE_ID" ]; then
+            echo "Uploading $FILE to release $RELEASE_ID..."
+            UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+              -H "Authorization: token $GITEA_TOKEN" \
+              -F "attachment=@$FILE" \
+              "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+            echo "Response: $UPLOAD_RESPONSE"
+            echo "Uploaded $FILE"
+          fi
 
   # Alpine Package Build
   build-apk:
@@ -184,7 +200,15 @@ jobs:
             RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
             RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
           fi
-          [ -n "$RELEASE_ID" ] && curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -F "name=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)" && echo "Uploaded $FILE"
+          if [ -n "$RELEASE_ID" ]; then
+            echo "Uploading $FILE to release $RELEASE_ID..."
+            UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+              -H "Authorization: token $GITEA_TOKEN" \
+              -F "attachment=@$FILE" \
+              "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+            echo "Response: $UPLOAD_RESPONSE"
+            echo "Uploaded $FILE"
+          fi
 
   # Arch Linux Package Build
   build-arch:
@@ -216,4 +240,12 @@ jobs:
             RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
             RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
           fi
-          [ -n "$RELEASE_ID" ] && curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -F "name=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)" && echo "Uploaded $FILE"
+          if [ -n "$RELEASE_ID" ]; then
+            echo "Uploading $FILE to release $RELEASE_ID..."
+            UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+              -H "Authorization: token $GITEA_TOKEN" \
+              -F "attachment=@$FILE" \
+              "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+            echo "Response: $UPLOAD_RESPONSE"
+            echo "Uploaded $FILE"
+          fi
