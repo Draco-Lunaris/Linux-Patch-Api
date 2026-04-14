@@ -73,8 +73,14 @@ depends="openrc"
 source=""
 
 package() {
-    # Copy from workspace path (not srcdir - apk-package is created dynamically)
-    cp -r /workspace/echo/linux_patch_api/apk-package/* "$pkgdir"/
+    # Create directory structure in pkgdir
+    install -d "$pkgdir"/usr/bin
+    install -d "$pkgdir"/etc/linux_patch_api
+    install -d "$pkgdir"/etc/init.d
+    # Copy from pre-built apk-package directory
+    cp -r /workspace/echo/linux_patch_api/apk-package/usr/bin/* "$pkgdir"/usr/bin/
+    cp -r /workspace/echo/linux_patch_api/apk-package/etc/linux_patch_api/* "$pkgdir"/etc/linux_patch_api/
+    cp -r /workspace/echo/linux_patch_api/apk-package/etc/init.d/* "$pkgdir"/etc/init.d/
 }
 EOF
 
