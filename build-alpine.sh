@@ -60,7 +60,6 @@ package() {
     # Copy from workspace path (not srcdir - apk-package is created dynamically)
     cp -r /workspace/echo/linux_patch_api/apk-package/* "$pkgdir"/
 }
-}
 EOF
 
 # Generate checksums for APKBUILD sources
