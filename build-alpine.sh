@@ -95,6 +95,18 @@ if [ "$(id -u)" = "0" ]; then
     mkdir -p /home/builduser/.abuild
     cp /root/.abuild/* /home/builduser/.abuild/
     chown -R builduser:builduser /home/builduser/.abuild
+    
+    # Find the actual key file
+    KEYFILE=$(ls /home/builduser/.abuild/*.rsa 2>/dev/null | head -1)
+    if [ -z "$KEYFILE" ]; then
+        KEYFILE=$(ls /home/builduser/.abuild/-*.rsa 2>/dev/null | head -1)
+    fi
+    
+    echo "Key file: $KEYFILE"
+    echo "Key file exists: $(test -f "$KEYFILE" && echo YES || echo NO)"
+    
+    # CRITICAL: Export PACKAGER_PRIVKEY (double quotes for variable expansion!)
+    export PACKAGER_PRIVKEY="$KEYFILE"
     su - builduser -c "cd $(pwd) && abuild checksum && abuild -F -r"
 else
     abuild checksum
