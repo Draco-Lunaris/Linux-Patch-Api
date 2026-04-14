@@ -110,7 +110,7 @@ if [ "$(id -u)" = "0" ]; then
     # abuild reads this when running as builduser - standard behavior, no shell quoting issues!
     echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
     chown builduser:builduser /home/builduser/.abuild/abuild.conf
-    su - builduser -c "cd $(pwd) && ABUILD_NODEPENDS=1 abuild checksum && ABUILD_NODEPENDS=1 abuild -G -F"
+    su - builduser -c "cd $(pwd) && abuild checksum && abuild -d -F"
     cat /home/builduser/.abuild/abuild.conf
     
 else
