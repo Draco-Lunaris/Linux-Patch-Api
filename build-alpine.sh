@@ -68,6 +68,7 @@ pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.internal/linux-patch-api"
 arch="x86_64"
 license="MIT"
+makedepends=""
 depends="openrc"
 source=""
 
@@ -109,10 +110,9 @@ if [ "$(id -u)" = "0" ]; then
     # abuild reads this when running as builduser - standard behavior, no shell quoting issues!
     echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
     chown builduser:builduser /home/builduser/.abuild/abuild.conf
-    echo "builduser abuild.conf:"
+    su - builduser -c "cd $(pwd) && ABUILD_NODEPENDS=1 abuild checksum && ABUILD_NODEPENDS=1 abuild -G -F"
     cat /home/builduser/.abuild/abuild.conf
     
-    su - builduser -c "cd $(pwd) && abuild checksum && abuild -F -r"
 else
     abuild checksum
     abuild -F -r
