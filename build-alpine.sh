@@ -54,10 +54,12 @@ url="https://gitea.internal/linux-patch-api"
 arch="x86_64"
 license="MIT"
 depends="openrc"
-source="apk-package"
+source=""
 
 package() {
-    cp -r "$srcdir"/apk-package/* "$pkgdir"/
+    # Copy from workspace path (not srcdir - apk-package is created dynamically)
+    cp -r /workspace/echo/linux_patch_api/apk-package/* "$pkgdir"/
+}
 }
 EOF
 
