@@ -151,17 +151,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apk add --no-cache musl-dev openssl-dev git abuild gcc elogind-dev
-          # Generate keys and capture the key path from output
-          abuild-keygen -a -n 2>&1 | tee /tmp/keygen.log
-          # Find the actual key file (handles missing username prefix)
-          KEYFILE=$(ls /root/.abuild/*.rsa 2>/dev/null | head -1)
-          if [ -z "$KEYFILE" ]; then
-            KEYFILE=$(ls /root/.abuild/-*.rsa 2>/dev/null | head -1)
-          fi
-          echo "Found key: $KEYFILE"
-          # Write directly to abuild.conf (more reliable than env var)
-          echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" >> /etc/abuild.conf
-          cat /etc/abuild.conf
+          # NOTE: abuild-keygen is now done inside build-alpine.sh to ensure keys persist in same shell session
       - name: Build APK package
         run: ./build-alpine.sh
       - name: Upload to releases (on tag)
