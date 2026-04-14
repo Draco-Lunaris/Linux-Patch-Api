@@ -99,11 +99,12 @@ jobs:
         run: dpkg-buildpackage -us -uc -b
       - name: Copy .deb to workspace
         run: cp ../linux-patch-api_*.deb .
-      - name: Upload to releases (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: linux-patch-api_*.deb
+          name: linux-patch-api-deb
+          path: linux-patch-api_*.deb
+          retention-days: 1
 
   # RHEL/CentOS/Fedora Package Build
   build-rpm:
@@ -122,11 +123,12 @@ jobs:
         run: cargo build --release
       - name: Build RPM package
         run: ./build-rpm.sh
-      - name: Upload to releases (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: ~/rpmbuild/RPMS/x86_64/*.rpm
+          name: linux-patch-api-rpm
+          path: ~/rpmbuild/RPMS/x86_64/*.rpm
+          retention-days: 1
 
   # Alpine Package Build
   build-apk:
@@ -150,11 +152,12 @@ jobs:
           # NOTE: abuild-keygen is now done inside build-alpine.sh to ensure keys persist in same shell session
       - name: Build APK package
         run: ./build-alpine.sh
-      - name: Upload to releases (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: releases/*.apk
+          name: linux-patch-api-apk
+          path: releases/*.apk
+          retention-days: 1
 
   # Arch Linux Package Build
   build-arch:
@@ -172,9 +175,64 @@ jobs:
         run: cargo build --release
       - name: Build Arch package
         run: ./build-arch.sh
-      - name: Upload to releases (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: releases/*.pkg.tar.zst
+          name: linux-patch-api-arch
+          path: releases/*.pkg.tar.zst
+          retention-days: 1
 
+  release:
+    name: Create Gitea Release
+    needs: [build-deb, build-rpm, build-apk, build-arch]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: linux
+    container: curlimages/curl:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linux-patch-api-*
+          path: ./artifacts
+      - name: Create release and upload assets
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_API: https://gitea.moon-dragon.us/api/v1
+          REPO: echo/linux_patch_api
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "Creating release for $TAG_NAME"
+          
+          # Create release
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token $GITEA_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\", \"draft\": false, \"prerelease\": false}" \
+            "$GITEA_API/repos/$REPO/releases" 2>&1) || true
+          
+          # Get release ID (might already exist)
+          RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          if [ -z "$RELEASE_ID" ]; then
+            # Release exists, get ID from tag
+            RELEASE_ID=$(curl -s -H "Authorization: token $GITEA_TOKEN" \
+              "$GITEA_API/repos/$REPO/releases/tags/$TAG_NAME" | grep -o '"id":[0-9]*' | cut -d: -f2)
+          fi
+          echo "Release ID: $RELEASE_ID"
+          
+          # Upload all artifacts
+          cd ./artifacts
+          for FILE in */*; do
+            if [ -f "$FILE" ]; then
+              FILENAME=$(basename "$FILE")
+              echo "Uploading $FILENAME..."
+              curl -s -X POST \
+                -H "Authorization: token $GITEA_TOKEN" \
+                -F "name=@$FILE" \
+                "$GITEA_API/repos/$REPO/releases/$RELEASE_ID/assets?name=$FILENAME"
+              echo ""
+            fi
+          done
+          echo "Release upload complete!"
