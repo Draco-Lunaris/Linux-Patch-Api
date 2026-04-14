@@ -87,6 +87,8 @@ echo "Building APK package..."
 if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for abuild..."
     adduser -D -s /bin/sh builduser 2>/dev/null || true
+    # CRITICAL: Add builduser to abuild group (required for apk install permissions)
+    addgroup builduser abuild 2>/dev/null || usermod -aG abuild builduser
     chown -R builduser:builduser "$(pwd)"
     chown -R builduser:builduser /root/packages 2>/dev/null || true
     # Copy abuild keys from root to builduser home
