@@ -74,6 +74,10 @@ if [ "$(id -u)" = "0" ]; then
     adduser -D -s /bin/sh builduser 2>/dev/null || true
     chown -R builduser:builduser "$(pwd)"
     chown -R builduser:builduser /root/packages 2>/dev/null || true
+    # Copy abuild keys from root to builduser home
+    mkdir -p /home/builduser/.abuild
+    cp /root/.abuild/* /home/builduser/.abuild/
+    chown -R builduser:builduser /home/builduser/.abuild
     su - builduser -c "cd $(pwd) && abuild checksum && abuild -F -r"
 else
     abuild checksum
