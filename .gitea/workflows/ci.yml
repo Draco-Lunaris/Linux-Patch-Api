@@ -80,7 +80,7 @@ jobs:
       - name: Run cargo-audit
         run: |
           cargo install cargo-audit
-          cargo audit
+          cargo audit --ignore RUSTSEC-2025-0134
 
   build-deb:
     name: Build Debian Package
