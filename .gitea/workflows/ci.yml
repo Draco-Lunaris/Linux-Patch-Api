@@ -1,8 +1,9 @@
-name: CI Pipeline
+name: CI/CD Pipeline
 
 on:
   push:
     branches: [ master, develop ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ master ]
 
@@ -96,6 +97,24 @@ jobs:
           apt-get install -y build-essential debhelper cargo rustc libsystemd-dev pkg-config
       - name: Build Debian package
         run: dpkg-buildpackage -us -uc -b
+      - name: Upload to Gitea Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
+          GITEA_API: https://gitea.moon-dragon.us/api/v1
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          FILE=$(ls ../linux-patch-api_*.deb 2>/dev/null | head -1)
+          [ -z "$FILE" ] && echo "No .deb found" && exit 0
+          RELEASE_ID=$(curl -s -H "Authorization: token $GITEA_TOKEN" "$GITEA_API/repos/echo/linux_patch_api/releases/tags/$TAG_NAME" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          if [ -z "$RELEASE_ID" ]; then
+            RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
+            RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          fi
+          UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST -H "Authorization: token $GITEA_TOKEN" -F "attachment=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+          HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then echo "Upload failed $HTTP_CODE" && exit 1; fi
+          echo "Successfully uploaded $FILE"
 
   build-rpm:
     name: Build RPM Package
@@ -113,6 +132,24 @@ jobs:
         run: cargo build --release
       - name: Build RPM package
         run: ./build-rpm.sh
+      - name: Upload to Gitea Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
+          GITEA_API: https://gitea.moon-dragon.us/api/v1
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          FILE=$(ls ~/rpmbuild/RPMS/x86_64/*.rpm 2>/dev/null | head -1)
+          [ -z "$FILE" ] && echo "No .rpm found" && exit 0
+          RELEASE_ID=$(curl -s -H "Authorization: token $GITEA_TOKEN" "$GITEA_API/repos/echo/linux_patch_api/releases/tags/$TAG_NAME" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          if [ -z "$RELEASE_ID" ]; then
+            RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
+            RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          fi
+          UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST -H "Authorization: token $GITEA_TOKEN" -F "attachment=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+          HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then echo "Upload failed $HTTP_CODE" && exit 1; fi
+          echo "Successfully uploaded $FILE"
 
   build-apk:
     name: Build Alpine Package
@@ -132,6 +169,24 @@ jobs:
           apk add --no-cache musl-dev openssl-dev git abuild gcc elogind-dev
       - name: Build APK package
         run: ./build-alpine.sh
+      - name: Upload to Gitea Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
+          GITEA_API: https://gitea.moon-dragon.us/api/v1
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          FILE=$(ls releases/*.apk 2>/dev/null | head -1)
+          [ -z "$FILE" ] && echo "No .apk found" && exit 0
+          RELEASE_ID=$(curl -s -H "Authorization: token $GITEA_TOKEN" "$GITEA_API/repos/echo/linux_patch_api/releases/tags/$TAG_NAME" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          if [ -z "$RELEASE_ID" ]; then
+            RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
+            RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          fi
+          UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST -H "Authorization: token $GITEA_TOKEN" -F "attachment=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+          HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then echo "Upload failed $HTTP_CODE" && exit 1; fi
+          echo "Successfully uploaded $FILE"
 
   build-arch:
     name: Build Arch Package
@@ -148,3 +203,21 @@ jobs:
         run: cargo build --release
       - name: Build Arch package
         run: ./build-arch.sh
+      - name: Upload to Gitea Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
+          GITEA_API: https://gitea.moon-dragon.us/api/v1
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          FILE=$(ls releases/*.pkg.tar.zst 2>/dev/null | head -1)
+          [ -z "$FILE" ] && echo "No .pkg.tar.zst found" && exit 0
+          RELEASE_ID=$(curl -s -H "Authorization: token $GITEA_TOKEN" "$GITEA_API/repos/echo/linux_patch_api/releases/tags/$TAG_NAME" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          if [ -z "$RELEASE_ID" ]; then
+            RESPONSE=$(curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" -d "{\"tag_name\": \"$TAG_NAME\", \"name\": \"$TAG_NAME\"}" "$GITEA_API/repos/echo/linux_patch_api/releases")
+            RELEASE_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+          fi
+          UPLOAD_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST -H "Authorization: token $GITEA_TOKEN" -F "attachment=@$FILE" "$GITEA_API/repos/echo/linux_patch_api/releases/$RELEASE_ID/assets?name=$(basename $FILE)")
+          HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then echo "Upload failed $HTTP_CODE" && exit 1; fi
+          echo "Successfully uploaded $FILE"
