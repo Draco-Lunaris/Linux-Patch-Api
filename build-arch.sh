@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build Arch Linux Package (.pkg.tar.zst)
-# Run on: Arch Linux, Manjaro
-# Or in Docker: docker run -v $(pwd):/build archlinux:latest /build/build-arch.sh
+# Run on: Arch Linux / Manjaro
+# Designed for native Gitea Actions runner execution
 
 set -e
 
@@ -11,17 +11,16 @@ echo ""
 # Check if running on Arch
 if ! command -v makepkg &> /dev/null; then
     echo "Error: makepkg not found. This script must run on Arch Linux."
-    echo "Or use Docker: docker run -v \$(pwd):/build archlinux:latest /build/build-arch.sh"
     exit 1
 fi
 
-# Install build dependencies
-echo "Installing build dependencies..."
-pacman -Syu --noconfirm rust cargo systemd git base-devel
-
 # Build release binary
-echo "Building release binary..."
-cargo build --release
+if [ -z "$SKIP_CARGO_BUILD" ]; then
+    echo "Building release binary..."
+    cargo build --release
+else
+    echo "Skipping cargo build (SKIP_CARGO_BUILD is set)"
+fi
 
 # Create package directory
 PKGDIR=$(pwd)/arch-package
@@ -36,9 +35,12 @@ cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
 
+# Determine workspace path for PKGBUILD
+WORKSPACE_DIR=$(pwd)
+
 # Create PKGBUILD
 echo "Creating PKGBUILD..."
-cat > PKGBUILD << 'EOF'
+cat > PKGBUILD << EOF
 pkgname=linux-patch-api
 pkgver=1.0.0
 pkgrel=1
@@ -49,8 +51,7 @@ license=('MIT')
 depends=('systemd')
 
 package() {
-    # Use absolute path since makepkg changes working directory to srcdir
-    cp -r /workspace/echo/linux_patch_api/arch-package/* "$pkgdir"/
+    cp -r ${WORKSPACE_DIR}/arch-package/* "$pkgdir"/
 }
 EOF
 
@@ -60,7 +61,7 @@ echo "Creating .SRCINFO..."
 # Build package
 echo "Building Arch package..."
 
-# For CI/container environments where we run as root, create a build user
+# For CI environments where we may run as root
 if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for makepkg..."
     useradd -m builduser 2>/dev/null || true
