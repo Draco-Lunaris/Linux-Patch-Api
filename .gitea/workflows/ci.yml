@@ -16,14 +16,16 @@ jobs:
     name: Code Format
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          . "$HOME/.cargo/env"
+          rustup component add rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -31,15 +33,16 @@ jobs:
     name: Clippy Lints
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          . "$HOME/.cargo/env"
           rustup component add clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -51,14 +54,15 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -70,14 +74,15 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -92,14 +97,15 @@ jobs:
     needs: [fmt, clippy, test]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -121,14 +127,15 @@ jobs:
     needs: [fmt, clippy, test]
     runs-on: fedora
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
         run: sudo dnf install -y rpm-build gcc systemd-devel pkg-config
       - name: Build release binary
@@ -152,20 +159,20 @@ jobs:
     needs: [fmt, clippy, test]
     runs-on: alpine
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           apk add --no-cache curl bash
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
-          source "$HOME/.cargo/env"
+          . "$HOME/.cargo/env"
           rustup target add x86_64-unknown-linux-musl
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
         run: |
-          apk add --no-cache alpine-sdk rust cargo openssl-dev elogind-dev musl-dev git abuild gcc nodejs
+          apk add --no-cache alpine-sdk rust cargo openssl-dev elogind-dev musl-dev git abuild gcc
       - name: Build release binary
         run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Build Alpine package
@@ -187,14 +194,15 @@ jobs:
     needs: [fmt, clippy, test]
     runs-on: arch
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        run: |
+          git fetch --unshallow 2>/dev/null || true
+          git checkout "$GITHUB_SHA" || true
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
         run: sudo pacman -Syu --noconfirm rust cargo systemd git base-devel
       - name: Build release binary
