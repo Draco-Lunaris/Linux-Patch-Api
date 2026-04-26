@@ -17,9 +17,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -34,9 +47,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -55,9 +81,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -75,9 +114,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -98,9 +150,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -128,9 +193,22 @@ jobs:
     runs-on: fedora
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -160,9 +238,22 @@ jobs:
     runs-on: alpine
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           apk add --no-cache curl bash
@@ -195,9 +286,22 @@ jobs:
     runs-on: arch
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
-          git fetch --unshallow 2>/dev/null || true
-          git checkout "$GITHUB_SHA" || true
+          set -e
+          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api.git"
+          if [ ! -f "Cargo.toml" ]; then
+            rm -rf .git 2>/dev/null || true
+            if [ -n "$GITEA_TOKEN" ]; then
+              git clone --depth 1 "https://token:${GITEA_TOKEN}@gitea-lxc.moon-dragon.us/echo/linux_patch_api.git" .
+            else
+              git clone --depth 1 "$REPO_URL" .
+            fi
+          fi
+          git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
