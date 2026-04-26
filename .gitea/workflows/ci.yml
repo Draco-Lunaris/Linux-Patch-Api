@@ -17,19 +17,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -44,19 +39,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -75,19 +65,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -105,19 +90,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -138,19 +118,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -178,19 +153,14 @@ jobs:
     runs-on: fedora
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
@@ -220,29 +190,24 @@ jobs:
     runs-on: alpine
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
-          apk add --no-cache curl bash
+          apk add --no-cache curl bash git openssh-client
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           . "$HOME/.cargo/env"
           rustup target add x86_64-unknown-linux-musl
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
         run: |
-          apk add --no-cache alpine-sdk rust cargo openssl-dev elogind-dev musl-dev git abuild gcc
+          apk add --no-cache alpine-sdk rust cargo openssl-dev elogind-dev musl-dev abuild gcc
       - name: Build release binary
         run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Build Alpine package
@@ -265,19 +230,14 @@ jobs:
     runs-on: arch
     steps:
       - name: Checkout repository
-        env:
-          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
-          REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
-          echo "Downloading archive from $REPO_URL ..."
-          if [ -n "$GITEA_TOKEN" ]; then
-            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
-          else
-            curl -sfL "$REPO_URL" -o repo.tar.gz
-          fi
-          tar -xzf repo.tar.gz --strip-components=1
-          rm -f repo.tar.gz
+          mkdir -p ~/.ssh
+          ssh-keyscan -H gitea-lxc.moon-dragon.us >> ~/.ssh/known_hosts 2>/dev/null || true
+          git clone --depth 1 git@gitea-lxc.moon-dragon.us:echo/linux_patch_api.git .
+          git config --global --add safe.directory "$(pwd)"
+          git fetch origin "$GITHUB_SHA" --depth=1
+          git checkout -f "$GITHUB_SHA"
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
