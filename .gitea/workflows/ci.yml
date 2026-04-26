@@ -19,9 +19,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -32,15 +34,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          rustup component add clippy
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libsystemd-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -51,13 +54,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libsystemd-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --all-features
 
@@ -68,13 +73,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libsystemd-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
       - name: Run cargo-audit
         run: |
           cargo install cargo-audit
@@ -88,9 +95,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -115,9 +124,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
       - name: Install build dependencies
         run: sudo dnf install -y rpm-build gcc systemd-devel pkg-config
       - name: Build release binary
@@ -144,11 +155,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Install Rust
+        run: |
+          apk add --no-cache curl bash
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          source "$HOME/.cargo/env"
+          rustup target add x86_64-unknown-linux-musl
       - name: Install build dependencies
         run: |
-          apk add --no-cache alpine-sdk rust cargo openssl-dev elogind-dev musl-dev git abuild gcc bash curl nodejs
+          apk add --no-cache alpine-sdk rust cargo openssl-dev elogind-dev musl-dev git abuild gcc nodejs
       - name: Build release binary
         run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Build Alpine package
@@ -173,9 +190,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
       - name: Install build dependencies
         run: sudo pacman -Syu --noconfirm rust cargo systemd git base-devel
       - name: Build release binary
