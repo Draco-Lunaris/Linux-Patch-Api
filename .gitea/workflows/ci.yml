@@ -17,11 +17,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
@@ -38,11 +44,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
@@ -63,11 +75,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
@@ -87,11 +105,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
@@ -114,11 +138,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
@@ -148,11 +178,17 @@ jobs:
     runs-on: fedora
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
@@ -184,11 +220,17 @@ jobs:
     runs-on: alpine
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
@@ -223,11 +265,17 @@ jobs:
     runs-on: arch
     steps:
       - name: Checkout repository
+        env:
+          GITEA_TOKEN: ${{ secrets.giteatoken }}
         run: |
           set -e
           REPO_URL="https://gitea-lxc.moon-dragon.us/echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz"
           echo "Downloading archive from $REPO_URL ..."
-          curl -sfL "$REPO_URL" -o repo.tar.gz
+          if [ -n "$GITEA_TOKEN" ]; then
+            curl -sfL -H "Authorization: token $GITEA_TOKEN" "$REPO_URL" -o repo.tar.gz
+          else
+            curl -sfL "$REPO_URL" -o repo.tar.gz
+          fi
           tar -xzf repo.tar.gz --strip-components=1
           rm -f repo.tar.gz
       - name: Install Rust
