@@ -95,32 +95,38 @@ if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for abuild..."
     adduser -D -s /bin/sh builduser 2>/dev/null || true
     addgroup builduser abuild 2>/dev/null || usermod -aG abuild builduser
-    chown -R builduser:builduser "$(pwd)"
-    chown -R builduser:builduser /root/packages 2>/dev/null || true
+    
+    # Set up builduser home directory for abuild
     mkdir -p /home/builduser/.abuild
-    cp /root/.abuild/* /home/builduser/.abuild/
+    cp /root/.abuild/* /home/builduser/.abuild/ 2>/dev/null || true
     chown -R builduser:builduser /home/builduser/.abuild
-
+    
     KEYFILE=$(ls /home/builduser/.abuild/*.rsa 2>/dev/null | head -1)
     if [ -z "$KEYFILE" ]; then
         KEYFILE=$(ls /home/builduser/.abuild/-*.rsa 2>/dev/null | head -1)
     fi
-
+    
     echo "Key file: $KEYFILE"
     echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
     chown builduser:builduser /home/builduser/.abuild/abuild.conf
-    su - builduser -c "cd $(pwd) && abuild checksum && abuild -d -F && cp /home/builduser/packages/x86_64/*.apk ./releases/ 2>/dev/null || cp /home/builduser/packages/*.apk ./releases/ 2>/dev/null || ls -la /home/builduser/packages/"
+    
+    # Run abuild as builduser with explicit working directory
+    su - builduser -c "cd /home/builduser && abuild checksum && abuild -d -F"
+    
+    # Copy APK from builduser packages to releases
+    mkdir -p releases
+    cp /home/builduser/packages/x86_64/*.apk releases/ 2>/dev/null || cp /home/builduser/packages/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
 else
     abuild checksum
     abuild -F -r
     cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || true
 fi
 
-# Copy to releases directory
+# Copy to releases directory (fallback for non-root builds)
 echo ""
 echo "Copying package to releases/..."
 mkdir -p releases
-cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp /root/packages/x86_64/*.apk releases/ || find / -name "linux-patch-api-*.apk" -exec cp {} releases/ \; 2>/dev/null || true
+cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || find ~/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
 
 echo ""
 echo "=== Build Complete ==="
