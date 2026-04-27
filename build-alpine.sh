@@ -110,7 +110,11 @@ if [ "$(id -u)" = "0" ]; then
     echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
     chown builduser:builduser /home/builduser/.abuild/abuild.conf
     
-    # Run abuild as builduser with explicit working directory
+    # Copy APKBUILD and checksums to builduser home for abuild
+    cp APKBUILD /home/builduser/
+    cp .checksums /home/builduser/ 2>/dev/null || true
+    
+    # Run abuild as builduser in /home/builduser where APKBUILD exists
     su - builduser -c "cd /home/builduser && abuild checksum && abuild -d -F"
     
     # Copy APK from builduser packages to releases

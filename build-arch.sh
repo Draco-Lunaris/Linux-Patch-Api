@@ -5,6 +5,9 @@
 
 set -e
 
+# Store working directory at script start (before any su commands)
+REPO_DIR=$(pwd)
+
 echo "=== Linux Patch API - Arch Build Script ==="
 echo ""
 
@@ -62,12 +65,13 @@ echo "Creating .SRCINFO..."
 echo "Building Arch package..."
 
 # For CI environments where we may run as root
+# For CI environments where we may run as root
 if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for makepkg..."
     useradd -m builduser 2>/dev/null || true
-    chown -R builduser:builduser "$(pwd)"
-    su - builduser -c "cd $(pwd) && makepkg --printsrcinfo > .SRCINFO"
-    su - builduser -c "cd $(pwd) && makepkg -f --noconfirm"
+    chown -R builduser:builduser "$REPO_DIR"
+    su - builduser -c "cd $REPO_DIR && makepkg --printsrcinfo > .SRCINFO"
+    su - builduser -c "cd $REPO_DIR && makepkg -f --noconfirm"
 else
     makepkg --printsrcinfo > .SRCINFO
     makepkg -f --noconfirm
