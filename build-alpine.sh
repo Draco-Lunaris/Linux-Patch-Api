@@ -122,6 +122,9 @@ if [ "$(id -u)" = "0" ]; then
     # Run abuild as builduser in /home/builduser where APKBUILD exists
     su - builduser -c "cd /home/builduser && abuild checksum && abuild -d -F"
     
+    # Install public key to fix UNTRUSTED signature error
+    cp /home/builduser/.abuild/*.rsa.pub /etc/apk/keys/ 2>/dev/null || true
+    
     # Copy APK from builduser packages to releases
     mkdir -p releases
     cp /home/builduser/packages/x86_64/*.apk releases/ 2>/dev/null || cp /home/builduser/packages/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true

@@ -25,8 +25,8 @@ else
     echo "Skipping cargo build (SKIP_CARGO_BUILD is set)"
 fi
 
-# Create package directory
-PKGDIR=$(pwd)/arch-package
+# Create package directory in /home/builduser/repo (accessible by builduser)
+PKGDIR=/home/builduser/repo/arch-package
 mkdir -p "$PKGDIR"/usr/bin
 mkdir -p "$PKGDIR"/etc/linux_patch_api
 mkdir -p "$PKGDIR"/usr/lib/systemd/system
@@ -38,8 +38,8 @@ cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
 
-# Determine workspace path for PKGBUILD
-WORKSPACE_DIR=$(pwd)
+# Use /home/builduser/repo as workspace for PKGBUILD
+WORKSPACE_DIR=/home/builduser/repo
 
 # Create PKGBUILD
 echo "Creating PKGBUILD..."
