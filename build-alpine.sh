@@ -44,8 +44,8 @@ else
     echo "Skipping cargo build (SKIP_CARGO_BUILD is set)"
 fi
 
-# Create package directory
-PKGDIR=$(pwd)/apk-package
+# Create package directory in /home/builduser (accessible by builduser)
+PKGDIR=/home/builduser/apk-package
 mkdir -p "$PKGDIR"/usr/bin
 mkdir -p "$PKGDIR"/etc/linux_patch_api
 mkdir -p "$PKGDIR"/etc/init.d
@@ -57,8 +57,8 @@ cp configs/linux-patch-api-openrc "$PKGDIR"/etc/init.d/linux-patch-api
 chmod 755 "$PKGDIR"/etc/init.d/linux-patch-api
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
 
-# Determine workspace path for APKBUILD
-WORKSPACE_DIR=$(pwd)
+# Use /home/builduser as workspace for APKBUILD
+WORKSPACE_DIR=/home/builduser
 
 # Create APKBUILD
 echo "Creating APKBUILD..."
@@ -95,6 +95,11 @@ if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for abuild..."
     adduser -D -s /bin/sh builduser 2>/dev/null || true
     addgroup builduser abuild 2>/dev/null || usermod -aG abuild builduser
+    
+    # Copy repo contents to builduser home (accessible directory)
+    cp -r . /home/builduser/repo/
+    chown -R builduser:builduser /home/builduser/repo/
+    chown -R builduser:builduser /home/builduser/apk-package/
     
     # Set up builduser home directory for abuild
     mkdir -p /home/builduser/.abuild

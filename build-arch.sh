@@ -65,16 +65,24 @@ echo "Creating .SRCINFO..."
 echo "Building Arch package..."
 
 # For CI environments where we may run as root
-# For CI environments where we may run as root
 if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for makepkg..."
     useradd -m builduser 2>/dev/null || true
-    chown -R builduser:builduser "$REPO_DIR"
-    su - builduser -c "cd $REPO_DIR && makepkg --printsrcinfo > .SRCINFO"
-    su - builduser -c "cd $REPO_DIR && makepkg -f --noconfirm"
+    
+    # Copy repo contents to builduser home (accessible directory)
+    mkdir -p /home/builduser/repo
+    cp -r . /home/builduser/repo/
+    chown -R builduser:builduser /home/builduser/repo/
+    
+    su - builduser -c "cd /home/builduser/repo && makepkg --printsrcinfo > .SRCINFO"
+    su - builduser -c "cd /home/builduser/repo && makepkg -f --noconfirm"
+    
+    # Copy package to releases
+    cp /home/builduser/repo/*.pkg.tar.zst releases/
 else
     makepkg --printsrcinfo > .SRCINFO
     makepkg -f --noconfirm
+    cp *.pkg.tar.zst releases/
 fi
 
 # Copy to releases directory
