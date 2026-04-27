@@ -48,7 +48,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsystemd-dev pkg-config
+          sudo apt-get install -y build-essential libsystemd-dev pkg-config
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -69,7 +69,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsystemd-dev pkg-config
+          sudo apt-get install -y build-essential libsystemd-dev pkg-config
       - name: Run tests
         run: cargo test --all-features
 
@@ -90,7 +90,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsystemd-dev pkg-config
+          sudo apt-get install -y build-essential libsystemd-dev pkg-config
       - name: Run cargo-audit
         run: |
           cargo install cargo-audit
@@ -143,7 +143,7 @@ jobs:
           . "$HOME/.cargo/env"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
-        run: sudo dnf install -y rpm-build gcc systemd-devel pkg-config
+          sudo dnf install -y gcc rpm-build systemd-devel pkg-config
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
@@ -213,7 +213,7 @@ jobs:
           . "$HOME/.cargo/env"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
-        run: sudo pacman -Syu --noconfirm rust cargo systemd git base-devel
+          sudo pacman -Syu --noconfirm rust cargo systemd git base-devel gcc
       - name: Build release binary
         run: cargo build --release
       - name: Build Arch package
