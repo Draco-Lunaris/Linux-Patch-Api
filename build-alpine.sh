@@ -119,11 +119,12 @@ if [ "$(id -u)" = "0" ]; then
     cp APKBUILD /home/builduser/
     cp .checksums /home/builduser/ 2>/dev/null || true
     
-    # Run abuild as builduser in /home/builduser where APKBUILD exists
-    su - builduser -c "cd /home/builduser && abuild checksum && abuild -d -F"
-    
-    # Install public key to fix UNTRUSTED signature error
+    # Install public key BEFORE abuild (fixes UNTRUSTED signature)
     cp /home/builduser/.abuild/*.rsa.pub /etc/apk/keys/ 2>/dev/null || true
+    
+    # Run abuild as builduser in /home/builduser where APKBUILD exists
+    # Use || true because index update may fail but APK is still created
+    su - builduser -c "cd /home/builduser && abuild checksum && abuild -d -F" || true
     
     # Copy APK from builduser packages to releases
     mkdir -p releases

@@ -8,8 +8,7 @@ export DEB_CARGO_BUILD_FLAGS=--release
 	dh $@
 
 override_dh_auto_build:
-	. "$$HOME/.cargo/env"
-	cargo build --release --target x86_64-unknown-linux-gnu
+	. "$$HOME/.cargo/env" && cargo build --release --target x86_64-unknown-linux-gnu
 
 override_dh_auto_install:
 	dh_auto_install
@@ -20,13 +19,16 @@ override_dh_auto_install:
 	mkdir -p debian/tmp/var/log/linux_patch_api
 	mkdir -p debian/tmp/var/lib/linux_patch_api
 	# Install binary
-	cp target/x86_64-unknown-linux-gnu/release/linux-patch-api debian/tmp/usr/bin/
-	chmod 755 debian/tmp/usr/bin/linux-patch-api
+	install -D -m 755 target/x86_64-unknown-linux-gnu/release/linux-patch-api debian/tmp/usr/bin/linux-patch-api
 	# Install systemd service
-	cp configs/linux-patch-api.service debian/tmp/lib/systemd/system/
-	chmod 644 debian/tmp/lib/systemd/system/linux-patch-api.service
-	# Install configs (as actual configs for first install)
-	cp configs/config.yaml.example debian/tmp/etc/linux_patch_api/config.yaml
-	cp configs/whitelist.yaml.example debian/tmp/etc/linux_patch_api/whitelist.yaml
-	chmod 644 debian/tmp/etc/linux_patch_api/*.yaml
+	install -D -m 644 configs/linux-patch-api.service debian/tmp/lib/systemd/system/linux-patch-api.service
+	# Install default configs
+	install -D -m 644 configs/config.yaml.example debian/tmp/etc/linux_patch_api/config.yaml
+	install -D -m 644 configs/whitelist.yaml.example debian/tmp/etc/linux_patch_api/whitelist.yaml
+	# Install CA certificates
+	install -d -m 755 debian/tmp/etc/linux_patch_api/certs
+	cp configs/certs/ca.pem debian/tmp/etc/linux_patch_api/certs/ 2>/dev/null || true
 
+override_dh_auto_test:
+	# Skip tests during package build (tests run in CI test job)
+	true

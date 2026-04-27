@@ -5,9 +5,6 @@
 
 set -e
 
-# Store working directory at script start (before any su commands)
-REPO_DIR=$(pwd)
-
 echo "=== Linux Patch API - Arch Build Script ==="
 echo ""
 
@@ -25,8 +22,8 @@ else
     echo "Skipping cargo build (SKIP_CARGO_BUILD is set)"
 fi
 
-# Create package directory in /home/builduser/repo (accessible by builduser)
-PKGDIR=/home/builduser/repo/arch-package
+# Create package directory
+PKGDIR=$(pwd)/arch-package
 mkdir -p "$PKGDIR"/usr/bin
 mkdir -p "$PKGDIR"/etc/linux_patch_api
 mkdir -p "$PKGDIR"/usr/lib/systemd/system
@@ -38,12 +35,10 @@ cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
 
-# Use /home/builduser/repo as workspace for PKGBUILD
-WORKSPACE_DIR=/home/builduser/repo
-
-# Create PKGBUILD
+# Create PKGBUILD with quoted heredoc to prevent $pkgdir expansion
+# $pkgdir must be literal for makepkg to expand at runtime
 echo "Creating PKGBUILD..."
-cat > PKGBUILD << EOF
+cat > PKGBUILD << 'EOF'
 pkgname=linux-patch-api
 pkgver=1.0.0
 pkgrel=1
@@ -54,7 +49,7 @@ license=('MIT')
 depends=('systemd')
 
 package() {
-    cp -r ${WORKSPACE_DIR}/arch-package/* "$pkgdir"/
+    cp -r /home/builduser/repo/arch-package/* "$pkgdir"/
 }
 EOF
 
@@ -78,18 +73,14 @@ if [ "$(id -u)" = "0" ]; then
     su - builduser -c "cd /home/builduser/repo && makepkg -f --noconfirm"
     
     # Copy package to releases
+    mkdir -p releases
     cp /home/builduser/repo/*.pkg.tar.zst releases/
 else
     makepkg --printsrcinfo > .SRCINFO
     makepkg -f --noconfirm
+    mkdir -p releases
     cp *.pkg.tar.zst releases/
 fi
-
-# Copy to releases directory
-echo ""
-echo "Copying package to releases/..."
-mkdir -p releases
-cp *.pkg.tar.zst releases/
 
 echo ""
 echo "=== Build Complete ==="
