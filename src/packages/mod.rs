@@ -98,8 +98,18 @@ impl AptBackend {
 
     /// Run apt command and capture output
     fn run_apt(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("apt")
-            .args(args)
+        // Use sudo for operations that modify packages (install, upgrade, remove, purge)
+        let needs_sudo = args.first().map_or(false, |&cmd| {
+            matches!(cmd, "install" | "upgrade" | "remove" | "purge" | "dist-upgrade" | "autoremove")
+        });
+        let (program, cmd_args): (&str, Vec<&str>) = if needs_sudo {
+            ("sudo", ["apt"].iter().chain(args.iter()).copied().collect())
+        } else {
+            ("apt", args.to_vec())
+        };
+
+        let output = Command::new(program)
+            .args(&cmd_args)
             .output()
             .context("Failed to execute apt command")?;
 
@@ -330,7 +340,8 @@ impl PackageManagerBackend for AptBackend {
         for line in output.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 {
-                let name = parts[0].to_string();
+                // Strip release suffix from package name (e.g., "pkg/noble-updates,noble-security" → "pkg")
+                let name = parts[0].split('/').next().unwrap_or(parts[0]).to_string();
                 let current_version = parts[1].to_string();
                 let available_version = parts[2].to_string();
 
