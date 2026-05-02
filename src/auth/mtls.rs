@@ -81,7 +81,7 @@ impl MtlsMiddleware {
 
         let config = ServerConfig::builder()
             .with_protocol_versions(&[&TLS13])
-                .map_err(|e| MtlsError::ServerConfigError(format!("Failed to set TLS 1.3 only: {}", e)))?
+            .map_err(|e| MtlsError::ServerConfigError(format!("Failed to set TLS 1.3 only: {}", e)))?
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(server_cert, server_key)
             .map_err(|e| MtlsError::ServerConfigError(e.to_string()))?;
