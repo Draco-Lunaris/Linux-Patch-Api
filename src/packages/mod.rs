@@ -100,7 +100,10 @@ impl AptBackend {
     fn run_apt(&self, args: &[&str]) -> Result<String> {
         // Use sudo for operations that modify packages (install, upgrade, remove, purge)
         let needs_sudo = args.first().map_or(false, |&cmd| {
-            matches!(cmd, "install" | "upgrade" | "remove" | "purge" | "dist-upgrade" | "autoremove")
+            matches!(
+                cmd,
+                "install" | "upgrade" | "remove" | "purge" | "dist-upgrade" | "autoremove"
+            )
         });
         let (program, cmd_args): (&str, Vec<&str>) = if needs_sudo {
             ("sudo", ["apt"].iter().chain(args.iter()).copied().collect())
