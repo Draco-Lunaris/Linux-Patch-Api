@@ -5,7 +5,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
+NotifyAccess=all
 ExecStart=/usr/bin/linux-patch-api --config /etc/linux_patch_api/config.yaml
 Restart=on-failure
 RestartSec=5s
@@ -17,9 +18,11 @@ RuntimeDirectoryMode=0755
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=strict
+# ProtectSystem removed - package management requires write access to /usr, /etc, /lib
+# Network security provided by mTLS + IP whitelist
 ProtectHome=true
-ReadWritePaths=/var/lib/linux_patch_api /var/log/linux_patch_api
+# ReadWritePaths kept as documentation reference for apt/dpkg paths
+ReadWritePaths=/var/lib/linux_patch_api /var/log/linux_patch_api /var/cache/apt /var/lib/apt /var/lib/dpkg /var/log/apt
 PrivateTmp=true
 PrivateDevices=true
 ProtectHostname=true
@@ -40,6 +43,7 @@ SystemCallErrorNumber=EPERM
 
 # Environment
 Environment="RUST_BACKTRACE=1"
+Environment="DEBIAN_FRONTEND=noninteractive"
 Environment="RUST_LOG=info"
 
 # Logging

@@ -213,8 +213,11 @@ impl JobManager {
 
     /// List all jobs with optional status filter
     pub async fn list_jobs(&self, status_filter: Option<JobStatus>, limit: usize) -> Vec<Job> {
-        let jobs = self.jobs.read().await;
-        let mut result: Vec<Job> = jobs.values().cloned().collect();
+        // FIX: Clone under lock, then release before sorting to reduce lock contention
+        let mut result = {
+            let jobs = self.jobs.read().await;
+            jobs.values().cloned().collect::<Vec<Job>>()
+        }; // Lock released here
 
         // Filter by status if provided
         if let Some(status) = status_filter {

@@ -141,6 +141,8 @@ async fn main() -> Result<()> {
     .workers(4)
     // VULN-004: Configure header size limit to 8KB to prevent DoS via oversized headers
     .client_request_timeout(std::time::Duration::from_secs(5))
+    // FIX: Set explicit client disconnect timeout to prevent connection resets on larger responses
+    .client_disconnect_timeout(std::time::Duration::from_secs(5))
     .keep_alive(std::time::Duration::from_secs(15))
     .max_connection_rate(1000);
     info!(

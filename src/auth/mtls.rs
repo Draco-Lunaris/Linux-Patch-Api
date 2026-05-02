@@ -12,6 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use futures_util::future::LocalBoxFuture;
 use rustls::{
     server::{ServerConfig, WebPkiClientVerifier},
+    version::TLS13,
     RootCertStore,
 };
 use rustls_pemfile::{certs, private_key};
@@ -79,6 +80,8 @@ impl MtlsMiddleware {
         let server_key = load_private_key(&self.config.server_key_path)?;
 
         let config = ServerConfig::builder()
+            .with_protocol_versions(&[&TLS13])
+                .map_err(|e| MtlsError::ServerConfigError(format!("Failed to set TLS 1.3 only: {}", e)))?
             .with_client_cert_verifier(client_verifier)
             .with_single_cert(server_cert, server_key)
             .map_err(|e| MtlsError::ServerConfigError(e.to_string()))?;
