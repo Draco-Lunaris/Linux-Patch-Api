@@ -3,7 +3,7 @@ name: CI/CD Pipeline
 "on":
   push:
     branches: [ master, develop ]
-    tags: [ 'v*' ]
+    tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ master ]
 
@@ -162,8 +162,14 @@ jobs:
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           FILE=$(ls ../linux-patch-api_*.deb 2>/dev/null | head -1)
+          # Rename deb to include u2204 in filename to avoid collision with main build
+          if [ -n "$FILE" ]; then
+            U2204_FILE="$(echo "$FILE" | sed 's/_amd64/_u2204_amd64/')"
+            mv "$FILE" "$U2204_FILE"
+            FILE="$U2204_FILE"
+          fi
           chmod +x scripts/upload-release.sh
-          ./scripts/upload-release.sh "${TAG_NAME}-u2204" "$FILE"
+          ./scripts/upload-release.sh "$TAG_NAME" "$FILE"
 
   build-rpm:
     name: Build RPM Package
