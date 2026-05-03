@@ -98,18 +98,9 @@ impl AptBackend {
 
     /// Run apt command and capture output
     fn run_apt(&self, args: &[&str]) -> Result<String> {
-        // Use sudo for operations that modify packages (install, upgrade, remove, purge)
-        let needs_sudo = args.first().is_some_and(|&cmd| {
-            matches!(
-                cmd,
-                "install" | "upgrade" | "remove" | "purge" | "dist-upgrade" | "autoremove"
-            )
-        });
-        let (program, cmd_args): (&str, Vec<&str>) = if needs_sudo {
-            ("sudo", ["apt"].iter().chain(args.iter()).copied().collect())
-        } else {
-            ("apt", args.to_vec())
-        };
+        // Service runs as root - no sudo needed for apt commands
+        let program = "apt";
+        let cmd_args: Vec<&str> = args.to_vec();
 
         let output = Command::new(program)
             .args(&cmd_args)

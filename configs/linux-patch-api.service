@@ -17,7 +17,6 @@ RuntimeDirectory=linux-patch-api
 RuntimeDirectoryMode=0755
 
 # Security hardening
-NoNewPrivileges=true
 # Allow reboot capability for scheduled reboots
 CapabilityBoundingSet=CAP_SYS_BOOT
 AmbientCapabilities=CAP_SYS_BOOT
@@ -37,7 +36,7 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
 RestrictRealtime=true
-RestrictSUIDSGID=true
+# RestrictSUIDSGID removed - package management requires setuid/setgid for apt/dpkg
 RemoveIPC=true
 
 # System call filtering (whitelist approach)
