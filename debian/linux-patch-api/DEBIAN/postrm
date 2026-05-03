@@ -39,18 +39,6 @@ if [ "$1" = "purge" ]; then
         rm -rf /var/log/linux_patch_api
     fi
     
-    # Remove system user
-    if getent passwd linux-patch-api > /dev/null 2>&1; then
-        echo "Removing user linux-patch-api..."
-        userdel linux-patch-api 2>/dev/null || true
-    fi
-    
-    # Remove system group
-    if getent group linux-patch-api > /dev/null 2>&1; then
-        echo "Removing group linux-patch-api..."
-        groupdel linux-patch-api 2>/dev/null || true
-    fi
-    
     echo "linux-patch-api purged successfully"
 fi
 

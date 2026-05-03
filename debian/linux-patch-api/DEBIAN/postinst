@@ -13,14 +13,14 @@ if [ "$1" = "configure" ]; then
         echo "Creating default config.yaml..."
         cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
         chmod 640 /etc/linux_patch_api/config.yaml
-        chown linux-patch-api:linux-patch-api /etc/linux_patch_api/config.yaml
+        chown root:root /etc/linux_patch_api/config.yaml
     fi
     
     if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
         echo "Creating default whitelist.yaml..."
         cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
         chmod 640 /etc/linux_patch_api/whitelist.yaml
-        chown linux-patch-api:linux-patch-api /etc/linux_patch_api/whitelist.yaml
+        chown root:root /etc/linux_patch_api/whitelist.yaml
     fi
     
     # Reload systemd daemon to pick up new service file

@@ -1,3 +1,10 @@
+linux-patch-api (0.3.3-1) unstable; urgency=low
+
+  * Fix dpkg packaging: Remove linux-patch-api user creation, fix directory ownership
+  * Fix package install: Remove sudo from apt commands (service runs as root)
+  * Remove NoNewPrivileges and RestrictSUIDSGID from systemd service
+
+ -- Echo <echo@moon-dragon.us>  Sat, 03 May 2026 02:30:00 -0500
 linux-patch-api (0.3.2-1) unstable; urgency=low
 
   * Fix package install: Remove sudo from apt commands (service runs as root)
