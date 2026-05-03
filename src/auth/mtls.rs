@@ -14,6 +14,7 @@ use rustls::{
     server::{ServerConfig, WebPkiClientVerifier},
     version::TLS13,
     RootCertStore,
+    crypto::aws_lc_rs,
 };
 use rustls_pemfile::{certs, private_key};
 use std::{fs::File, io::BufReader, sync::Arc};
@@ -79,7 +80,7 @@ impl MtlsMiddleware {
         let server_cert = load_certs(&self.config.server_cert_path)?;
         let server_key = load_private_key(&self.config.server_key_path)?;
 
-        let config = ServerConfig::builder()
+        let config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
             .with_protocol_versions(&[&TLS13])
             .map_err(|e| {
                 MtlsError::ServerConfigError(format!("Failed to set TLS 1.3 only: {}", e))
