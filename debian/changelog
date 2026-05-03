@@ -1,3 +1,11 @@
+linux-patch-api (0.3.1-1) unstable; urgency=low
+
+  * Fix reboot endpoint: Implement actual system reboot via shutdown/systemctl
+  * Fix patches handler: Call reboot_system() instead of just logging
+  * Add CAP_SYS_BOOT capability to systemd service for LXC reboot support
+  * Remove unused warn import
+
+ -- Echo <echo@moon-dragon.us>  Sat, 02 May 2026 20:37:00 -0500
 linux-patch-api (0.3.0-1) unstable; urgency=low
 
   * v0.3.0 beta release

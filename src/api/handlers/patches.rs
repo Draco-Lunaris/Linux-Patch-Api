@@ -139,7 +139,22 @@ pub async fn apply_patches(
                                     ),
                                 )
                                 .await;
-                            // In production, would trigger actual reboot via system handler
+                            // Trigger actual reboot via system handler
+                            match backend_clone.reboot_system(request.reboot_delay_seconds) {
+                                Ok(_) => {
+                                    let _ = job_manager_clone
+                                        .add_job_log(
+                                            &job_id_clone,
+                                            "Reboot command executed".to_string(),
+                                        )
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = job_manager_clone
+                                        .add_job_log(&job_id_clone, format!("Reboot failed: {}", e))
+                                        .await;
+                                }
+                            }
                         }
                     }
                     Err(e) => {

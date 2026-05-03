@@ -18,6 +18,9 @@ RuntimeDirectoryMode=0755
 
 # Security hardening
 NoNewPrivileges=true
+# Allow reboot capability for scheduled reboots
+CapabilityBoundingSet=CAP_SYS_BOOT
+AmbientCapabilities=CAP_SYS_BOOT
 # ProtectSystem removed - package management requires write access to /usr, /etc, /lib
 # Network security provided by mTLS + IP whitelist
 ProtectHome=true

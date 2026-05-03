@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Package status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -466,17 +466,27 @@ impl PackageManagerBackend for AptBackend {
 
     fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
         if delay_seconds > 0 {
-            info!("Scheduling reboot in {} seconds", delay_seconds);
-            // In production, would use systemd shutdown scheduler
-            warn!("Delayed reboot not fully implemented - would use systemd in production");
+            // Use shutdown command for delayed reboot (converts seconds to minutes, minimum 1)
+            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
+            info!(
+                "Scheduling system reboot in {} minutes (requested {} seconds)",
+                delay_minutes, delay_seconds
+            );
+            Command::new("shutdown")
+                .args(["-r", &format!("+{}", delay_minutes)])
+                .status()
+                .context("Failed to schedule delayed reboot")?;
+            info!("System reboot scheduled in {} minutes", delay_minutes);
+        } else {
+            // Immediate reboot using systemctl
+            info!("Initiating immediate system reboot");
+            Command::new("systemctl")
+                .arg("reboot")
+                .status()
+                .context("Failed to execute reboot command")?;
+            info!("System reboot initiated");
         }
 
-        Command::new("systemctl")
-            .arg("reboot")
-            .status()
-            .context("Failed to execute reboot command")?;
-
-        info!("System reboot initiated");
         Ok(())
     }
 }

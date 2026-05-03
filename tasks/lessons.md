@@ -29,3 +29,21 @@
 **Correction:** Always verify binary versions match before testing. Different BuildIDs mean different code.
 **Rule:** Check binary versions (file size, BuildID, --version output) on all target systems before testing.
 **Status:** Active
+
+## 2026-05-02 - Always run cargo fmt AND cargo clippy locally before pushing
+**Mistake:** Pushed code changes without running cargo fmt and cargo clippy locally, causing 8 CI iterations to fix formatting and lint errors.
+**Correction:** Run `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` locally before every push.
+**Rule:** ALWAYS run cargo fmt AND cargo clippy locally before pushing to Gitea. Fix all errors before pushing.
+**Status:** Active
+
+## 2026-05-02 - rustls 0.23 API: builder() vs builder_with_provider()
+**Mistake:** Used ServerConfig::builder() which returns WantsVerifier state, then called with_protocol_versions() which requires WantsVersions state.
+**Correction:** Use ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider())) to get WantsVersions state. Also need aws_lc_rs feature in Cargo.toml.
+**Rule:** In rustls 0.23, to set protocol versions, use builder_with_provider() not builder(). The builder() shortcut skips version negotiation.
+**Status:** Active
+
+## 2026-05-02 - apt broken deps block unrelated package installs
+**Mistake:** CI failed because openssh-server on runner had version mismatch (13.16 server vs 13.15 client), blocking all apt-get install operations.
+**Correction:** Add `sudo apt-get -f install -y` before `sudo apt-get install` in CI workflow to fix broken deps automatically.
+**Rule:** Always add `apt-get -f install -y` before `apt-get install` in CI workflows. Runners may have broken apt state from partial upgrades.
+**Status:** Active
