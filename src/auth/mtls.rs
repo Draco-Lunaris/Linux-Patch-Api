@@ -11,10 +11,10 @@ use actix_web::{
 use chrono::{DateTime, Duration, Utc};
 use futures_util::future::LocalBoxFuture;
 use rustls::{
+    crypto::aws_lc_rs,
     server::{ServerConfig, WebPkiClientVerifier},
     version::TLS13,
     RootCertStore,
-    crypto::aws_lc_rs,
 };
 use rustls_pemfile::{certs, private_key};
 use std::{fs::File, io::BufReader, sync::Arc};
