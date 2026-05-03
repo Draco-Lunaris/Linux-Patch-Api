@@ -47,3 +47,27 @@
 **Correction:** Add `sudo apt-get -f install -y` before `sudo apt-get install` in CI workflow to fix broken deps automatically.
 **Rule:** Always add `apt-get -f install -y` before `apt-get install` in CI workflows. Runners may have broken apt state from partial upgrades.
 **Status:** Active
+
+## 2026-05-03 - NoNewPrivileges=true blocks sudo in systemd services
+**Mistake:** Service used NoNewPrivileges=true which prevented sudo from working (PERM_SUDOERS: setresuid Operation not permitted).
+**Correction:** Removed NoNewPrivileges=true from systemd service. The service runs as root and uses sudo for apt commands, which requires privilege escalation capabilities.
+**Rule:** For package management services that use sudo, do not use NoNewPrivileges=true. mTLS + IP whitelist provides network security.
+**Status:** Active
+
+## 2026-05-03 - RestrictSUIDSGID=true blocks sudo in systemd services
+**Mistake:** Service used RestrictSUIDSGID=true which prevented sudo from using setuid/setgid operations.
+**Correction:** Removed RestrictSUIDSGID=true from systemd service. Package management requires setuid/setgid for apt/dpkg.
+**Rule:** For package management services, do not use RestrictSUIDSGID=true. It blocks sudo and apt from working.
+**Status:** Active
+
+## 2026-05-03 - dpkg preinst creates linux-patch-api user causing permission issues
+**Mistake:** dpkg preinst script creates a linux-patch-api system user and changes directory ownership, causing the service to crash with 'Permission denied' on log file creation.
+**Correction:** Fix dpkg preinst to not create the linux-patch-api user or change directory ownership. Service runs as root and directories should be owned by root.
+**Rule:** For services that run as root, do not create a dedicated system user in the dpkg preinst script. Keep all directory ownership as root:root.
+**Status:** Active
+
+## 2026-05-03 - Service runs as root, no sudo needed for apt commands
+**Mistake:** Service used sudo to run apt commands even though it runs as root. This caused failures when systemd security restrictions blocked sudo.
+**Correction:** Removed sudo from apt command execution in the source code. Service runs as root and can execute apt directly.
+**Rule:** If a service runs as root, it does not need sudo to execute commands. Remove sudo from command execution.
+**Status:** Active
