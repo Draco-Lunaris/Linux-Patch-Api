@@ -17,16 +17,17 @@ RuntimeDirectory=linux-patch-api
 RuntimeDirectoryMode=0755
 
 # Security hardening
-# Allow reboot capability for scheduled reboots
-CapabilityBoundingSet=CAP_SYS_BOOT
-AmbientCapabilities=CAP_SYS_BOOT
-# ProtectSystem removed - package management requires write access to /usr, /etc, /lib
-# Network security provided by mTLS + IP whitelist
+# NOTE: Package management requires extensive system access. The following
+# restrictions have been removed because they block core functionality:
+#   - ProtectSystem=strict: Blocks writes to /usr, /etc, /lib where packages install
+#   - NoNewPrivileges: Blocks sudo/setuid which apt needs for _apt sandbox
+#   - RestrictSUIDSGID: Blocks setuid/setgid which apt needs for _apt sandbox
+#   - CapabilityBoundingSet: Drops capabilities that apt needs (SETUID, SETGID, CHOWN, etc.)
+#   - AmbientCapabilities: Same issue as CapabilityBoundingSet
+# Network security is provided by mTLS + IP whitelist. The service runs as root
+# and MUST be able to install/remove/update packages system-wide.
 ProtectHome=true
-# ReadWritePaths kept as documentation reference for apt/dpkg paths
-ReadWritePaths=/var/lib/linux_patch_api /var/log/linux_patch_api /var/cache/apt /var/lib/apt /var/lib/dpkg /var/log/apt
 PrivateTmp=true
-PrivateDevices=true
 ProtectHostname=true
 ProtectClock=true
 ProtectKernelTunables=true
@@ -36,8 +37,6 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
 RestrictRealtime=true
-# RestrictSUIDSGID removed - package management requires setuid/setgid for apt/dpkg
-RemoveIPC=true
 
 # System call filtering (whitelist approach)
 SystemCallFilter=@system-service

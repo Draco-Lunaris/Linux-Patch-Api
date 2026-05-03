@@ -298,8 +298,8 @@ def test_get_package_not_found(client: PatchAPIClient) -> str:
 def test_install_package(client: PatchAPIClient) -> str:
     """POST /api/v1/packages - Install a safe test package (hello).
 
-    Note: Install may fail due to service permissions (NoNewPrivileges=true).
-    Both completed and failed are acceptable outcomes.
+    Verifies that the package installation completes successfully.
+    A failed status is a critical failure - the core function must work.
     """
     payload = {
         "packages": [{"name": TEST_PACKAGE, "version": None}],
@@ -318,10 +318,7 @@ def test_install_package(client: PatchAPIClient) -> str:
     # Poll job to completion
     job_id = data["data"]["job_id"]
     job = poll_job(client, job_id)
-    # Install may fail due to service permissions - both outcomes acceptable
-    if job["status"] == "failed":
-        return f"Install job completed with status=failed (may be permissions issue): job_id={job_id}, result={job.get('result', {})}"
-    assert job["status"] == "completed", f"Install job unexpected status: {job['status']}"
+    assert job["status"] == "completed", f"Install job failed: status={job['status']}, result={job.get('result', {})}"
     return f"Installed {TEST_PACKAGE}: job_id={job_id}, status={job['status']}"
 
 
@@ -336,15 +333,15 @@ def test_update_package(client: PatchAPIClient) -> str:
 
     job_id = data["data"]["job_id"]
     job = poll_job(client, job_id)
-    # Update may complete or fail (package already latest or not installed)
-    assert job["status"] in ["completed", "failed"], f"Unexpected job status: {job['status']}"
+    assert job["status"] == "completed", f"Update job failed: status={job['status']}, result={job.get('result', {})}"
     return f"Updated {TEST_PACKAGE}: job_id={job_id}, status={job['status']}"
 
 
 def test_remove_package(client: PatchAPIClient) -> str:
     """DELETE /api/v1/packages/{name} - Remove the test package.
 
-    Note: Remove may fail if package wasn't installed. Both outcomes acceptable.
+    Verifies that the package removal completes successfully.
+    A failed status is a critical failure - the core function must work.
     """
     resp = client.delete(f"/api/v1/packages/{TEST_PACKAGE}")
     assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.text}"
@@ -355,8 +352,7 @@ def test_remove_package(client: PatchAPIClient) -> str:
 
     job_id = data["data"]["job_id"]
     job = poll_job(client, job_id)
-    # Remove may fail if package wasn't installed
-    assert job["status"] in ["completed", "failed"], f"Remove job unexpected status: {job['status']}"
+    assert job["status"] == "completed", f"Remove job failed: status={job['status']}, result={job.get('result', {})}"
     return f"Removed {TEST_PACKAGE}: job_id={job_id}, status={job['status']}"
 
 
@@ -568,8 +564,8 @@ def test_wrong_cert_connection(client: PatchAPIClient) -> str:
 def test_job_lifecycle(client: PatchAPIClient) -> str:
     """Full job lifecycle: install -> get job -> list jobs -> remove.
 
-    Accepts both completed and failed outcomes for install/remove
-    since service may have permission restrictions.
+    Verifies that install and remove both complete successfully.
+    A failed status is a critical failure - the core function must work.
     """
     # Step 1: Install test package
     payload = {
@@ -589,7 +585,7 @@ def test_job_lifecycle(client: PatchAPIClient) -> str:
 
     # Step 3: Poll to completion
     job = poll_job(client, job_id)
-    assert job["status"] in ["completed", "failed"], f"Install job unexpected status: {job['status']}"
+    assert job["status"] == "completed", f"Install job failed: status={job['status']}, result={job.get('result', {})}"
 
     # Step 4: Verify in job list
     resp = client.get("/api/v1/jobs?limit=50", timeout=120)
@@ -603,7 +599,7 @@ def test_job_lifecycle(client: PatchAPIClient) -> str:
     assert resp.status_code == 202, f"Remove failed: HTTP {resp.status_code}"
     remove_job_id = resp.json()["data"]["job_id"]
     remove_job = poll_job(client, remove_job_id)
-    assert remove_job["status"] in ["completed", "failed"], f"Remove job unexpected status: {remove_job['status']}"
+    assert remove_job["status"] == "completed", f"Remove job failed: status={remove_job['status']}, result={remove_job.get('result', {})}"
 
     return f"Full lifecycle OK: install job={job_id}, remove job={remove_job_id}"
 

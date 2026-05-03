@@ -5,7 +5,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
+NotifyAccess=all
 ExecStart=/usr/bin/linux-patch-api --config /etc/linux_patch_api/config.yaml
 Restart=on-failure
 RestartSec=5s
@@ -16,12 +17,17 @@ RuntimeDirectory=linux-patch-api
 RuntimeDirectoryMode=0755
 
 # Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
+# NOTE: Package management requires extensive system access. The following
+# restrictions have been removed because they block core functionality:
+#   - ProtectSystem=strict: Blocks writes to /usr, /etc, /lib where packages install
+#   - NoNewPrivileges: Blocks sudo/setuid which apt needs for _apt sandbox
+#   - RestrictSUIDSGID: Blocks setuid/setgid which apt needs for _apt sandbox
+#   - CapabilityBoundingSet: Drops capabilities that apt needs (SETUID, SETGID, CHOWN, etc.)
+#   - AmbientCapabilities: Same issue as CapabilityBoundingSet
+# Network security is provided by mTLS + IP whitelist. The service runs as root
+# and MUST be able to install/remove/update packages system-wide.
 ProtectHome=true
-ReadWritePaths=/var/lib/linux_patch_api /var/log/linux_patch_api
 PrivateTmp=true
-PrivateDevices=true
 ProtectHostname=true
 ProtectClock=true
 ProtectKernelTunables=true
@@ -31,8 +37,6 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
 RestrictRealtime=true
-RestrictSUIDSGID=true
-RemoveIPC=true
 
 # System call filtering (whitelist approach)
 SystemCallFilter=@system-service
@@ -40,6 +44,7 @@ SystemCallErrorNumber=EPERM
 
 # Environment
 Environment="RUST_BACKTRACE=1"
+Environment="DEBIAN_FRONTEND=noninteractive"
 Environment="RUST_LOG=info"
 
 # Logging
