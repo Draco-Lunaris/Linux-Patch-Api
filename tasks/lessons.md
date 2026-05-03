@@ -71,3 +71,21 @@
 **Correction:** Removed sudo from apt command execution in the source code. Service runs as root and can execute apt directly.
 **Rule:** If a service runs as root, it does not need sudo to execute commands. Remove sudo from command execution.
 **Status:** Active
+
+## 2026-05-03 - CapabilityBoundingSet blocks apt sandbox operations
+**Mistake:** Used CapabilityBoundingSet=CAP_SYS_BOOT which dropped ALL capabilities except SYS_BOOT, blocking apt's _apt sandbox (setuid/setgid/setgroups/chown).
+**Correction:** Removed CapabilityBoundingSet and AmbientCapabilities entirely. Package management requires full root capabilities. Network security is provided by mTLS + IP whitelist.
+**Rule:** For package management services running as root, do NOT use CapabilityBoundingSet or AmbientCapabilities. These block apt/dpkg sandbox operations. mTLS + IP whitelist provides network security.
+**Status:** Active
+
+## 2026-05-03 - E2E test false positives on status=failed
+**Mistake:** E2E test accepted status=failed as a valid outcome for install/update/remove operations, masking critical failures.
+**Correction:** Fixed E2E test to properly FAIL (assert) when status=failed is returned for package operations.
+**Rule:** E2E tests must assert status=completed for core operations. A failed package install is a 100% total failure of the API's core function.
+**Status:** Active
+
+## 2026-05-03 - Systemd sandbox whack-a-mole pattern
+**Mistake:** Fixed systemd sandbox restrictions one at a time (ProtectSystem → NoNewPrivileges → RestrictSUIDSGID → CapabilityBoundingSet) instead of analyzing all restrictions at once.
+**Correction:** Removed ALL restrictive sandbox settings at once after understanding that package management requires full system access.
+**Rule:** When a service fundamentally conflicts with systemd sandboxing, analyze ALL restrictions at once rather than fixing them one at a time. Package management services need: no ProtectSystem=strict, no NoNewPrivileges, no RestrictSUIDSGID, no CapabilityBoundingSet, no AmbientCapabilities restrictions.
+**Status:** Active
