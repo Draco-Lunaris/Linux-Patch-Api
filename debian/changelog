@@ -1,3 +1,12 @@
+linux-patch-api (0.3.4-1) unstable; urgency=low
+
+  * Fix CI workflow: prevent recursive tag triggers (v* -> v*.*.*)
+  * Fix CI workflow: upload u2204 deb to same release (no -u2204 suffix)
+  * Remove sudo from apt commands (service runs as root)
+  * Remove NoNewPrivileges and RestrictSUIDSGID from systemd service
+  * Fix dpkg packaging: remove linux-patch-api user creation
+
+ -- Echo <echo@moon-dragon.us>  Sat, 03 May 2026 03:15:00 -0500
 linux-patch-api (0.3.3-1) unstable; urgency=low
 
   * Fix dpkg packaging: Remove linux-patch-api user creation, fix directory ownership
