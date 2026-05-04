@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 /// Job status
@@ -271,11 +271,7 @@ impl JobManager {
 
             if let Some(job) = jobs.get_mut(job_id) {
                 job.complete();
-                event_data = Some((
-                    job.status.clone(),
-                    job.progress,
-                    job.message.clone(),
-                ));
+                event_data = Some((job.status.clone(), job.progress, job.message.clone()));
             } else {
                 event_data = None;
             }
@@ -296,11 +292,7 @@ impl JobManager {
 
             if let Some(job) = jobs.get_mut(job_id) {
                 job.fail(error);
-                event_data = Some((
-                    job.status.clone(),
-                    job.progress,
-                    job.message.clone(),
-                ));
+                event_data = Some((job.status.clone(), job.progress, job.message.clone()));
             } else {
                 event_data = None;
             }

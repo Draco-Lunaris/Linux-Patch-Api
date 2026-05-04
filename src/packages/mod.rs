@@ -64,6 +64,19 @@ pub struct SystemInfo {
     pub pending_reboot: bool,
 }
 
+/// Service status information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceStatus {
+    pub name: String,
+    pub display_name: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub load_state: String,
+    pub enabled_state: String,
+    pub main_pid: Option<u32>,
+    pub healthy: bool,
+}
+
 /// Package manager backend trait
 pub trait PackageManagerBackend: Send + Sync {
     fn list_packages(&self, filter: Option<&str>) -> Result<Vec<Package>>;
@@ -75,6 +88,7 @@ pub trait PackageManagerBackend: Send + Sync {
     fn apply_patches(&self, packages: Option<&[String]>) -> Result<()>;
     fn get_system_info(&self) -> Result<SystemInfo>;
     fn reboot_system(&self, delay_seconds: u64) -> Result<()>;
+    fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>>;
 }
 
 /// Package specification for installation
@@ -480,6 +494,151 @@ impl PackageManagerBackend for AptBackend {
 
         Ok(())
     }
+
+    fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
+        // Validate service name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") {
+            return Err(anyhow::anyhow!("Invalid service name: {}", name));
+        }
+
+        // Determine init system and query accordingly
+        let is_systemd = std::path::Path::new("/run/systemd/system").exists();
+        let is_openrc = std::path::Path::new("/sbin/openrc").exists();
+
+        if is_systemd {
+            get_systemd_service_status(name)
+        } else if is_openrc {
+            get_openrc_service_status(name)
+        } else {
+            Err(anyhow::anyhow!(
+                "No supported init system detected (systemd or OpenRC required)"
+            ))
+        }
+    }
+}
+
+/// Query systemd service status via systemctl
+fn get_systemd_service_status(name: &str) -> Result<Option<ServiceStatus>> {
+    let output = Command::new("systemctl")
+        .args([
+            "show",
+            name,
+            "--property=Id,Description,ActiveState,SubState,LoadState,UnitFileState,MainPID",
+            "--no-pager",
+        ])
+        .output()
+        .context("Failed to execute systemctl command")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // If systemctl returns non-zero or empty output, service doesn't exist
+    if !output.status.success() || stdout.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut id = String::new();
+    let mut description = String::new();
+    let mut active_state = String::new();
+    let mut sub_state = String::new();
+    let mut load_state = String::new();
+    let mut unit_file_state = String::new();
+    let mut main_pid: Option<u32> = None;
+
+    for line in stdout.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "Id" => id = value.to_string(),
+                "Description" => description = value.to_string(),
+                "ActiveState" => active_state = value.to_string(),
+                "SubState" => sub_state = value.to_string(),
+                "LoadState" => load_state = value.to_string(),
+                "UnitFileState" => unit_file_state = value.to_string(),
+                "MainPID" => {
+                    main_pid = value.parse::<u32>().ok().filter(|&p| p > 0);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // If LoadState is not-found or bad-setting, service doesn't exist
+    if load_state == "not-found" || load_state == "bad-setting" || id.is_empty() {
+        return Ok(None);
+    }
+
+    let healthy = active_state == "active" && sub_state == "running";
+
+    Ok(Some(ServiceStatus {
+        name: id,
+        display_name: description,
+        active_state,
+        sub_state,
+        load_state,
+        enabled_state: unit_file_state,
+        main_pid,
+        healthy,
+    }))
+}
+
+/// Query OpenRC service status via rc-service
+fn get_openrc_service_status(name: &str) -> Result<Option<ServiceStatus>> {
+    let output = Command::new("rc-service")
+        .args([name, "status"])
+        .output()
+        .context("Failed to execute rc-service command")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // rc-service returns error if service doesn't exist
+    if !output.status.success() {
+        if stderr.contains("does not exist") || stdout.contains("does not exist") {
+            return Ok(None);
+        }
+        return Err(anyhow::anyhow!("rc-service failed: {}", stderr));
+    }
+
+    // Parse rc-service status output
+    let status_line = stdout.lines().next().unwrap_or("").to_lowercase();
+
+    let (active_state, sub_state, healthy) =
+        if status_line.contains("started") || status_line.contains("running") {
+            ("active".to_string(), "running".to_string(), true)
+        } else if status_line.contains("stopped") || status_line.contains("not running") {
+            ("inactive".to_string(), "dead".to_string(), false)
+        } else if status_line.contains("crashed") || status_line.contains("failed") {
+            ("failed".to_string(), "failed".to_string(), false)
+        } else {
+            ("unknown".to_string(), "unknown".to_string(), false)
+        };
+
+    // Check if service is enabled using rc-update
+    let enabled_output = Command::new("rc-update")
+        .args(["show", "default"])
+        .output()
+        .ok();
+
+    let enabled_state = enabled_output
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| {
+            if s.lines().any(|l| l.trim().starts_with(name)) {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(Some(ServiceStatus {
+        name: name.to_string(),
+        display_name: name.to_string(),
+        active_state,
+        sub_state,
+        load_state: "loaded".to_string(),
+        enabled_state,
+        main_pid: None,
+        healthy,
+    }))
 }
 
 impl Default for AptBackend {

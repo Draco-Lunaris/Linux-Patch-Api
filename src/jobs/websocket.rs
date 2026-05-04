@@ -256,10 +256,8 @@ impl Handler<BroadcastEvent> for WsJobActor {
         let event = msg.0;
 
         // Check if this client should receive this event
-        let should_forward = self.subscribed_all
-            || self
-                .subscribed_jobs
-                .contains(&event.job_id.to_string());
+        let should_forward =
+            self.subscribed_all || self.subscribed_jobs.contains(&event.job_id.to_string());
 
         if should_forward {
             let server_msg = WsServerMessage::from_job_status_event(&event);
@@ -300,24 +298,22 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsJobActor {
                 // Parse as client message
                 match serde_json::from_str::<WsClientMessage>(&text) {
                     Ok(client_msg) => match client_msg {
-                        WsClientMessage::Subscribe { job_id } => {
-                            match job_id {
-                                Some(id) => {
-                                    self.subscribed_jobs.insert(id.clone());
-                                    let msg = WsServerMessage::subscribed(&Some(id));
-                                    if let Ok(json) = serde_json::to_string(&msg) {
-                                        ctx.text(json);
-                                    }
-                                }
-                                None => {
-                                    self.subscribed_all = true;
-                                    let msg = WsServerMessage::subscribed(&None);
-                                    if let Ok(json) = serde_json::to_string(&msg) {
-                                        ctx.text(json);
-                                    }
+                        WsClientMessage::Subscribe { job_id } => match job_id {
+                            Some(id) => {
+                                self.subscribed_jobs.insert(id.clone());
+                                let msg = WsServerMessage::subscribed(&Some(id));
+                                if let Ok(json) = serde_json::to_string(&msg) {
+                                    ctx.text(json);
                                 }
                             }
-                        }
+                            None => {
+                                self.subscribed_all = true;
+                                let msg = WsServerMessage::subscribed(&None);
+                                if let Ok(json) = serde_json::to_string(&msg) {
+                                    ctx.text(json);
+                                }
+                            }
+                        },
                         WsClientMessage::Unsubscribe { job_id } => {
                             self.subscribed_jobs.remove(&job_id);
                             let msg = WsServerMessage::unsubscribed(&job_id);
@@ -333,7 +329,10 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsJobActor {
                             text = %text,
                             "Invalid WebSocket client message"
                         );
-                        let msg = WsServerMessage::error("invalid_message", &format!("Invalid message: {}", e));
+                        let msg = WsServerMessage::error(
+                            "invalid_message",
+                            &format!("Invalid message: {}", e),
+                        );
                         if let Ok(json) = serde_json::to_string(&msg) {
                             ctx.text(json);
                         }

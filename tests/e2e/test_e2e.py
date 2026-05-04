@@ -604,6 +604,37 @@ def test_job_lifecycle(client: PatchAPIClient) -> str:
     return f"Full lifecycle OK: install job={job_id}, remove job={remove_job_id}"
 
 
+def test_service_status(client: PatchAPIClient) -> str:
+    """GET /api/v1/system/services/{name} - Test service status endpoint."""
+    # Test with a known service (ssh)
+    resp = client.get("/api/v1/system/services/ssh")
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    data = resp.json()
+    err = validate_envelope(data, "service_status")
+    assert err is None, f"Envelope validation failed: {err}"
+    assert data["success"] is True
+    assert "name" in data["data"], "Missing name field"
+    assert "active_state" in data["data"], "Missing active_state field"
+    assert "healthy" in data["data"], "Missing healthy field"
+    assert isinstance(data["data"]["healthy"], bool), "healthy must be boolean"
+
+    # Test with non-existent service
+    resp = client.get("/api/v1/system/services/nonexistent-service-12345")
+    assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
+    data = resp.json()
+    assert data["success"] is False
+    assert data["error"]["code"] == "SERVICE_NOT_FOUND"
+
+    # Test with invalid service name
+    resp = client.get("/api/v1/system/services/../../etc/passwd")
+    assert resp.status_code == 400, f"Expected 400, got {resp.status_code}"
+    data = resp.json()
+    assert data["success"] is False
+    assert data["error"]["code"] == "INVALID_SERVICE_NAME"
+
+    return f"Service status OK: ssh={data['data']['name']}, state={data['data']['active_state']}, healthy={data['data']['healthy']}"
+
+
 def test_reboot_endpoint(client: PatchAPIClient) -> str:
     """POST /api/v1/system/reboot - Test reboot endpoint.
 
@@ -653,6 +684,7 @@ def run_all_tests(target_key: str, skip_reboot: bool = False, verbose: bool = Fa
     print("\n--- Health & System ---")
     run_test(results, "Health Check", test_health_endpoint, client)
     run_test(results, "System Info", test_system_info, client)
+    run_test(results, "Service Status (ssh)", test_service_status, client)
 
     # ---- Category 2: Package Operations ----
     print("\n--- Package Operations ---")

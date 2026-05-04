@@ -47,6 +47,19 @@ pub struct HealthData {
     pub version: String,
 }
 
+/// Service status response data
+#[derive(Debug, Serialize)]
+pub struct ServiceStatusData {
+    pub name: String,
+    pub display_name: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub load_state: String,
+    pub enabled_state: String,
+    pub main_pid: Option<u32>,
+    pub healthy: bool,
+}
+
 /// Reboot request
 #[derive(Debug, Deserialize, Clone)]
 pub struct RebootRequest {
@@ -228,12 +241,80 @@ pub async fn reboot_system(
     }
 }
 
+/// Get service status
+pub async fn get_service_status(
+    path: web::Path<String>,
+    backend: web::Data<Box<dyn PackageManagerBackend>>,
+    _req: HttpRequest,
+) -> impl Responder {
+    let request_id = Uuid::new_v4().to_string();
+    let service_name = path.into_inner();
+
+    info!(
+        request_id = %request_id,
+        service = %service_name,
+        "Getting service status"
+    );
+
+    // Validate service name
+    if service_name.is_empty() || service_name.contains('/') || service_name.contains("..") {
+        let response = ApiResponse::<()>::error(
+            "INVALID_SERVICE_NAME",
+            &format!("Invalid service name: {}", service_name),
+            None,
+            false,
+        );
+        return HttpResponse::BadRequest().json(response);
+    }
+
+    match backend.get_service_status(&service_name) {
+        Ok(Some(status)) => {
+            let response = ApiResponse::success(ServiceStatusData {
+                name: status.name,
+                display_name: status.display_name,
+                active_state: status.active_state,
+                sub_state: status.sub_state,
+                load_state: status.load_state,
+                enabled_state: status.enabled_state,
+                main_pid: status.main_pid,
+                healthy: status.healthy,
+            });
+            HttpResponse::Ok().json(response)
+        }
+        Ok(None) => {
+            let response = ApiResponse::<()>::error(
+                "SERVICE_NOT_FOUND",
+                &format!("Service '{}' not found", service_name),
+                None,
+                false,
+            );
+            HttpResponse::NotFound().json(response)
+        }
+        Err(e) => {
+            error!(
+                request_id = %request_id,
+                service = %service_name,
+                error = %e,
+                "Failed to get service status"
+            );
+            let response = ApiResponse::<()>::error(
+                "SERVICE_STATUS_ERROR",
+                &format!("Failed to get service status: {}", e),
+                None,
+                true,
+            );
+            HttpResponse::InternalServerError().json(response)
+        }
+    }
+}
+
 /// Configure routes for system endpoints
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/system")
             .route("/info", web::get().to(get_system_info))
-            .route("/reboot", web::post().to(reboot_system)),
+            .route("/reboot", web::post().to(reboot_system))
+            .route("/services/{name}", web::get().to(get_service_status)),
     )
     .route("/health", web::get().to(health_check));
 }
