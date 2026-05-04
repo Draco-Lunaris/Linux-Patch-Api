@@ -15,4 +15,5 @@ pub mod websocket;
 
 // Re-export commonly used types
 pub use packages::{ApiError, ApiResponse};
-pub use websocket::{WsClientMessage, WsServerMessage};
+// WebSocket message types are now in crate::jobs::websocket
+pub use crate::jobs::websocket::{WsClientMessage, WsServerMessage};

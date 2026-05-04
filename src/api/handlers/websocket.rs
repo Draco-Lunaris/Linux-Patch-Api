@@ -3,128 +3,34 @@
 //! Implements WebSocket endpoint for real-time job status updates:
 //! - WS /api/v1/ws/jobs - Real-time job status streaming
 //!
-//! Note: Full WebSocket implementation requires actix-web-actors compatibility.
-//! This stub provides the endpoint structure for future enhancement.
+//! Uses actix-web-actors for proper WebSocket handshake and protocol handling.
+//! The actual actor logic lives in crate::jobs::websocket::WsJobActor.
 
-use actix_web::{http::StatusCode, web, Error, HttpRequest, HttpResponse};
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use actix_web::{web, Error, HttpRequest, HttpResponse};
 use tracing::info;
-use uuid::Uuid;
 
 use crate::jobs::manager::JobManager;
-
-/// WebSocket message from client
-#[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "action")]
-pub enum WsClientMessage {
-    #[serde(rename = "subscribe")]
-    Subscribe {
-        #[serde(default)]
-        job_id: Option<String>,
-    },
-    #[serde(rename = "unsubscribe")]
-    Unsubscribe { job_id: String },
-}
-
-/// WebSocket message to client
-#[derive(Debug, Serialize, Clone)]
-pub struct WsServerMessage {
-    pub event: String,
-    pub job_id: String,
-    pub status: String,
-    pub progress: u8,
-    pub message: String,
-    pub timestamp: String,
-}
-
-impl WsServerMessage {
-    pub fn job_status(job_id: &str, status: &str, progress: u8, message: &str) -> Self {
-        Self {
-            event: "job_status".to_string(),
-            job_id: job_id.to_string(),
-            status: status.to_string(),
-            progress,
-            message: message.to_string(),
-            timestamp: Utc::now().to_rfc3339(),
-        }
-    }
-
-    pub fn job_complete(job_id: &str, status: &str, message: &str) -> Self {
-        Self {
-            event: "job_complete".to_string(),
-            job_id: job_id.to_string(),
-            status: status.to_string(),
-            progress: 100,
-            message: message.to_string(),
-            timestamp: Utc::now().to_rfc3339(),
-        }
-    }
-}
+use crate::jobs::websocket::WsJobActor;
 
 /// Handle WebSocket connection request
-/// Returns upgrade response for WebSocket handshake
+/// Performs the WebSocket handshake and spawns a WsJobActor
+/// that streams job status events to the connected client.
 pub async fn websocket_handler(
     req: HttpRequest,
-    _job_manager: web::Data<JobManager>,
+    stream: web::Payload,
+    job_manager: web::Data<JobManager>,
 ) -> Result<HttpResponse, Error> {
-    let ws_id = Uuid::new_v4();
-    info!(ws_id = %ws_id, "WebSocket connection request");
+    info!("WebSocket connection request received");
 
-    // Check if this is a WebSocket upgrade request
-    if req
-        .headers()
-        .get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false)
-    {
-        // WebSocket upgrade requested
-        // In full implementation, this would use actix-web-actors::ws::start()
-        // For now, return a response indicating WebSocket support
+    // Subscribe to job status events from the JobManager broadcast channel
+    let event_rx = job_manager.subscribe();
 
-        let response_msg = serde_json::json!({
-            "event": "connected",
-            "ws_id": ws_id.to_string(),
-            "timestamp": Utc::now().to_rfc3339(),
-            "message": "WebSocket endpoint ready. Full implementation requires actix-web-actors compatibility.",
-            "polling_alternative": "Use GET /api/v1/jobs/{id} for job status polling"
-        });
+    // Create the WebSocket actor with the broadcast receiver
+    let actor = WsJobActor::new(event_rx);
 
-        // Return HTTP 101 Switching Protocols for WebSocket upgrade
-        // In production, this would be handled by actix-web-actors
-        Ok(HttpResponse::build(StatusCode::SWITCHING_PROTOCOLS)
-            .insert_header(("upgrade", "websocket"))
-            .insert_header(("connection", "upgrade"))
-            .json(response_msg))
-    } else {
-        // Not a WebSocket request - return info about the endpoint
-        let info_msg = serde_json::json!({
-            "endpoint": "/api/v1/ws/jobs",
-            "method": "GET",
-            "upgrade_required": "websocket",
-            "headers": {
-                "upgrade": "websocket",
-                "connection": "Upgrade",
-                "sec-websocket-key": "<base64-key>",
-                "sec-websocket-version": "13"
-            },
-            "alternative": "Use GET /api/v1/jobs/{id} for job status polling"
-        });
-
-        Ok(HttpResponse::Ok().json(info_msg))
-    }
-}
-
-/// Broadcast job status update to subscribed WebSocket clients
-pub async fn broadcast_job_update(
-    job_id: &Uuid,
-    status: &crate::jobs::manager::JobStatus,
-    progress: u8,
-    _message: &str,
-) {
-    info!(job_id = %job_id, status = ?status, progress = progress, "Job status update available for broadcast");
-    // In production, would use a broadcast channel to notify all subscribed WebSocket clients
+    // Perform the WebSocket handshake and start the actor
+    // This computes the proper Sec-WebSocket-Accept header and upgrades the connection
+    actix_web_actors::ws::start(actor, &req, stream)
 }
 
 /// Configure WebSocket route
@@ -134,7 +40,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::jobs::websocket::{WsClientMessage, WsServerMessage};
 
     #[test]
     fn test_ws_server_message_serialization() {
