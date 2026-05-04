@@ -1,4 +1,14 @@
-linux-patch-api (0.3.5-1) unstable; urgency=low
+linux-patch-api (0.3.6-1) unstable; urgency=low
+
+  * Add GET /api/v1/system/services/{name} endpoint for service health checks
+  * Add ServiceStatus struct with systemd and OpenRC support
+  * Add get_service_status() to PackageManagerBackend trait
+  * Implement systemd service status via systemctl
+  * Implement OpenRC service status via rc-service
+  * Add E2E test for service status endpoint
+
+ -- Echo <echo@moon-dragon.us>  Mon, 04 May 2026 23:44:00 -0500
+
 
   * Remove CapabilityBoundingSet and AmbientCapabilities - apt needs full root capabilities
   * Remove ProtectSystem=strict, NoNewPrivileges, RestrictSUIDSGID - block core functionality
