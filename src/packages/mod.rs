@@ -568,7 +568,6 @@ fn get_systemd_service_status(name: &str) -> Result<Option<ServiceStatus>> {
 
     let healthy = active_state == "active" && sub_state == "running";
 
-
     // Check for socket activation: if service is inactive but enabled,
     // check if the corresponding .socket unit is active (listening)
     let healthy = if !healthy && active_state == "inactive" && unit_file_state == "enabled" {
