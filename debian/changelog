@@ -1,3 +1,10 @@
+linux-patch-api (0.3.10-1) unstable; urgency=low
+
+  * Fix socket activation detection for service status healthy logic
+  * When service is inactive but enabled, check if .socket unit is active
+
+ -- Echo <echo@moon-dragon.us>  Mon, 05 May 2026 13:10:00 -0500
+
 linux-patch-api (0.3.9-1) unstable; urgency=low
 
   * Fix socket activation detection for service status healthy logic
