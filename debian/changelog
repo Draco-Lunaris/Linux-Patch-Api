@@ -1,4 +1,4 @@
-linux-patch-api (0.3.7-1) unstable; urgency=low
+linux-patch-api (0.3.8-1) unstable; urgency=low
 
   * Add GET /api/v1/system/services/{name} endpoint for service health checks
   * Add ServiceStatus struct with systemd and OpenRC support
