@@ -568,6 +568,28 @@ fn get_systemd_service_status(name: &str) -> Result<Option<ServiceStatus>> {
 
     let healthy = active_state == "active" && sub_state == "running";
 
+
+    // Check for socket activation: if service is inactive but enabled,
+    // check if the corresponding .socket unit is active (listening)
+    let healthy = if !healthy && active_state == "inactive" && unit_file_state == "enabled" {
+        let socket_name = format!("{}.socket", name.trim_end_matches(".service"));
+        if let Ok(socket_output) = Command::new("systemctl")
+            .args(["show", &socket_name, "--property=ActiveState", "--no-pager"])
+            .output()
+        {
+            let socket_stdout = String::from_utf8_lossy(&socket_output.stdout);
+            if socket_stdout.contains("ActiveState=active") {
+                true
+            } else {
+                healthy
+            }
+        } else {
+            healthy
+        }
+    } else {
+        healthy
+    };
+
     Ok(Some(ServiceStatus {
         name: id,
         display_name: description,

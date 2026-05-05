@@ -1,3 +1,11 @@
+linux-patch-api (0.3.9-1) unstable; urgency=low
+
+  * Fix socket activation detection for service status healthy logic
+  * When service is inactive but enabled, check if .socket unit is active
+  * Mark service healthy if socket is listening (e.g., ssh.socket for ssh.service)
+
+ -- Echo <echo@moon-dragon.us>  Mon, 05 May 2026 11:25:00 -0500
+
 linux-patch-api (0.3.8-1) unstable; urgency=low
 
   * Add GET /api/v1/system/services/{name} endpoint for service health checks
