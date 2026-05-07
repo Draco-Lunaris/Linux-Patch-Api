@@ -571,7 +571,9 @@ fn get_systemd_service_status(name: &str) -> Result<Option<ServiceStatus>> {
     // Check for socket activation: if service is inactive but enabled,
     // check if the corresponding .socket unit is active (listening)
     let healthy = if !healthy && active_state == "inactive" && unit_file_state == "enabled" {
-        let socket_name = format!("{}.socket", name.trim_end_matches(".service"));
+        // Use the resolved service name (id) instead of input name,
+        // so "sshd" resolves to "ssh.service" → "ssh.socket" correctly
+        let socket_name = format!("{}.socket", id.trim_end_matches(".service"));
         if let Ok(socket_output) = Command::new("systemctl")
             .args(["show", &socket_name, "--property=ActiveState", "--no-pager"])
             .output()

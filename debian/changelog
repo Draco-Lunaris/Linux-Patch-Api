@@ -1,3 +1,10 @@
+linux-patch-api (0.3.12-1) unstable; urgency=low
+
+  * Fix socket activation detection to use resolved service name
+  * Queries like "sshd" now correctly resolve to "ssh.socket" for socket activation
+
+ -- Echo <echo@moon-dragon.us>  Tue, 06 May 2026 20:42:00 -0500
+
 linux-patch-api (0.3.10-1) unstable; urgency=low
 
   * Fix socket activation detection for service status healthy logic
