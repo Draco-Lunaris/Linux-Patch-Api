@@ -136,11 +136,29 @@
 ## Certificate Management
 
 - **CA Type:** Internal self-hosted Certificate Authority
-- **Distribution:** Manual certificate distribution to clients
+- **Distribution:** Manual certificate distribution OR automated Self-Enrollment
 - **Scope:** Limited distribution (small number of authorized clients)
 - **Validity Period:** 1 year standard expiration
 - **Client Identity:** Unique certificate per client (no shared certs)
 - **Rotation:** Manual renewal process before expiration
+
+## Self-Enrollment Workflow
+
+The `linux_patch_api` daemon supports an automated self-enrollment workflow to securely request identity from the `linux_patch_manager` without manual PKI distribution.
+
+- **Trigger:** Initiated via CLI flag during setup/first run (e.g., `linux_patch_api --enroll https://<manager_url>`).
+- **Phase 1: Registration Request:**
+  - Extracts `/etc/machine-id`, FQDN, IP Address, and OS details.
+  - Submits an unauthenticated `POST /api/v1/enroll` request to the manager.
+  - Receives a temporary `polling_token`.
+- **Phase 2: Polling & Approval:**
+  - The daemon enters a polling loop, querying `GET /api/v1/enroll/status/{token}` (e.g., every 60 seconds).
+  - Aborts if HTTP 403 or 404 is returned (request denied/purged).
+- **Phase 3: Provisioning:**
+  - Upon HTTP 200, extracts the provided PKI bundle (`ca.crt`, `server.crt`, `server.key`).
+  - Writes certificates to the configured mTLS storage paths.
+  - Automatically appends the manager's IP address to `/etc/linux_patch_api/whitelist.yaml`.
+  - Transitions to standard mTLS listening mode without requiring a service restart.
 
 ## Audit Logging
 

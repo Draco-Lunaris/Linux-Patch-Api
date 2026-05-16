@@ -882,6 +882,48 @@ def wait_for_job(job_id, base_url, certs, poll_interval=2):
 
 ---
 
+## Self-Enrollment Client Workflow
+
+The Linux Patch API daemon supports automated self-enrollment to a Patch Manager instance without manual certificate distribution.
+
+### 1. Trigger Enrollment
+Run the daemon with the `--enroll` flag pointing to the manager's public API endpoint:
+```bash
+linux_patch_api --enroll https://<manager-host>/api/v1
+```
+
+### 2. Registration Request (Unauthenticated)
+The daemon extracts `/etc/machine-id`, FQDN, IP, and OS details, then submits:
+```http
+POST /api/v1/enroll HTTP/1.1
+Content-Type: application/json
+
+{
+  "machine_id": "3a4b5c6d7e8f...",
+  "fqdn": "host-01.example.com",
+  "ip_address": "192.168.1.50",
+  "os_details": { "name": "Ubuntu", "version": "24.04 LTS" }
+}
+```
+**Response:** Returns a temporary `polling_token`.
+
+### 3. Status Polling
+The daemon enters a polling loop (default: every 60s):
+```http
+GET /api/v1/enroll/status/{polling_token} HTTP/1.1
+```
+- `202 Accepted`: Still pending admin approval.
+- `403/404 Forbidden`: Request denied or expired (daemon aborts).
+- `200 OK`: Approved. Response body contains the PKI bundle (`ca.crt`, `server.crt`, `server.key`).
+
+### 4. Provisioning & Transition
+Upon receiving HTTP 200:
+1. Writes certificates to configured mTLS storage paths.
+2. Appends manager IP to `/etc/linux_patch_api/whitelist.yaml`.
+3. Smoothly transitions to standard mTLS listening mode without service restart.
+
+---
+
 ## Support
 
 - **Documentation:** [README.md](./README.md)
