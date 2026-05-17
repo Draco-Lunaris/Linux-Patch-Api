@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     );
 
     // Load configuration
-    let config = match AppConfig::load(&args.config) {
+    let config = match AppConfig::load(&args.config, args.enroll.is_some()) {
         Ok(cfg) => {
             info!(
                 port = cfg.server.port,

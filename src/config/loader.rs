@@ -142,16 +142,16 @@ pub struct AppConfig {
 
 impl AppConfig {
     /// Load configuration from a YAML file
-    pub fn load(path: &str) -> Result<Self> {
+    pub fn load(path: &str, skip_tls_validation: bool) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
 
         let config: AppConfig = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path))?;
 
-        // Validate TLS configuration if enabled
+        // Validate TLS configuration if enabled (skip during enrollment bootstrap)
         if let Some(ref tls) = config.tls {
-            if tls.enabled {
+            if tls.enabled && !skip_tls_validation {
                 if !std::path::Path::new(&tls.ca_cert).exists() {
                     anyhow::bail!("TLS CA certificate not found: {}", tls.ca_cert);
                 }
