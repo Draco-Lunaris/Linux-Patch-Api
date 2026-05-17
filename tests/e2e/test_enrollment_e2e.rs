@@ -120,7 +120,7 @@ async fn test_full_enrollment_flow_happy_path() {
         .and(path("/api/v1/enroll"))
         .respond_with(
             ResponseTemplate::new(202)
-                .set_body_string(&format!(r#"{{"polling_token": "{}"}}"#, TEST_TOKEN)),
+                .set_body_string(format!(r#"{{"polling_token": "{}"}}"#, TEST_TOKEN)),
         )
         .named("enroll_registration")
         .mount(&server)
@@ -135,7 +135,7 @@ async fn test_full_enrollment_flow_happy_path() {
                 ResponseTemplate::new(200).set_body_string(r#"{"status": "pending"}"#)
             } else {
                 // Second poll returns approved with full PKI bundle
-                ResponseTemplate::new(200).set_body_string(&format!(
+                ResponseTemplate::new(200).set_body_string(format!(
                     r#"{{
                         "status": "approved",
                         "ca_crt": {},
@@ -414,7 +414,7 @@ async fn test_certificate_permission_verification() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(&format!(
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
             r#"{{
                     "status": "approved",
                     "ca_crt": {},
@@ -529,7 +529,7 @@ async fn test_whitelist_append_verification() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(&format!(
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
             r#"{{
                     "status": "approved",
                     "ca_crt": {},
@@ -663,14 +663,15 @@ async fn test_signal_handling_during_polling() {
     );
 
     // Verify: cleanup of any partial state (no leftover files)
-    for entry in std::fs::read_dir(cert_dir.path()).unwrap() {
-        let entry = entry.unwrap();
-        assert!(
-            false,
-            "No partial files should remain after graceful shutdown: {}",
-            entry.file_name().to_string_lossy()
-        );
-    }
+    let remaining: Vec<_> = std::fs::read_dir(cert_dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "No partial files should remain after graceful shutdown: {:?}",
+        remaining
+    );
 }
 
 // =============================================================================
@@ -703,7 +704,7 @@ async fn test_whitelist_yaml_format_preservation() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(&format!(
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
             r#"{{
                     "status": "approved",
                     "ca_crt": {},

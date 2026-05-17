@@ -11,6 +11,7 @@
 
 use linux_patch_api::enroll::client::EnrollmentClient;
 use serial_test::serial;
+use wiremock::http::Method;
 use wiremock::{
     matchers::{method, path, path_regex},
     Mock, MockServer, ResponseTemplate,
@@ -417,7 +418,7 @@ async fn test_registration_payload_structure() {
     let requests = server.received_requests().await.unwrap();
     let post_request = requests
         .iter()
-        .find(|r| r.method.to_string() == "POST")
+        .find(|r| r.method == Method::POST)
         .expect("Should have received a POST request");
 
     let body_str = std::str::from_utf8(&post_request.body).expect("Body should be valid UTF-8");

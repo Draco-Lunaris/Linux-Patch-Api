@@ -245,7 +245,7 @@ fn test_ip_addresses_are_unicast() {
 
         // Not unspecified (0.0.0.0)
         assert!(
-            !(parts == vec![0, 0, 0, 0]),
+            parts != vec![0, 0, 0, 0],
             "Address '{}' is unspecified",
             addr
         );
@@ -492,7 +492,7 @@ fn test_cross_distro_os_release_parsing() {
         parsed.contains_key("NAME"),
         "os-release must contain NAME field"
     );
-    assert!(parsed["NAME"].ne(&""), "NAME should not be empty");
+    assert!(!parsed["NAME"].is_empty(), "NAME should not be empty");
 }
 
 #[test]
