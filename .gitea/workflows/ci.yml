@@ -271,7 +271,7 @@ jobs:
       - name: Install Rust
         run: |
           apk add --no-cache curl bash
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          curl --ipv4 --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           . "$HOME/.cargo/env"
           rustup target add x86_64-unknown-linux-musl
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
