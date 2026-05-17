@@ -64,7 +64,7 @@ addr = "0.15"
 if-addrs = "0.13"
 
 # HTTP client for enrollment communication
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Clap for CLI arguments
 clap = { version = "4", features = ["derive", "env"] }
