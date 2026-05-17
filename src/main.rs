@@ -24,6 +24,7 @@ use tracing::{error, info, warn};
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager};
 use linux_patch_api::packages::create_backend;
+use linux_patch_api::enroll;
 use linux_patch_api::{init_logging, AppConfig, JobManager};
 
 /// Linux Patch API CLI arguments
@@ -39,6 +40,10 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Enroll with manager at URL (skips mTLS startup, runs enrollment flow only)
+    #[arg(long, help = "Enroll with manager at URL (skips mTLS startup, runs enrollment flow only)")]
+    enroll: Option<String>,
 }
 
 #[actix_web::main]
@@ -70,6 +75,20 @@ async fn main() -> Result<()> {
             return Err(anyhow::anyhow!("Configuration error: {}", e));
         }
     };
+
+    // Handle enrollment mode - runs before server startup
+    if let Some(ref manager_url) = args.enroll {
+        info!(manager_url = manager_url, "Enrollment mode activated - running enrollment flow before server startup");
+        match enroll::run_enrollment(manager_url, &config).await {
+            Ok(()) => {
+                info!("Enrollment complete - proceeding to server startup");
+            }
+            Err(e) => {
+                error!(error = %e, "Enrollment failed - shutting down");
+                return Err(anyhow::anyhow!("Enrollment failed: {}", e));
+            }
+        }
+    }
 
     // Initialize job manager
     let job_manager = JobManager::new(config.jobs.max_concurrent, config.jobs.timeout_minutes)?;

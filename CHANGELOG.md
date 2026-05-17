@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Self-enrollment workflow**: Automated host registration with linux_patch_manager
+  - CLI flag: `--enroll <MANAGER_URL>` for enrollment mode
+  - Three-phase enrollment: Registration → Polling (24h timeout) → PKI Provisioning
+  - Automatic certificate provisioning to configured mTLS paths
+  - Automatic manager IP whitelist append after successful enrollment
+  - Configurable polling interval (default 60s) and max attempts (default 1440/24h)
+  - Signal handling for graceful shutdown during enrollment
+- Enrollment configuration section in config.yaml (`enrollment.*`)
+- Identity extraction module (machine-id, FQDN, IP addresses, OS details)
+- PKI bundle validation with PEM format checking
+- Atomic certificate file writing with secure permissions (key=0600, certs=0644)
+- Whitelist auto-append with file locking and duplicate detection
+
+---
+
 ## [1.0.0] - 2026-07-17
 
 ### Added
@@ -191,6 +209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Release Date | Status | Key Milestone |
 |---------|--------------|--------|---------------|
+| Unreleased | TBD | In Development | Self-enrollment feature complete |
 | 1.0.0 | 2026-07-17 | Production | Initial production release |
 | 0.1.0 | 2026-04-09 | Development | Initial development release |
 

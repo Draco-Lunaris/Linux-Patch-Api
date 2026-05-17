@@ -16,6 +16,7 @@ Complete guide for deploying Linux Patch API to production environments.
 - [RHEL/CentOS/Fedora Deployment](#rhelcentosfedora-deployment)
 - [Manual Deployment](#manual-deployment)
 - [Certificate Deployment](#certificate-deployment)
+- [Self-Enrollment Deployment](#self-enrollment-deployment)
 - [Configuration](#configuration)
 - [systemd Service Management](#systemd-service-management)
 - [Monitoring and Logging](#monitoring-and-logging)
@@ -442,6 +443,254 @@ shred -u /tmp/client001.key.pem
 - [ ] Certificate permissions: 644
 - [ ] CA private key stored on separate secure host
 - [ ] Certificate inventory maintained
+
+---
+
+## Self-Enrollment Deployment
+
+Self-enrollment allows a new host to automatically request and receive mTLS certificates from the `linux_patch_manager` without manual PKI distribution. The daemon extracts its machine identity, registers with the manager, polls for admin approval, and provisions certificates before starting the mTLS server.
+
+### How It Works
+
+The enrollment workflow operates in three phases:
+
+1. **Registration:** Extracts `/etc/machine-id`, FQDN, IP address, and OS details. Submits an unauthenticated `POST /api/v1/enroll` request to the manager. Receives a temporary `polling_token`.
+2. **Polling & Approval:** Enters a polling loop querying `GET /api/v1/enroll/status/{token}` (default: every 60 seconds, up to 1440 attempts = 24 hours). Aborts on HTTP 403/404 (denied/purged).
+3. **Provisioning:** On HTTP 200, downloads the PKI bundle (`ca.crt`, `server.crt`, `server.key`), writes certificates to configured mTLS paths, appends manager IP to whitelist, and transitions to standard mTLS listening mode.
+
+### Prerequisites
+
+| Requirement | Details |
+|-------------|---------|
+| Manager URL | Must be accessible from the host (HTTPS) |
+| Network Connectivity | Outbound HTTPS to manager endpoint |
+| DNS Resolution | Manager hostname must resolve correctly |
+| systemd | Version 237+ for service management |
+| Root Access | Required for certificate file writes |
+
+**Verification before enrollment:**
+```bash
+# Verify network connectivity to manager
+curl -I https://manager.example.com
+
+# Verify DNS resolution
+nslookup manager.example.com
+
+# Verify outbound HTTPS works
+curl -ks https://manager.example.com/api/v1/health
+```
+
+### Step-by-Step Enrollment Procedure
+
+#### Step 1: Install linux-patch-api Package
+
+```bash
+# Debian/Ubuntu
+dpkg -i linux-patch-api_1.0.0-1_amd64.deb
+
+# RHEL/CentOS/Fedora
+rpm -ivh linux-patch-api-1.0.0-1.x86_64.rpm
+```
+
+#### Step 2: Run Enrollment Command
+
+```bash
+# Basic enrollment with manager URL
+sudo linux-patch-api --enroll https://manager.example.com
+
+# With verbose logging for troubleshooting
+sudo linux-patch-api --enroll https://manager.example.com --verbose
+```
+
+The enrollment process will:
+- Extract machine identity from `/etc/machine-id` and system properties
+- Submit registration request to manager
+- Enter polling loop (logs progress every 60 seconds)
+- Await admin approval on the manager side
+- Download and install certificates automatically
+- Update IP whitelist with manager address
+- Start mTLS server upon successful provisioning
+
+#### Step 3: Monitor Enrollment Progress
+
+```bash
+# View enrollment logs in real-time
+journalctl -u linux-patch-api -f
+
+# Or if running manually:
+sudo linux-patch-api --enroll https://manager.example.com --verbose
+```
+
+**Expected log progression:**
+```
+INFO Enrollment mode activated - manager_url=https://manager.example.com
+INFO Phase 1: Submitting registration request
+INFO Registration submitted - polling_token=abc123...
+INFO Phase 2: Polling for approval (interval=60s, max_attempts=1440)
+INFO Poll attempt 1/1440 - status=pending
+... (admin approves on manager side) ...
+INFO Phase 3: Provisioning certificates
+INFO ca.pem written to /etc/linux_patch_api/certs/ca.pem
+INFO server.pem written to /etc/linux_patch_api/certs/server.pem
+INFO server.key written to /etc/linux_patch_api/certs/server.key
+INFO Manager IP added to whitelist
+INFO Enrollment complete - proceeding to server startup
+```
+
+#### Step 4: Admin Approval (Manager Side)
+
+On the `linux_patch_manager` dashboard:
+1. Navigate to Pending Enrollments
+2. Review host details (machine-id, FQDN, IP, OS)
+3. Approve the enrollment request
+4. Manager provisions PKI bundle and signals approval
+
+#### Step 5: Verify Successful Enrollment
+
+```bash
+# Check service is running
+systemctl status linux-patch-api
+
+# Verify certificates exist
+ls -la /etc/linux_patch_api/certs/
+
+# Test mTLS connection
+curl --cacert /etc/linux_patch_api/certs/ca.pem \
+     --cert /path/to/client.pem \
+     --key /path/to/client.key.pem \
+     https://localhost:12443/health
+```
+
+### Configuration Options
+
+Enrollment behavior can be tuned via the `enrollment` section in `/etc/linux_patch_api/config.yaml`:
+
+```yaml
+# Enrollment Configuration
+enrollment:
+  polling_interval_seconds: 60    # Time between approval polls (default: 60)
+  max_poll_attempts: 1440         # Maximum poll attempts (default: 1440 = 24 hours)
+```
+
+**Parameter Reference:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `polling_interval_seconds` | 60 | Seconds between approval status polls. Minimum: 10 |
+| `max_poll_attempts` | 1440 | Maximum polling attempts before timeout. Effective timeout = interval × attempts |
+
+**Effective Timeout Calculation:**
+- Default: 60s × 1440 = 86,400 seconds (24 hours)
+- Custom example: 30s × 720 = 21,600 seconds (6 hours)
+
+### Troubleshooting
+
+| Symptom | Cause | Resolution |
+|---------|-------|------------|
+| `Enrollment failed: connection refused` | Manager not reachable | Verify manager URL, check firewall rules |
+| `Enrollment failed: DNS resolution error` | Hostname cannot resolve | Check `/etc/resolv.conf`, verify DNS |
+| `HTTP 403 - Enrollment denied` | Admin rejected request | Contact manager admin to approve enrollment |
+| `HTTP 404 - Token not found` | Token expired/purged | Re-run enrollment command with `--enroll` flag |
+| `Polling timeout after N attempts` | Max attempts exceeded | Increase `max_poll_attempts` in config, re-enroll |
+| `Rate limited: 429 Too Many Requests` | Polling too frequently | Ensure `polling_interval_seconds >= 10` |
+| `Permission denied writing certificates` | Insufficient privileges | Run with `sudo` or as root user |
+| `Whitelist update failed` | File permission issue | Verify `/etc/linux_patch_api/` is writable by service user |
+
+**Diagnostic Commands:**
+```bash
+# Check enrollment logs
+journalctl -u linux-patch-api --since "1 hour ago"
+
+# Test manager connectivity
+curl -v https://manager.example.com/api/v1/enroll
+
+# Verify DNS resolution
+dig manager.example.com
+nslookup manager.example.com
+
+# Check certificate paths are writable
+ls -la /etc/linux_patch_api/certs/
+sudo touch /etc/linux_patch_api/certs/test && sudo rm /etc/linux_patch_api/certs/test
+```
+
+### Post-Enrollment Verification
+
+After successful enrollment, verify the following:
+
+1. **Certificate Files Exist:**
+   ```bash
+   ls -la /etc/linux_patch_api/certs/
+   # Expected: ca.pem (644), server.pem (644), server.key (600)
+   ```
+
+2. **Certificate Validity:**
+   ```bash
+   openssl x509 -in /etc/linux_patch_api/certs/server.pem -text -noout | grep -A2 "Validity"
+   openssl x509 -in /etc/linux_patch_api/certs/ca.pem -text -noout | grep -A2 "Validity"
+   ```
+
+3. **Whitelist Contains Manager IP:**
+   ```bash
+   cat /etc/linux_patch_api/whitelist.yaml
+   # Should contain manager IP address in entries list
+   ```
+
+4. **mTLS Connection Test:**
+   ```bash
+   curl --cacert /etc/linux_patch_api/certs/ca.pem \
+        --cert /path/to/client.pem \
+        --key /path/to/client.key.pem \
+        https://localhost:12443/health
+   # Expected: {"status": "ok"}
+   ```
+
+5. **Service Status:**
+   ```bash
+   systemctl status linux-patch-api
+   # Expected: active (running)
+   ```
+
+### Rollback and Re-Enrollment
+
+#### Removing Enrolled Certificates
+
+```bash
+# Stop the service
+sudo systemctl stop linux-patch-api
+
+# Remove provisioned certificates
+sudo rm -f /etc/linux_patch_api/certs/ca.pem
+sudo rm -f /etc/linux_patch_api/certs/server.pem
+sudo rm -f /etc/linux_patch_api/certs/server.key
+
+# Revert whitelist (remove manager IP entry)
+sudo vi /etc/linux_patch_api/whitelist.yaml
+```
+
+#### Re-Enrolling a Host
+
+```bash
+# Run enrollment again with same or different manager
+sudo linux-patch-api --enroll https://manager.example.com
+
+# Or enroll with a different manager
+sudo linux-patch-api --enroll https://new-manager.example.com
+```
+
+**Notes:**
+- Re-enrollment overwrites existing certificates in the configured paths
+- The previous polling token is discarded; a new registration request is submitted
+- If re-enrolling with the same manager, ensure the old enrollment was purged or approved
+
+### Enrollment vs Manual Certificate Deployment
+
+| Aspect | Self-Enrollment | Manual PKI |
+|--------|----------------|------------|
+| Certificate distribution | Automatic from manager | Manual SCP/copy |
+| Whitelist management | Auto-populated with manager IP | Manual configuration |
+| Admin approval required | Yes (on manager side) | N/A |
+| Network dependency | Requires outbound HTTPS to manager | None after cert distribution |
+| Best for | Large-scale deployments, automation | Air-gapped environments, single hosts |
 
 ---
 

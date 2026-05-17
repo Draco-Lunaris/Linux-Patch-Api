@@ -15,8 +15,52 @@ The self-enrollment feature enables a new `linux_patch_api` instance to automati
 | Phase | Description | Manager Endpoint |
 |-------|-------------|------------------|
 | **Phase 1: Registration** | Extract host identity → POST unauthenticated enrollment request → receive `polling_token` | `POST /api/v1/enroll` |
-| **Phase 2: Polling** | Poll manager for approval status every 60s → abort on 403/404 | `GET /api/v1/enroll/status/{token}` |
+| **Phase 2: Polling** | Poll manager for approval status every 60s → abort on denied/not_found | `GET /api/v1/enroll/status/{token}` |
 | **Phase 3: Provisioning** | Extract PKI bundle → write certs to disk → append manager IP to whitelist → transition to mTLS mode | (response body of status endpoint) |
+
+### Manager API Schemas (verified from linux_patch_manager source)
+
+#### `POST /api/v1/enroll`
+- **Request Body:**
+  ```json
+  {
+    "machine_id": "<string>",
+    "fqdn": "<string>",
+    "ip_address": "<string>",
+    "os_details": { /* JSON object: distro, version, kernel, etc. */ }
+  }
+  ```
+- **Success Response (202 Accepted):**
+  ```json
+  {
+    "polling_token": "<64-char alphanumeric string>"
+  }
+  ```
+- **Rate Limit:** 1 request per minute per IP (returns 429 if exceeded)
+- **Auth:** None (unauthenticated - manager approval process provides security)
+
+#### `GET /api/v1/enroll/status/{token}`
+- **Response (tagged enum with `status` field):**
+  ```json
+  { "status": "pending" }                    // Still waiting for admin approval
+  {
+    "status": "approved",
+    "ca_crt": "<PEM string>",
+    "server_crt": "<PEM string>",
+    "server_key": "<PEM string>"
+  }                                           // Approved - extract PKI bundle
+  { "status": "denied" }                     // Admin rejected request
+  { "status": "not_found" }                  // Token expired/invalid/purged
+  ```
+
+### Design Decisions (Confirmed with Kelly)
+| Decision | Value |
+|----------|-------|
+| **Certificate paths** | Write to existing mTLS config paths from `config.yaml` (no separate enrollment directory) |
+| **Insecure enrollment** | Default - skip TLS verification on manager connection (approval process provides security) |
+| **Polling timeout** | 24 hours maximum (86400 seconds, ~1440 attempts at 60s interval) |
+| **Branch strategy** | Merge incrementally to `main` after each phase completes |
+| **Cross-distro requirement** | All code must be functional across Debian/Ubuntu, RHEL/CentOS/Fedora, Alpine, Arch Linux |
 
 ---
 
@@ -28,10 +72,10 @@ The self-enrollment feature enables a new `linux_patch_api` instance to automati
 - **Profile:** developer
 - **Files:** `src/main.rs`
 - **Changes:**
-  - Add `--enroll <MANAGER_URL>` flag to clap Args struct
-  - Add `--enroll-insecure` flag (optional, skip TLS verification for initial connection)
+  - Add `--enroll <MANAGER_URL>` flag to clap Args struct (required positional or named)
+  - TLS verification is disabled by default on manager connection (insecure enrollment) - manager approval process provides security
   - Wire enrollment entry point into main() before server startup
-- **Output Contract:** Updated main.rs with new CLI args compiled and tested
+- **Output Contract:** Updated main.rs with new CLI args compiled and tested across all target distros
 
 ### Sub-Agent Task 1.2: Enroll Module Skeleton
 - **Profile:** developer
@@ -53,7 +97,7 @@ The self-enrollment feature enables a new `linux_patch_api` instance to automati
       manager_url: ""
       polling_token: ""
       polling_interval_seconds: 60
-      max_poll_attempts: 0  # 0 = unlimited
+      max_poll_attempts: 1440  # 24 hours at 60s intervals (86400 seconds)
     ```
   - Add persistence of polling token to config file during Phase 2
 - **Output Contract:** Config loads with new enrollment section; backward compatible with existing configs
@@ -93,12 +137,14 @@ The self-enrollment feature enables a new `linux_patch_api` instance to automati
 - **Changes:**
   - Implement polling loop with configurable interval (default 60s)
   - `GET /api/v1/enroll/status/{token}` endpoint calls
-  - Handle responses:
-    - 200: Enrollment approved → proceed to provisioning
-    - 403/404: Denied/purged → abort with clear error message
-    - 202: Pending → continue polling
-  - Respect `max_poll_attempts` config (0 = unlimited)
+  - Handle responses per manager API enum:
+    - `{status: "approved"}` → proceed to provisioning with PKI bundle
+    - `{status: "denied"}` → abort with clear error message (admin rejected)
+    - `{status: "not_found"}` → abort (token expired/invalid/purged)
+    - `{status: "pending"}` → continue polling
+  - Hard timeout: 24 hours maximum (1440 attempts at 60s interval) per Kelly's directive
   - Graceful shutdown on SIGINT/SIGTERM during polling
+  - **Cross-distro note:** Use `tokio::time::sleep` (async, no platform-specific timers)
 - **Output Contract:** Polling loop works correctly with all response codes
 
 ### Sub-Agent Task 2.3: Main.rs Enrollment Entry Point
@@ -376,10 +422,14 @@ Before kicking off sub-agents:
 
 ---
 
-## Questions for Kelly
 
-1. **Manager API schema:** What are the exact JSON request/response formats for `POST /api/v1/enroll` and `GET /api/v1/enroll/status/{token}`? Need field names and types.
-2. **Certificate paths:** Should enrollment write to the same paths as existing mTLS config (`/etc/linux_patch_api/certs/`) or a separate enrollment-specific directory?
-3. **Insecure enrollment:** Should `--enroll-insecure` be the default for initial setup (skip TLS verification on manager connection), or require explicit flag?
-4. **Polling defaults:** 60-second interval and unlimited attempts - confirmed acceptable?
-5. **Branch strategy:** Create `feat/self-enrollment` branch, or merge incrementally to main after each phase?
+## Confirmed Design Decisions
+
+| # | Question | Decision | Source |
+|---|----------|----------|--------|
+| 1 | Manager API schema | Verified from `linux_patch_manager` source at `/a0/usr/projects/linux_patch_manager/crates/pm-core/src/models.rs` lines 130-169 and `pm-web/src/routes/enrollment.rs` | Local source code |
+| 2 | Certificate paths | Write to existing mTLS config paths from `config.yaml` (no separate enrollment directory) | Kelly confirmation |
+| 3 | Insecure enrollment default | TLS verification disabled by default on manager connection - approval process provides security | Kelly confirmation |
+| 4 | Polling timeout | Hard limit: 24 hours maximum (1440 attempts at 60s interval) | Kelly confirmation |
+| 5 | Branch strategy | Merge incrementally to `main` after each phase completes | Kelly confirmation |
+| 6 | Cross-distro requirement | All code must be functional across Debian/Ubuntu, RHEL/CentOS/Fedora, Alpine, Arch Linux | Kelly confirmation |

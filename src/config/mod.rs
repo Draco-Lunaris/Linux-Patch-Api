@@ -6,5 +6,6 @@
 //! - Auto-reload on file change via notify watcher
 
 pub mod loader;
+pub use loader::EnrollmentConfig;
 pub mod validator;
 pub mod watcher;

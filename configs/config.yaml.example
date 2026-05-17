@@ -44,3 +44,16 @@ package_manager:
   # Primary backend (auto-detected if not specified)
   # Options: apt, dnf, yum, apk, pacman
   backend: "auto"
+
+# Enrollment Configuration (optional)
+# Uncomment and configure for self-enrollment with linux_patch_manager
+# enrollment:
+#   # URL of the enrollment manager for polling status updates
+#   manager_url: "https://manager.example.com/enroll"
+#   # Authentication token for enrollment polling requests
+#   polling_token: "your-enrollment-token-here"
+#   # How often to poll the manager in seconds (default: 60)
+#   polling_interval_seconds: 60
+#   # Maximum number of polling attempts before giving up
+#   # Default: 1440 (24 hours at 60s intervals = 86400 seconds total)
+#   max_poll_attempts: 1440

@@ -105,6 +105,12 @@
   - Permission denied
   - System resource errors
   - Configuration errors
+  - Enrollment failures:
+    - `ENROLLMENT_DENIED`: Admin rejected enrollment request on linux_patch_manager
+    - `ENROLLMENT_EXPIRED`: Polling token expired or purged (HTTP 404 from manager)
+    - `ENROLLMENT_TIMEOUT`: 24-hour polling limit exceeded (1440 attempts exhausted)
+    - `ENROLLMENT_RATE_LIMITED`: Request rate limit exceeded (1/minute per IP, HTTP 429)
+    - `PKI_PROVISION_FAILED`: Certificate write or PEM validation failed during provisioning
 
 - **Error Message Policy:**
   - mTLS confirmed clients: Detailed error messages with debugging info
@@ -137,6 +143,8 @@
 
 - **CA Type:** Internal self-hosted Certificate Authority
 - **Distribution:** Manual certificate distribution OR automated Self-Enrollment
+  - Self-Enrollment provides automatic PKI provisioning after admin approval on linux_patch_manager
+  - Eliminates manual certificate copy/permission management for new hosts
 - **Scope:** Limited distribution (small number of authorized clients)
 - **Validity Period:** 1 year standard expiration
 - **Client Identity:** Unique certificate per client (no shared certs)
@@ -146,19 +154,49 @@
 
 The `linux_patch_api` daemon supports an automated self-enrollment workflow to securely request identity from the `linux_patch_manager` without manual PKI distribution.
 
-- **Trigger:** Initiated via CLI flag during setup/first run (e.g., `linux_patch_api --enroll https://<manager_url>`).
-- **Phase 1: Registration Request:**
-  - Extracts `/etc/machine-id`, FQDN, IP Address, and OS details.
-  - Submits an unauthenticated `POST /api/v1/enroll` request to the manager.
-  - Receives a temporary `polling_token`.
-- **Phase 2: Polling & Approval:**
-  - The daemon enters a polling loop, querying `GET /api/v1/enroll/status/{token}` (e.g., every 60 seconds).
-  - Aborts if HTTP 403 or 404 is returned (request denied/purged).
-- **Phase 3: Provisioning:**
-  - Upon HTTP 200, extracts the provided PKI bundle (`ca.crt`, `server.crt`, `server.key`).
-  - Writes certificates to the configured mTLS storage paths.
-  - Automatically appends the manager's IP address to `/etc/linux_patch_api/whitelist.yaml`.
-  - Transitions to standard mTLS listening mode without requiring a service restart.
+### CLI Invocation
+```
+linux-patch-api --enroll https://<manager_url>
+```
+The enrollment flow runs before mTLS server startup. On success, the daemon proceeds to normal server initialization with the newly provisioned certificates.
+
+### Security Model
+- Initial connection uses TLS with verification disabled (`danger_accept_invalid_certs`)
+- Manager approval workflow provides authorization; transport encryption is secondary during enrollment
+- URL scheme validation prevents SSRF/path traversal (only `http` and `https` permitted)
+- Host component required in manager URL
+
+### Phase 1: Registration Request
+- **Identity Extraction:**
+  - `/etc/machine-id` (fallback: `/var/lib/dbus/machine-id`)
+  - FQDN from `/etc/hostname` → `hostname -f` → `hostname` → `localhost`
+  - Non-loopback IPv4 addresses via network interface enumeration
+  - OS details from `/etc/os-release` (distro, version, id_like, codename) + kernel version (`uname -r`)
+- **Submission:** Unauthenticated `POST /api/v1/enroll` to manager with identity payload
+- **Response:** HTTP 202 with temporary `polling_token` (bearer credential — never logged)
+- **Rate Limiting:** Manager enforces 1 request/minute per IP (HTTP 429 on violation)
+
+### Phase 2: Polling & Approval
+- **Polling Loop:** `GET /api/v1/enroll/status/{token}` with configurable interval and max attempts
+- **Default Interval:** 60 seconds (configurable via `enrollment.polling_interval_seconds`)
+- **Hard Timeout:** 24 hours maximum (1440 attempts; values >1440 clamped to 1440)
+- **Status States:**
+  - `pending`: Continue polling
+  - `approved`: Proceed to Phase 3 with PKI bundle
+  - `denied`: Abort enrollment (`ENROLLMENT_DENIED`)
+  - `not_found`: Token expired/purged — abort (`ENROLLMENT_EXPIRED`)
+- **Signal Handling:** SIGINT (Ctrl+C) and SIGTERM interrupt polling gracefully
+- **Transient Errors:** Network failures and HTTP 5xx retried with backoff; HTTP 404/429 terminate immediately
+- **Log Throttling:** Status logged every 10 attempts or after 5 minutes elapsed
+
+### Phase 3: PKI Provisioning
+- **Certificate Validation:** PEM format verification for CA cert, server cert, and server key (supports PKCS#8, PKCS#1 RSA, EC keys)
+- **Atomic Writes:** Temp file → set permissions → atomic rename pattern prevents partial writes
+- **File Permissions:** Keys at `0600`, certificates at `0644`, directories at `0755`
+- **Backup Strategy:** Existing certificate files renamed to `.bak` before overwrite
+- **Target Paths:** Configured via TLS settings or defaults (`/etc/linux_patch_api/certs/{ca,server,server.key}.pem`)
+- **Whitelist Auto-Append:** Manager IP resolved (hostname → DNS or direct IP) and appended to `/etc/linux_patch_api/whitelist.yaml`
+- **Completion:** Daemon transitions to standard mTLS listening mode without requiring service restart
 
 ## Audit Logging
 
@@ -169,6 +207,14 @@ The `linux_patch_api` daemon supports an automated self-enrollment workflow to s
   - IP whitelist denials (blocked connection attempts)
   - System changes made by the API
   - Configuration changes (whitelist updates, cert renewals)
+
+- **Enrollment Events:**
+  - Registration request submitted (machine-id, FQDN, manager URL — polling token never logged)
+  - Polling status changes (`pending` → `approved`/`denied`/`not_found`)
+  - PKI bundle provisioning success/failure with target file paths
+  - Whitelist auto-append during enrollment (manager IP added)
+  - Enrollment timeout or denial with reason
+  - Signal interruption (SIGINT/SIGTERM) during polling
 
 - **Log Storage:**
   - Primary: Distribution-appropriate logging
@@ -233,6 +279,22 @@ The `linux_patch_api` daemon supports an automated self-enrollment workflow to s
   - Primary: Ubuntu (latest LTS)
   - CI/CD Pipeline: Required for automated testing
   - Penetration Testing: Required before release
+
+## CLI Arguments
+
+| Flag | Description |
+|------|-------------|
+| `--config <PATH>` or `-c` | Path to configuration file (default: `/etc/linux_patch_api/config.yaml`) |
+| `--verbose` or `-v` | Enable verbose (DEBUG-level) logging |
+| `--enroll <MANAGER_URL>` | Run self-enrollment flow with manager at URL, then start mTLS server |
+| `--version` or `-V` | Print version information and exit |
+| `--help` or `-h` | Display help information and exit |
+
+### Enrollment Mode Behavior
+- When `--enroll` is specified, the daemon executes the self-enrollment flow before starting the mTLS server
+- On enrollment success: proceeds to normal server startup with provisioned certificates
+- On enrollment failure: exits immediately with error code (no server started)
+- TLS verification disabled on initial manager connection (manager approval workflow provides security)
 
 - **Phase 1 Acceptance Criteria:**
   - All endpoints functional with mTLS authentication

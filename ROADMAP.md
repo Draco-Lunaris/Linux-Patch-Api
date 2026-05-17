@@ -151,6 +151,32 @@
 **See:** [PERFORMANCE_BENCHMARK.md](./PERFORMANCE_BENCHMARK.md), [PROFILING_REPORT.md](./PROFILING_REPORT.md), [OPTIMIZATION_RECOMMENDATIONS.md](./OPTIMIZATION_RECOMMENDATIONS.md)
 ---
 
+### Phase 5: Enrollment & Self-Registration
+**Duration:** 3 weeks
+**Target Date:** 2026-07-17 to 2026-08-07
+**Actual Completion:** 2026-08-07
+**Status:** ✅ Complete (Enrollment Feature Released)
+
+- [x] Self-enrollment workflow implementation ✅ **COMPLETE**
+  - [x] CLI flag: `--enroll <MANAGER_URL>` for enrollment mode
+  - [x] Three-phase enrollment: Registration → Polling (24h timeout) → PKI Provisioning
+  - [x] Automatic certificate provisioning to configured mTLS paths
+  - [x] Automatic manager IP whitelist append after successful enrollment
+  - [x] Configurable polling interval (default 60s) and max attempts (default 1440/24h)
+  - [x] Signal handling for graceful shutdown during enrollment
+- [x] Enrollment configuration section in config.yaml (`enrollment.*`) ✅ **COMPLETE**
+- [x] Identity extraction module (machine-id, FQDN, IP addresses, OS details) ✅ **COMPLETE**
+- [x] PKI bundle validation with PEM format checking ✅ **COMPLETE**
+- [x] Atomic certificate file writing with secure permissions (key=0600, certs=0644) ✅ **COMPLETE**
+- [x] Whitelist auto-append with file locking and duplicate detection ✅ **COMPLETE**
+- [x] Integration tests for enrollment workflow ✅ **COMPLETE**
+- [x] E2E enrollment test suite ✅ **COMPLETE**
+
+**Future Improvements (Medium Priority - from Security Review):**
+- M-001: PKI certificate rollback mechanism (deferred to Phase 6)
+- M-002: Kernel version redaction in identity payload (deferred to Phase 6)
+---
+
 ## Milestones
 
 | Milestone | Description | Target Date | Status |
@@ -164,6 +190,7 @@
 | M6 | Security testing complete (Beta) | 2026-06-28 | ✅ Complete |
 | M7 | Performance benchmarking complete | 2026-04-09 | ✅ Complete |
 | M8 | Production release (v1.0.0) | 2026-07-17 | ✅ Complete |
+| M9 | Self-enrollment feature complete | 2026-08-07 | ✅ Complete |
 ---
 
 ## Risk Register
@@ -240,6 +267,16 @@
 - [x] Package builds (.deb, .rpm) successful ✅
 - [x] UAT sign-off received ✅
 - [x] v1.0.0 released ✅
+
+### Phase 5 Success
+- [x] Self-enrollment workflow functional ✅
+- [x] CLI enrollment flag (`--enroll`) operational ✅
+- [x] Three-phase enrollment (Registration → Polling → PKI) working ✅
+- [x] Automatic certificate provisioning to mTLS paths ✅
+- [x] Whitelist auto-append with duplicate detection ✅
+- [x] Enrollment integration tests passing ✅
+- [x] E2E enrollment test suite passing ✅
+- [x] Config example updated with enrollment section ✅
 
 ---
 

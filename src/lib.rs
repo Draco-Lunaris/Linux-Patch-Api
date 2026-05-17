@@ -15,6 +15,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod enroll;
 pub mod jobs;
 pub mod logging;
 pub mod packages;

@@ -61,6 +61,10 @@ sysinfo = "0.30"
 
 # Network utilities
 addr = "0.15"
+if-addrs = "0.13"
+
+# HTTP client for enrollment communication
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
 # Clap for CLI arguments
 clap = { version = "4", features = ["derive", "env"] }
@@ -69,6 +73,12 @@ clap = { version = "4", features = ["derive", "env"] }
 systemd = "0.10"
 pidlock = "0.2"
 
+# URL parsing
+url = "2"
+
+# File locking for concurrent-safe whitelist modifications
+fs2 = "0.4"
+
 [dev-dependencies]
 actix-rt = "2"
 tokio-test = "0.4"
@@ -76,6 +86,19 @@ wiremock = "0.6"
 serial_test = "3"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
+
+# Integration tests in subdirectories
+[[test]]
+name = "enroll_identity"
+path = "tests/unit/enroll_identity.rs"
+
+[[test]]
+name = "enrollment_test"
+path = "tests/integration/enrollment_test.rs"
+
+[[test]]
+name = "enrollment_e2e"
+path = "tests/e2e/test_enrollment_e2e.rs"
 
 [[bench]]
 name = "api_benchmarks"

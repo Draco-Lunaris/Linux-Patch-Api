@@ -13,6 +13,7 @@ Secure REST API for remote package and patch management on Linux systems.
 - [Overview](#overview)
 - [Features](#features)
 - [Quick Start](#quick-start)
+- [Usage Examples](#usage-examples)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [API Usage](#api-usage)
@@ -65,6 +66,7 @@ Linux Patch API provides a secure, production-ready interface for managing softw
 ### Security Features
 - mTLS certificate authentication (TLS 1.3 only)
 - IP whitelist enforcement (deny by default)
+- Automated self-enrollment with linux_patch_manager (no manual PKI distribution)
 - Comprehensive audit logging (systemd journal)
 - Systemd hardening and process isolation
 - File permission enforcement
@@ -134,6 +136,48 @@ curl --cacert ca.pem \
      --key client.key.pem \
      https://localhost:12443/api/v1/health
 ```
+
+---
+
+## Usage Examples
+
+### Standard Startup (Existing Certificates)
+
+When certificates are already provisioned, start with the configuration path:
+
+```bash
+sudo linux-patch-api --config /etc/linux_patch_api/config.yaml
+```
+
+Or via systemd (recommended for production):
+
+```bash
+systemctl enable linux-patch-api
+systemctl start linux-patch-api
+```
+
+### Self-Enrollment with Manager
+
+Bootstrap a new host by automatically requesting certificates from the manager:
+
+```bash
+sudo linux-patch-api --enroll https://manager.example.com
+```
+
+The enrollment workflow:
+1. Extracts machine identity (`/etc/machine-id`, FQDN, OS details)
+2. Registers with manager (`POST /api/v1/enroll`)
+3. Polls for admin approval (default: every 60 seconds, up to 24 hours)
+4. Downloads PKI bundle on approval
+5. Writes certificates and updates whitelist automatically
+6. Starts mTLS server without requiring a restart
+
+```bash
+# Enrollment with verbose logging
+sudo linux-patch-api --enroll https://manager.example.com --verbose
+```
+
+For detailed enrollment procedures, see [DEPLOYMENT_GUIDE.md - Self-Enrollment Deployment](./DEPLOYMENT_GUIDE.md#self-enrollment-deployment).
 
 ---
 

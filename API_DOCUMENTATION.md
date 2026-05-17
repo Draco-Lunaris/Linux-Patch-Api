@@ -15,6 +15,7 @@ Complete API reference for the Linux Patch API service.
 - [Authentication](#authentication)
 - [Standard Response Format](#standard-response-format)
 - [Error Handling](#error-handling)
+- [Enrollment Endpoints](#enrollment-endpoints)
 - [Package Management Endpoints](#package-management-endpoints)
 - [Patch Management Endpoints](#patch-management-endpoints)
 - [System Management Endpoints](#system-management-endpoints)
@@ -882,45 +883,257 @@ def wait_for_job(job_id, base_url, certs, poll_interval=2):
 
 ---
 
-## Self-Enrollment Client Workflow
+## Enrollment Endpoints
 
-The Linux Patch API daemon supports automated self-enrollment to a Patch Manager instance without manual certificate distribution.
+Enrollment endpoints enable new hosts to register with the Patch Manager and receive mTLS certificates for authenticated API access. These endpoints operate **without client certificate authentication** — security is enforced through rate limiting, single-use tokens, and admin approval workflows.
 
-### 1. Trigger Enrollment
-Run the daemon with the `--enroll` flag pointing to the manager's public API endpoint:
+**Base path:** `/api/v1/` (on the Patch Manager server)
+**Authentication:** None (pre-provisioning phase)
+**Transport:** HTTPS recommended; TLS verification intentionally relaxed on initial connection per security model
+
+> **Cross-reference:** [SPEC.md §4.2 Enrollment Workflow](./SPEC.md) · [DEPLOYMENT_SECURITY_GUIDE.md](./DEPLOYMENT_SECURITY_GUIDE.md)
+
+---
+
+### POST /api/v1/enroll
+
+**Description:** Initiates a host self-enrollment request with the Patch Manager. The manager assigns a unique polling token that the host uses to check approval status.
+
+**Authentication:** None (unauthenticated public endpoint)
+
+#### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `machine_id` | string | Yes | Linux machine-id from `/etc/machine-id` |
+| `fqdn` | string | Yes | Fully qualified domain name of the host |
+| `ip_address` | string | Yes | Primary non-loopback IPv4 address |
+| `os_details` | object | Yes | OS metadata (free-form JSON object) |
+
+**`os_details` common fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Distribution name (e.g., `Debian`, `Ubuntu`) |
+| `version_id` | string | OS version identifier (e.g., `12`, `24.04`) |
+| `kernel` | string | Kernel release string (e.g., `6.1.0-kali9-amd64`) |
+| `id_like` | string | Family identifier (e.g., `debian`) |
+
+#### Request Example
+
 ```bash
-linux_patch_api --enroll https://<manager-host>/api/v1
+curl -X POST https://manager.example.com/api/v1/enroll \
+  -H "Content-Type: application/json" \
+  -d '{
+    "machine_id": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+    "fqdn": "host-01.example.com",
+    "ip_address": "192.168.1.50",
+    "os_details": {
+      "name": "Debian",
+      "version_id": "12",
+      "kernel": "6.1.0-kali9-amd64",
+      "id_like": "debian"
+    }
+  }'
 ```
 
-### 2. Registration Request (Unauthenticated)
-The daemon extracts `/etc/machine-id`, FQDN, IP, and OS details, then submits:
-```http
-POST /api/v1/enroll HTTP/1.1
-Content-Type: application/json
+#### Success Response (202 Accepted)
 
+```json
 {
-  "machine_id": "3a4b5c6d7e8f...",
-  "fqdn": "host-01.example.com",
-  "ip_address": "192.168.1.50",
-  "os_details": { "name": "Ubuntu", "version": "24.04 LTS" }
+  "polling_token": "aB3dE6gH9jK2mN5pQ8rS1tU4vW7xY0zA"
 }
 ```
-**Response:** Returns a temporary `polling_token`.
 
-### 3. Status Polling
-The daemon enters a polling loop (default: every 60s):
-```http
-GET /api/v1/enroll/status/{polling_token} HTTP/1.1
+| Field | Type | Description |
+|-------|------|-------------|
+| `polling_token` | string | 64-character alphanumeric bearer token for status polling. **Treat as secret credential.** |
+
+#### Error Responses
+
+| HTTP Status | Body | Description |
+|-------------|------|-------------|
+| `429` | `{ "error": "Rate limit exceeded. Try again in a minute." }` | Rate limit exceeded: 1 request/minute per source IP |
+| `500` | `{ "error": "Database error" }` | Internal server or database error |
+
+---
+
+### GET /api/v1/enroll/status/{token}
+
+**Description:** Returns the current approval status of an enrollment request. When approved, the response includes the complete PKI bundle (CA certificate, server certificate, and server private key) needed for mTLS provisioning.
+
+**Authentication:** None (token serves as bearer credential)
+
+#### Path Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `token` | string | 64-character alphanumeric polling token from `POST /enroll` response |
+
+#### Response Format
+
+The endpoint returns a **tagged JSON object** with a `status` discriminator field. All responses return HTTP `200 OK` — the `status` value determines the outcome.
+
+##### Pending (Awaiting Admin Approval)
+
+```json
+{ "status": "pending" }
 ```
-- `202 Accepted`: Still pending admin approval.
-- `403/404 Forbidden`: Request denied or expired (daemon aborts).
-- `200 OK`: Approved. Response body contains the PKI bundle (`ca.crt`, `server.crt`, `server.key`).
 
-### 4. Provisioning & Transition
-Upon receiving HTTP 200:
-1. Writes certificates to configured mTLS storage paths.
-2. Appends manager IP to `/etc/linux_patch_api/whitelist.yaml`.
-3. Smoothly transitions to standard mTLS listening mode without service restart.
+The enrollment request has been received and is awaiting administrator review. The host should continue polling at regular intervals.
+
+##### Approved (PKI Bundle Provided)
+
+```json
+{
+  "status": "approved",
+  "ca_crt": "-----BEGIN CERTIFICATE-----\nMIID...\n-----END CERTIFICATE-----",
+  "server_crt": "-----BEGIN CERTIFICATE-----\nMIID...\n-----END CERTIFICATE-----",
+  "server_key": "-----BEGIN PRIVATE KEY-----\nMIGH...\n-----END PRIVATE KEY-----"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | Always `"approved"` for this variant |
+| `ca_crt` | string | PEM-encoded CA root certificate (for TLS verification) |
+| `server_crt` | string | PEM-encoded server certificate (manager's TLS leaf) |
+| `server_key` | string | PEM-encoded server private key (PKCS#8 format) |
+
+##### Denied
+
+```json
+{ "status": "denied" }
+```
+
+The administrator has rejected the enrollment request. The host should abort the enrollment process.
+
+##### Not Found (Token Expired or Invalid)
+
+```json
+{ "status": "not_found" }
+```
+
+The polling token does not match any pending or approved enrollment. This occurs when:
+- The token has expired (default TTL: 24 hours)
+- The token was never issued
+- The enrollment was already fulfilled and purged
+
+#### curl Examples
+
+```bash
+# Check enrollment status
+curl https://manager.example.com/api/v1/enroll/status/aB3dE6gH9jK2mN5pQ8rS1tU4vW7xY0zA
+
+# Extract PKI bundle when approved
+curl -s https://manager.example.com/api/v1/enroll/status/$TOKEN | jq -r '.ca_crt' > /etc/linux_patch_api/certs/ca.crt
+curl -s https://manager.example.com/api/v1/enroll/status/$TOKEN | jq -r '.server_crt' > /etc/linux_patch_api/certs/server.crt
+curl -s https://manager.example.com/api/v1/enroll/status/$TOKEN | jq -r '.server_key' > /etc/linux_patch_api/certs/server.key.pem
+```
+
+---
+
+### Enrollment Flow Sequence
+
+Complete step-by-step enrollment lifecycle from initial registration to mTLS provisioning:
+
+```
+┌──────────────┐         ┌──────────────┐         ┌──────────────┐
+│   Linux Host  │         │ Patch Manager │         │  Admin UI    │
+│  (linux_patch │         │   Server      │         │             │
+│   _api)       │         │               │         │             │
+└──────┬───────┘         └──────┬───────┘         └──────┬───────┘
+       │                        │                        │
+       │  1. POST /enroll       │                        │
+       │  { machine_id, fqdn,   │                        │
+       │    ip_address,         │                        │
+       │    os_details }        │                        │
+       │──────────────────────▶│                        │
+       │                        │                        │
+       │                        │  Store request + token │
+       │                        │  (SHA256 hashed)       │
+       │                        │                        │
+       │  2. 202 Accepted       │                        │
+       │  { polling_token }     │                        │
+       │──────────────────────▶│                        │
+       │                        │                        │
+       │                        │  3. List pending       │
+       │                        │  enrollments           │
+       │                        │─────────────────────▶│
+       │                        │                        │
+       │                        │  Admin reviews &       │
+       │                        │  approves request      │
+       │                        │◀──────────────────────│
+       │                        │                        │
+       │                        │  Generate PKI bundle   │
+       │                        │  (CA cert + server     │
+       │                        │   cert + server key)   │
+       │                        │                        │
+       │  4. GET /enroll/status │                        │
+       │  /{token}              │                        │
+       │──────────────────────▶│                        │
+       │                        │                        │
+       │  5. 200 { status:      │                        │
+       │     "approved",        │                        │
+       │     ca_crt,            │                        │
+       │     server_crt,        │                        │
+       │     server_key }       │                        │
+       │◀──────────────────────│                        │
+       │                        │                        │
+       │  6. Provision:         │                        │
+       │  - Write certs to disk │                        │
+       │  - Update whitelist    │                        │
+       │  - Restart with mTLS   │                        │
+       │                        │                        │
+```
+
+**Step Details:**
+
+| Step | Action | Details |
+|------|--------|---------|
+| 1 | Host sends enrollment request | Extracts identity from `/etc/machine-id`, hostname, network interfaces, and OS release data |
+| 2 | Manager returns polling token | Token is 64-character random alphanumeric string; SHA256 hash stored in database |
+| 3 | Admin reviews pending requests | Manager exposes admin API for listing/approving/denying enrollment requests |
+| 4 | Host polls status periodically | Default interval: 60 seconds. Configurable via `--poll-interval` flag |
+| 5 | Host receives PKI bundle on approval | Complete CA chain, server certificate, and private key in PEM format |
+| 6 | Host provisions mTLS infrastructure | Writes certificates to configured paths, updates IP whitelist, transitions to authenticated mode |
+
+---
+
+### Rate Limiting
+
+| Endpoint | Limit | Window | Scope |
+|----------|-------|--------|-------|
+| `POST /api/v1/enroll` | 1 request | Per minute | Per source IP address |
+| `GET /api/v1/enroll/status/{token}` | No explicit limit | — | Host-controlled polling interval |
+
+**Rate Limit Enforcement:**
+- POST `/enroll`: Enforced by manager using in-memory LRU cache keyed on source IP (or `X-Forwarded-For` first entry when behind reverse proxy)
+- Status endpoint: No server-side rate limiting; client controls poll frequency (default: 60s interval)
+
+---
+
+### Security Notes
+
+| Concern | Mitigation |
+|---------|------------|
+| **Initial connection security** | TLS verification disabled on enrollment client (`danger_accept_invalid_certs`). Manager approval workflow provides authorization — transport encryption is secondary during pre-provisioning phase |
+| **Token secrecy** | Polling token is a 64-character random alphanumeric bearer credential. Never log the raw token value (only hash stored in DB). Tokens expire after 24 hours by default |
+| **Host identity** | `machine_id` from `/etc/machine-id` provides unique host identification. Combined with FQDN and IP for collision detection during admin approval |
+| **FQDN/IP collision** | Admin approval checks existing hosts table — rejects enrollment if FQDN or IP already registered to another host (HTTP 409 Conflict) |
+| **Certificate isolation** | Each approved host receives a unique client certificate signed by internal CA. Certificates have max 1-year validity |
+
+---
+
+### Error Reference Table
+
+| HTTP Status | Error Context | Description | Retryable |
+|-------------|---------------|-------------|----------|
+| `429` | POST /enroll | Rate limit exceeded (1/min per IP) | Yes — wait 60s |
+| `409` | Admin approve endpoint | FQDN or IP collision with existing host | No — resolve conflict first |
+| `500` | Any enrollment endpoint | Database error or internal server failure | Yes — transient |
+| `200` `{ "status": "denied" }` | GET /enroll/status/{token} | Administrator rejected request | No — contact administrator |
+| `200` `{ "status": "not_found" }` | GET /enroll/status/{token} | Token expired, invalid, or already consumed | No — re-enroll with new request |
 
 ---
 

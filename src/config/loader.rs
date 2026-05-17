@@ -3,7 +3,7 @@
 //! Loads and parses YAML configuration files.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Server configuration
 #[derive(Debug, Deserialize, Clone)]
@@ -103,6 +103,27 @@ fn default_backend() -> String {
     "auto".to_string()
 }
 
+/// Enrollment polling configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnrollmentConfig {
+    #[serde(default)]
+    pub manager_url: String,
+    #[serde(default)]
+    pub polling_token: String,
+    #[serde(default = "default_polling_interval")]
+    pub polling_interval_seconds: u64,
+    #[serde(default = "default_max_poll_attempts")]
+    pub max_poll_attempts: u32,
+}
+
+fn default_polling_interval() -> u64 {
+    60
+}
+
+fn default_max_poll_attempts() -> u32 {
+    1440
+}
+
 /// Application configuration
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
@@ -115,6 +136,8 @@ pub struct AppConfig {
     pub whitelist: Option<WhitelistConfig>,
     #[serde(default)]
     pub package_manager: Option<PackageManagerConfig>,
+    #[serde(default)]
+    pub enrollment: Option<EnrollmentConfig>,
 }
 
 impl AppConfig {
@@ -263,6 +286,7 @@ mod tests {
                 path: "/etc/linux_patch_api/whitelist.yaml".to_string(),
             }),
             package_manager: None,
+            enrollment: None,
         };
 
         assert!(config.tls_config().is_some());
