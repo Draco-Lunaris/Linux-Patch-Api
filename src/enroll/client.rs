@@ -7,7 +7,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use tokio::signal::unix::{SignalKind, signal as unix_signal};
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
 
 use crate::enroll::identity;
 
@@ -99,7 +99,7 @@ impl EnrollmentClient {
             .expect("Failed to parse manager URL");
 
         match parsed.scheme() {
-            "http" | "https" => {}, // Allowed schemes
+            "http" | "https" => {} // Allowed schemes
             other => panic!(
                 "Invalid manager URL scheme '{}' — only 'http' and 'https' are allowed. \
                  Refused dangerous scheme to prevent SSRF/path traversal.",
@@ -139,12 +139,11 @@ impl EnrollmentClient {
     /// - `Err` if URL parsing fails or DNS resolution yields no results
     pub async fn manager_ip(&self) -> Result<String> {
         // Parse URL to extract host using url crate for RFC-compliant parsing
-        let parsed = url::Url::parse(&self.manager_url).with_context(|| {
-            format!("Failed to parse manager URL '{}'", self.manager_url)
-        })?;
-        let host_str = parsed.host_str().with_context(|| {
-            format!("Manager URL '{}' has no host component", self.manager_url)
-        })?;
+        let parsed = url::Url::parse(&self.manager_url)
+            .with_context(|| format!("Failed to parse manager URL '{}'", self.manager_url))?;
+        let host_str = parsed
+            .host_str()
+            .with_context(|| format!("Manager URL '{}' has no host component", self.manager_url))?;
 
         // Check if already an IP address using url::Host parsing
         if let Ok(url::Host::Ipv4(addr)) = url::Host::parse(host_str) {
@@ -287,9 +286,8 @@ impl EnrollmentClient {
                     .await
                     .context("Failed to read status response body")?;
 
-                let status: EnrollmentStatusResponse =
-                    serde_json::from_str(&body)
-                        .context("Invalid status response — malformed JSON from manager")?;
+                let status: EnrollmentStatusResponse = serde_json::from_str(&body)
+                    .context("Invalid status response — malformed JSON from manager")?;
 
                 Ok(status)
             }
@@ -336,7 +334,11 @@ impl EnrollmentClient {
         max_attempts: u32,
     ) -> Result<PkiBundle> {
         // Enforce hard limits
-        let effective_interval = if interval_seconds == 0 { 60 } else { interval_seconds };
+        let effective_interval = if interval_seconds == 0 {
+            60
+        } else {
+            interval_seconds
+        };
         let effective_max = match max_attempts {
             0 => 1440,
             n if n > 1440 => 1440,
@@ -417,7 +419,11 @@ impl EnrollmentClient {
                         attempts = attempt,
                         "Enrollment approved — received PKI bundle from manager"
                     );
-                    return Ok(PkiBundle { ca_crt, server_crt, server_key });
+                    return Ok(PkiBundle {
+                        ca_crt,
+                        server_crt,
+                        server_key,
+                    });
                 }
                 EnrollmentStatusResponse::Denied => {
                     tracing::warn!(
@@ -444,20 +450,22 @@ impl EnrollmentClient {
             total_seconds = total_seconds,
             "Enrollment polling timed out after maximum attempts"
         );
-        Err(anyhow!("Enrollment timed out after {} hours ({}/{} attempts)",
-            total_seconds / 3600, effective_max, effective_max))
+        Err(anyhow!(
+            "Enrollment timed out after {} hours ({}/{} attempts)",
+            total_seconds / 3600,
+            effective_max,
+            effective_max
+        ))
     }
 
     /// Create a SIGINT (Ctrl+C) signal receiver.
     fn setup_sigint() -> Result<tokio::signal::unix::Signal> {
-        unix_signal(SignalKind::interrupt())
-            .context("Failed to create SIGINT signal handler")
+        unix_signal(SignalKind::interrupt()).context("Failed to create SIGINT signal handler")
     }
 
     /// Create a SIGTERM signal receiver.
     fn setup_sigterm() -> Result<tokio::signal::unix::Signal> {
-        unix_signal(SignalKind::terminate())
-            .context("Failed to create SIGTERM signal handler")
+        unix_signal(SignalKind::terminate()).context("Failed to create SIGTERM signal handler")
     }
 }
 

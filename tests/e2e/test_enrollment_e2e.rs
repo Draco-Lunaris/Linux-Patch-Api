@@ -25,8 +25,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
-use wiremock::{Mock, MockServer, ResponseTemplate};
 use wiremock::matchers::{method, path, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Test constants
 const TEST_TOKEN: &str = "test_enrollment_token";
@@ -63,10 +63,7 @@ fn create_temp_dirs() -> (TempDir, TempDir) {
 /// Initialize an empty whitelist YAML file at the given path.
 /// Required because WhitelistManager::new() loads existing config on construction.
 fn init_empty_whitelist(path: &str) {
-    std::fs::write(
-        path,
-        "entries: []\n",
-    ).expect("Failed to create initial whitelist file");
+    std::fs::write(path, "entries: []\n").expect("Failed to create initial whitelist file");
 }
 
 /// Build a TLS config pointing to the temp certificate directory.
@@ -76,7 +73,10 @@ fn build_tls_config(cert_dir: &std::path::Path) -> TlsConfig {
         port: 12443,
         ca_cert: cert_dir.join("ca.pem").to_string_lossy().to_string(),
         server_cert: cert_dir.join("server.pem").to_string_lossy().to_string(),
-        server_key: cert_dir.join("server.key.pem").to_string_lossy().to_string(),
+        server_key: cert_dir
+            .join("server.key.pem")
+            .to_string_lossy()
+            .to_string(),
         min_tls_version: "1.3".to_string(),
     }
 }
@@ -104,7 +104,11 @@ async fn test_full_enrollment_flow_happy_path() {
     let ca_cert_path = cert_dir.path().join("ca.pem");
     let server_cert_path = cert_dir.path().join("server.pem");
     let server_key_path = cert_dir.path().join("server.key.pem");
-    let whitelist_path = whitelist_dir.path().join("whitelist.yaml").to_string_lossy().to_string();
+    let whitelist_path = whitelist_dir
+        .path()
+        .join("whitelist.yaml")
+        .to_string_lossy()
+        .to_string();
 
     init_empty_whitelist(&whitelist_path);
 
@@ -128,8 +132,7 @@ async fn test_full_enrollment_flow_happy_path() {
             let count = poll_count_clone.fetch_add(1, Ordering::SeqCst);
             if count < 1 {
                 // First poll returns pending (simulates admin review delay)
-                ResponseTemplate::new(200)
-                    .set_body_string(r#"{"status": "pending"}"#)
+                ResponseTemplate::new(200).set_body_string(r#"{"status": "pending"}"#)
             } else {
                 // Second poll returns approved with full PKI bundle
                 ResponseTemplate::new(200).set_body_string(&format!(
@@ -152,7 +155,10 @@ async fn test_full_enrollment_flow_happy_path() {
     let client = build_client(&base_url);
 
     // Phase 1: Registration
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
     assert_eq!(response.polling_token, TEST_TOKEN);
 
     // Phase 2: Polling (should get pending first, then approved)
@@ -172,10 +178,15 @@ async fn test_full_enrollment_flow_happy_path() {
         &bundle.server_crt,
         &bundle.server_key,
         Some(&tls_config),
-    ).await.expect("PKI provisioning should succeed");
+    )
+    .await
+    .expect("PKI provisioning should succeed");
 
     // Phase 3b: Whitelist update (manager_ip for localhost URL returns 127.0.0.1)
-    let manager_ip = client.manager_ip().await.expect("Should resolve manager IP");
+    let manager_ip = client
+        .manager_ip()
+        .await
+        .expect("Should resolve manager IP");
     provision::append_manager_to_whitelist(&manager_ip, &whitelist_path)
         .await
         .expect("Whitelist append should succeed");
@@ -186,14 +197,29 @@ async fn test_full_enrollment_flow_happy_path() {
     assert!(server_key_path.exists(), "Server key file should exist");
 
     // Verify: correct permissions (key=0o600, certs=0o644)
-    let key_perms = std::fs::metadata(&server_key_path).unwrap().permissions().mode() & 0o777;
+    let key_perms = std::fs::metadata(&server_key_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(key_perms, 0o600, "Key file should have 0o600 permissions");
 
-    let ca_perms = std::fs::metadata(&ca_cert_path).unwrap().permissions().mode() & 0o777;
+    let ca_perms = std::fs::metadata(&ca_cert_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(ca_perms, 0o644, "CA cert should have 0o644 permissions");
 
-    let server_perms = std::fs::metadata(&server_cert_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(server_perms, 0o644, "Server cert should have 0o644 permissions");
+    let server_perms = std::fs::metadata(&server_cert_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        server_perms, 0o644,
+        "Server cert should have 0o644 permissions"
+    );
 
     // Verify: whitelist contains manager IP
     let wl_content = std::fs::read_to_string(&whitelist_path).unwrap();
@@ -220,14 +246,17 @@ async fn test_enrollment_denied_flow() {
     let (server, base_url) = create_mock_manager().await;
     let (cert_dir, _whitelist_dir) = create_temp_dirs();
 
-    let whitelist_path = _whitelist_dir.path().join("whitelist.yaml").to_string_lossy().to_string();
+    let whitelist_path = _whitelist_dir
+        .path()
+        .join("whitelist.yaml")
+        .to_string_lossy()
+        .to_string();
     init_empty_whitelist(&whitelist_path);
 
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "denied_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "denied_token"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -235,9 +264,7 @@ async fn test_enrollment_denied_flow() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(r#"{"status": "denied"}"#),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status": "denied"}"#))
         .named("status_denied")
         .expect(1) // Exactly one poll attempt before denial
         .mount(&server)
@@ -246,7 +273,10 @@ async fn test_enrollment_denied_flow() {
     let client = build_client(&base_url);
 
     // Phase 1: Registration succeeds even for denied enrollment
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
     assert_eq!(response.polling_token, "denied_token");
 
     // Phase 2: Polling returns denial error
@@ -254,7 +284,10 @@ async fn test_enrollment_denied_flow() {
         .poll_for_approval(&response.polling_token, POLL_INTERVAL_SECONDS, 10)
         .await;
 
-    assert!(result.is_err(), "Should receive error for denied enrollment");
+    assert!(
+        result.is_err(),
+        "Should receive error for denied enrollment"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("denied"),
@@ -267,9 +300,18 @@ async fn test_enrollment_denied_flow() {
     let server_cert_path = cert_dir.path().join("server.pem");
     let server_key_path = cert_dir.path().join("server.key.pem");
 
-    assert!(!ca_path.exists(), "CA cert should NOT exist after denied enrollment");
-    assert!(!server_cert_path.exists(), "Server cert should NOT exist after denied enrollment");
-    assert!(!server_key_path.exists(), "Server key should NOT exist after denied enrollment");
+    assert!(
+        !ca_path.exists(),
+        "CA cert should NOT exist after denied enrollment"
+    );
+    assert!(
+        !server_cert_path.exists(),
+        "Server cert should NOT exist after denied enrollment"
+    );
+    assert!(
+        !server_key_path.exists(),
+        "Server key should NOT exist after denied enrollment"
+    );
 
     // Verify: no whitelist modifications on failed enrollment
     let wl_content = std::fs::read_to_string(&whitelist_path).unwrap();
@@ -298,8 +340,7 @@ async fn test_enrollment_timeout_flow() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "timeout_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "timeout_token"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -307,16 +348,17 @@ async fn test_enrollment_timeout_flow() {
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(r#"{"status": "pending"}"#),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status": "pending"}"#))
         .named("status_always_pending")
         .expect(3) // Exactly 3 poll attempts before timeout
         .mount(&server)
         .await;
 
     let client = build_client(&base_url);
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
 
     // Poll with max_attempts=3 - should timeout after exactly 3 attempts
     let result = client
@@ -337,8 +379,14 @@ async fn test_enrollment_timeout_flow() {
     let server_key_path = cert_dir.path().join("server.key.pem");
 
     assert!(!ca_path.exists(), "CA cert should NOT exist after timeout");
-    assert!(!server_cert_path.exists(), "Server cert should NOT exist after timeout");
-    assert!(!server_key_path.exists(), "Server key should NOT exist after timeout");
+    assert!(
+        !server_cert_path.exists(),
+        "Server cert should NOT exist after timeout"
+    );
+    assert!(
+        !server_key_path.exists(),
+        "Server key should NOT exist after timeout"
+    );
 }
 
 // =============================================================================
@@ -359,32 +407,32 @@ async fn test_certificate_permission_verification() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "perm_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "perm_token"}"#),
         )
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(&format!(
-                r#"{{
+        .respond_with(ResponseTemplate::new(200).set_body_string(&format!(
+            r#"{{
                     "status": "approved",
                     "ca_crt": {},
                     "server_crt": {},
                     "server_key": {}
                 }}"#,
-                serde_json::to_string(DUMMY_CA_PEM).unwrap(),
-                serde_json::to_string(DUMMY_SERVER_PEM).unwrap(),
-                serde_json::to_string(DUMMY_KEY_PEM).unwrap(),
-            )),
-        )
+            serde_json::to_string(DUMMY_CA_PEM).unwrap(),
+            serde_json::to_string(DUMMY_SERVER_PEM).unwrap(),
+            serde_json::to_string(DUMMY_KEY_PEM).unwrap(),
+        )))
         .mount(&server)
         .await;
 
     let client = build_client(&base_url);
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
     let bundle = client
         .poll_for_approval(&response.polling_token, POLL_INTERVAL_SECONDS, 5)
         .await
@@ -397,14 +445,15 @@ async fn test_certificate_permission_verification() {
         &bundle.server_crt,
         &bundle.server_key,
         Some(&tls_config),
-    ).await.expect("PKI provisioning should succeed");
+    )
+    .await
+    .expect("PKI provisioning should succeed");
 
     // Verify key file: 0o600 (owner read/write only)
     let key_path = cert_dir.path().join("server.key.pem");
     let key_perms = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(
-        key_perms,
-        0o600,
+        key_perms, 0o600,
         "Key file must have exactly 0o600 permissions (owner rw only)"
     );
 
@@ -412,17 +461,19 @@ async fn test_certificate_permission_verification() {
     let ca_path = cert_dir.path().join("ca.pem");
     let ca_perms = std::fs::metadata(&ca_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(
-        ca_perms,
-        0o644,
+        ca_perms, 0o644,
         "CA certificate must have exactly 0o644 permissions"
     );
 
     // Verify server cert: 0o644 (owner rw, group/others read)
     let server_cert_path = cert_dir.path().join("server.pem");
-    let server_perms = std::fs::metadata(&server_cert_path).unwrap().permissions().mode() & 0o777;
+    let server_perms = std::fs::metadata(&server_cert_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(
-        server_perms,
-        0o644,
+        server_perms, 0o644,
         "Server certificate must have exactly 0o644 permissions"
     );
 
@@ -442,7 +493,9 @@ async fn test_certificate_permission_verification() {
     assert!(ca_content.contains("END CERTIFICATE"));
 
     let key_content = std::fs::read_to_string(&key_path).unwrap();
-    assert!(key_content.contains("BEGIN PRIVATE KEY") || key_content.contains("BEGIN RSA PRIVATE KEY"));
+    assert!(
+        key_content.contains("BEGIN PRIVATE KEY") || key_content.contains("BEGIN RSA PRIVATE KEY")
+    );
 }
 
 // =============================================================================
@@ -459,45 +512,52 @@ async fn test_whitelist_append_verification() {
     let (server, base_url) = create_mock_manager().await;
     let (_cert_dir, whitelist_dir) = create_temp_dirs();
 
-    let whitelist_path = whitelist_dir.path().join("whitelist.yaml").to_string_lossy().to_string();
+    let whitelist_path = whitelist_dir
+        .path()
+        .join("whitelist.yaml")
+        .to_string_lossy()
+        .to_string();
     init_empty_whitelist(&whitelist_path);
 
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "wl_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "wl_token"}"#),
         )
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(&format!(
-                r#"{{
+        .respond_with(ResponseTemplate::new(200).set_body_string(&format!(
+            r#"{{
                     "status": "approved",
                     "ca_crt": {},
                     "server_crt": {},
                     "server_key": {}
                 }}"#,
-                serde_json::to_string(DUMMY_CA_PEM).unwrap(),
-                serde_json::to_string(DUMMY_SERVER_PEM).unwrap(),
-                serde_json::to_string(DUMMY_KEY_PEM).unwrap(),
-            )),
-        )
+            serde_json::to_string(DUMMY_CA_PEM).unwrap(),
+            serde_json::to_string(DUMMY_SERVER_PEM).unwrap(),
+            serde_json::to_string(DUMMY_KEY_PEM).unwrap(),
+        )))
         .mount(&server)
         .await;
 
     let client = build_client(&base_url);
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
     let _bundle = client
         .poll_for_approval(&response.polling_token, POLL_INTERVAL_SECONDS, 5)
         .await
         .expect("Should receive approved PkiBundle");
 
     // First enrollment: append to whitelist
-    let manager_ip = client.manager_ip().await.expect("Should resolve manager IP");
+    let manager_ip = client
+        .manager_ip()
+        .await
+        .expect("Should resolve manager IP");
     provision::append_manager_to_whitelist(&manager_ip, &whitelist_path)
         .await
         .expect("First whitelist append should succeed");
@@ -544,7 +604,10 @@ async fn test_whitelist_append_verification() {
     );
 
     // Verify: YAML format is valid and parseable
-    assert!(wl_content.contains("entries:"), "YAML should contain 'entries:' key");
+    assert!(
+        wl_content.contains("entries:"),
+        "YAML should contain 'entries:' key"
+    );
 }
 
 // =============================================================================
@@ -565,24 +628,24 @@ async fn test_signal_handling_during_polling() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "signal_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "signal_token"}"#),
         )
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(r#"{"status": "pending"}"#),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status": "pending"}"#))
         .named("always_pending")
         .expect(3) // Exactly 3 polls before graceful shutdown
         .mount(&server)
         .await;
 
     let client = build_client(&base_url);
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
 
     // Poll with max_attempts=3, interval=1s
     // This simulates SIGTERM interrupt by exhausting attempts (graceful shutdown)
@@ -602,8 +665,11 @@ async fn test_signal_handling_during_polling() {
     // Verify: cleanup of any partial state (no leftover files)
     for entry in std::fs::read_dir(cert_dir.path()).unwrap() {
         let entry = entry.unwrap();
-        assert!(false, "No partial files should remain after graceful shutdown: {}",
-            entry.file_name().to_string_lossy());
+        assert!(
+            false,
+            "No partial files should remain after graceful shutdown: {}",
+            entry.file_name().to_string_lossy()
+        );
     }
 }
 
@@ -620,45 +686,52 @@ async fn test_whitelist_yaml_format_preservation() {
     let (server, base_url) = create_mock_manager().await;
     let (_cert_dir, whitelist_dir) = create_temp_dirs();
 
-    let whitelist_path = whitelist_dir.path().join("whitelist.yaml").to_string_lossy().to_string();
+    let whitelist_path = whitelist_dir
+        .path()
+        .join("whitelist.yaml")
+        .to_string_lossy()
+        .to_string();
     init_empty_whitelist(&whitelist_path);
 
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "yaml_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "yaml_token"}"#),
         )
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(&format!(
-                r#"{{
+        .respond_with(ResponseTemplate::new(200).set_body_string(&format!(
+            r#"{{
                     "status": "approved",
                     "ca_crt": {},
                     "server_crt": {},
                     "server_key": {}
                 }}"#,
-                serde_json::to_string(DUMMY_CA_PEM).unwrap(),
-                serde_json::to_string(DUMMY_SERVER_PEM).unwrap(),
-                serde_json::to_string(DUMMY_KEY_PEM).unwrap(),
-            )),
-        )
+            serde_json::to_string(DUMMY_CA_PEM).unwrap(),
+            serde_json::to_string(DUMMY_SERVER_PEM).unwrap(),
+            serde_json::to_string(DUMMY_KEY_PEM).unwrap(),
+        )))
         .mount(&server)
         .await;
 
     let client = build_client(&base_url);
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
     let _bundle = client
         .poll_for_approval(&response.polling_token, POLL_INTERVAL_SECONDS, 5)
         .await
         .expect("Should receive approved PkiBundle");
 
     // Provision and append to whitelist
-    let manager_ip = client.manager_ip().await.expect("Should resolve manager IP");
+    let manager_ip = client
+        .manager_ip()
+        .await
+        .expect("Should resolve manager IP");
     provision::append_manager_to_whitelist(&manager_ip, &whitelist_path)
         .await
         .expect("Whitelist append should succeed");
@@ -667,11 +740,14 @@ async fn test_whitelist_yaml_format_preservation() {
     let wl_content = std::fs::read_to_string(&whitelist_path).unwrap();
 
     // Parse as serde_yaml to verify format
-    let wl_config: serde_yaml::Value = serde_yaml::from_str(&wl_content)
-        .expect("Whitelist should be valid YAML after enrollment");
+    let wl_config: serde_yaml::Value =
+        serde_yaml::from_str(&wl_content).expect("Whitelist should be valid YAML after enrollment");
 
     // Verify structure: entries key exists and is a sequence
-    assert!(wl_config.get("entries").is_some(), "YAML must contain 'entries' key");
+    assert!(
+        wl_config.get("entries").is_some(),
+        "YAML must contain 'entries' key"
+    );
     let entries = wl_config.get("entries").unwrap();
     assert!(entries.is_sequence(), "'entries' must be a YAML sequence");
 

@@ -1,8 +1,8 @@
 //! PKI provisioning module for self-enrollment.
 //! Handles certificate extraction, validation, and secure file writing.
 
-use anyhow::{bail, Context, Result};
 use crate::auth::WhitelistManager;
+use anyhow::{bail, Context, Result};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -71,8 +71,9 @@ pub fn write_pem_file(path: &str, pem_data: &str, is_key: bool) -> Result<()> {
                 use std::os::unix::fs::PermissionsExt;
                 let mut perms = fs::metadata(parent)?.permissions();
                 perms.set_mode(0o755);
-                fs::set_permissions(parent, perms)
-                    .with_context(|| format!("Failed to set permissions on: {}", parent.display()))?;
+                fs::set_permissions(parent, perms).with_context(|| {
+                    format!("Failed to set permissions on: {}", parent.display())
+                })?;
             }
         }
     }
@@ -107,14 +108,13 @@ pub fn write_pem_file(path: &str, pem_data: &str, is_key: bool) -> Result<()> {
         .with_context(|| format!("Failed to flush PEM data to: {}", temp_path.display()))?;
 
     // Atomic rename to target path
-    fs::rename(&temp_path, path)
-        .with_context(|| {
-            format!(
-                "Failed to atomically rename {} to {}",
-                temp_path.display(),
-                path.display()
-            )
-        })?;
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "Failed to atomically rename {} to {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
 
     tracing::info!(
         path = %path.display(),
@@ -138,7 +138,11 @@ pub async fn provision_pki_bundle(
 ) -> Result<()> {
     // Determine target paths from config or defaults
     let (ca_path, cert_path, key_path) = if let Some(tls) = tls_config {
-        (tls.ca_cert.clone(), tls.server_cert.clone(), tls.server_key.clone())
+        (
+            tls.ca_cert.clone(),
+            tls.server_cert.clone(),
+            tls.server_key.clone(),
+        )
     } else {
         (
             DEFAULT_CA_CERT.to_string(),
@@ -148,10 +152,8 @@ pub async fn provision_pki_bundle(
     };
 
     // 1. Validate all three PEM strings before any writes
-    validate_pem(ca_crt, "CERTIFICATE")
-        .context("CA certificate validation failed")?;
-    validate_pem(server_crt, "CERTIFICATE")
-        .context("Server certificate validation failed")?;
+    validate_pem(ca_crt, "CERTIFICATE").context("CA certificate validation failed")?;
+    validate_pem(server_crt, "CERTIFICATE").context("Server certificate validation failed")?;
 
     // Server key can be PRIVATE KEY (PKCS#8), RSA PRIVATE KEY (PKCS#1), or EC PRIVATE KEY
     let key_valid = validate_pem(server_key, "PRIVATE KEY").is_ok()
@@ -165,14 +167,11 @@ pub async fn provision_pki_bundle(
     }
 
     // 2. Write to configured paths (atomic writes)
-    write_pem_file(&ca_path, ca_crt, false)
-        .context("Failed to write CA certificate")?;
+    write_pem_file(&ca_path, ca_crt, false).context("Failed to write CA certificate")?;
 
-    write_pem_file(&cert_path, server_crt, false)
-        .context("Failed to write server certificate")?;
+    write_pem_file(&cert_path, server_crt, false).context("Failed to write server certificate")?;
 
-    write_pem_file(&key_path, server_key, true)
-        .context("Failed to write server key")?;
+    write_pem_file(&key_path, server_key, true).context("Failed to write server key")?;
 
     // 3. Log successful provisioning with structured fields
     tracing::info!(
@@ -198,11 +197,19 @@ pub async fn append_manager_to_whitelist(manager_ip: &str, whitelist_path: &str)
     }
 
     // Create or load WhitelistManager and call append_entry
-    let mut manager = WhitelistManager::new(whitelist_path)
-        .with_context(|| format!("Failed to initialize whitelist manager for path: {}", whitelist_path))?;
+    let mut manager = WhitelistManager::new(whitelist_path).with_context(|| {
+        format!(
+            "Failed to initialize whitelist manager for path: {}",
+            whitelist_path
+        )
+    })?;
 
-    manager.append_entry(ip_or_cidr)
-        .with_context(|| format!("Failed to append manager IP '{}' to whitelist at: {}", ip_or_cidr, whitelist_path))?;
+    manager.append_entry(ip_or_cidr).with_context(|| {
+        format!(
+            "Failed to append manager IP '{}' to whitelist at: {}",
+            ip_or_cidr, whitelist_path
+        )
+    })?;
 
     Ok(())
 }
@@ -343,7 +350,8 @@ mod tests {
         let dir = tempdir().expect("failed to create temp dir");
         let target_path = dir.path().join("cert.pem");
         let cert1 = sample_certificate();
-        let cert2 = "-----BEGIN CERTIFICATE-----\nNEWCERTDATA\n-----END CERTIFICATE-----".to_string();
+        let cert2 =
+            "-----BEGIN CERTIFICATE-----\nNEWCERTDATA\n-----END CERTIFICATE-----".to_string();
 
         // Write initial file
         write_pem_file(target_path.to_str().unwrap(), &cert1, false).expect("initial write failed");
@@ -352,7 +360,10 @@ mod tests {
         write_pem_file(target_path.to_str().unwrap(), &cert2, false).expect("second write failed");
 
         let backup_path = format!("{}.bak", target_path.display());
-        assert!(std::path::Path::new(&backup_path).exists(), "Backup file should exist");
+        assert!(
+            std::path::Path::new(&backup_path).exists(),
+            "Backup file should exist"
+        );
 
         // Original content in backup
         let backup_content = fs::read_to_string(&backup_path).expect("failed to read backup");

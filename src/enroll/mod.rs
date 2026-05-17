@@ -12,8 +12,7 @@ use anyhow::{Context, Result};
 
 /// Re-export key types for ergonomic access from parent modules.
 pub use client::{
-    EnrollmentClient, EnrollmentRequest, EnrollmentResponse,
-    EnrollmentStatusResponse, PkiBundle,
+    EnrollmentClient, EnrollmentRequest, EnrollmentResponse, EnrollmentStatusResponse, PkiBundle,
 };
 /// Re-export identity extraction functions.
 pub use identity::{get_fqdn, get_ip_addresses, get_machine_id, get_os_details};
@@ -40,10 +39,16 @@ pub async fn run_enrollment(manager_url: &str, config: &super::AppConfig) -> Res
     tracing::info!("Registration successful - received polling token");
 
     // Get polling config (use defaults if not set)
-    let interval = config.enrollment.as_ref()
-        .map(|e| e.polling_interval_seconds).unwrap_or(60);
-    let max_attempts = config.enrollment.as_ref()
-        .map(|e| e.max_poll_attempts).unwrap_or(1440);
+    let interval = config
+        .enrollment
+        .as_ref()
+        .map(|e| e.polling_interval_seconds)
+        .unwrap_or(60);
+    let max_attempts = config
+        .enrollment
+        .as_ref()
+        .map(|e| e.max_poll_attempts)
+        .unwrap_or(1440);
 
     // Phase 2: Polling
     tracing::info!(
@@ -51,7 +56,9 @@ pub async fn run_enrollment(manager_url: &str, config: &super::AppConfig) -> Res
         max_attempts = max_attempts,
         "Starting enrollment - polling phase"
     );
-    let pki_bundle = client.poll_for_approval(&response.polling_token, interval, max_attempts).await?;
+    let pki_bundle = client
+        .poll_for_approval(&response.polling_token, interval, max_attempts)
+        .await?;
 
     // Phase 3: PKI provisioning & whitelist update
     tracing::info!("Enrollment approved - starting PKI provisioning phase");
@@ -62,13 +69,15 @@ pub async fn run_enrollment(manager_url: &str, config: &super::AppConfig) -> Res
         &pki_bundle.server_crt,
         &pki_bundle.server_key,
         config.tls_config(),
-    ).await?;
+    )
+    .await?;
     tracing::info!("PKI bundle written to disk");
 
     // Resolve manager hostname to IP and append to whitelist
-    let manager_ip = client.manager_ip().await.context(
-        "Failed to resolve manager IP - cannot update whitelist",
-    )?;
+    let manager_ip = client
+        .manager_ip()
+        .await
+        .context("Failed to resolve manager IP - cannot update whitelist")?;
     provision::append_manager_to_whitelist(&manager_ip, config.whitelist_path()).await?;
     tracing::info!(manager_ip = %manager_ip, "Manager IP appended to whitelist");
 

@@ -94,23 +94,32 @@ impl WhitelistManager {
 
         // Parse to validate - must be IPv4 or CIDR, no hostnames in auto-append
         let parsed_entry = if let Some((ip_str, prefix_str)) = entry_str.split_once('/') {
-            let ip: Ipv4Addr = ip_str.parse()
+            let ip: Ipv4Addr = ip_str
+                .parse()
                 .with_context(|| format!("Invalid IP in CIDR notation: {}", entry_str))?;
-            let prefix: u8 = prefix_str.parse()
+            let prefix: u8 = prefix_str
+                .parse()
                 .with_context(|| format!("Invalid prefix in CIDR notation: {}", entry_str))?;
             if prefix > 32 {
                 anyhow::bail!("Invalid CIDR prefix (must be 0-32): {}", entry_str);
             }
-            WhitelistEntry::Cidr { network: ip, prefix }
+            WhitelistEntry::Cidr {
+                network: ip,
+                prefix,
+            }
         } else {
-            let ip: Ipv4Addr = entry_str.parse()
+            let ip: Ipv4Addr = entry_str
+                .parse()
                 .with_context(|| format!("Invalid IPv4 address: {}", entry_str))?;
             WhitelistEntry::Ip(ip)
         };
 
         // 2. Check for duplicate in current in-memory state
         {
-            let entries = self.entries.read().map_err(|e| anyhow::anyhow!("Failed to acquire whitelist read lock: {}", e))?;
+            let entries = self
+                .entries
+                .read()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire whitelist read lock: {}", e))?;
             for existing in entries.iter() {
                 if *existing == parsed_entry {
                     info!(
@@ -133,11 +142,16 @@ impl WhitelistManager {
             .open(&lock_path)
             .with_context(|| format!("Failed to create lock file: {}", lock_path))?;
 
-        lock_file.lock_exclusive().context("Failed to acquire exclusive whitelist lock")?;
+        lock_file
+            .lock_exclusive()
+            .context("Failed to acquire exclusive whitelist lock")?;
 
         // Double-check for duplicates after acquiring lock (concurrent append scenario)
         {
-            let entries = self.entries.read().map_err(|e| anyhow::anyhow!("Failed to acquire whitelist read lock: {}", e))?;
+            let entries = self
+                .entries
+                .read()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire whitelist read lock: {}", e))?;
             for existing in entries.iter() {
                 if *existing == parsed_entry {
                     info!(
@@ -154,9 +168,12 @@ impl WhitelistManager {
 
         // 4. Read current whitelist YAML or create empty config
         let mut config = if Path::new(&self.config_path).exists() {
-            self.load_config().context("Failed to load existing whitelist for append")?
+            self.load_config()
+                .context("Failed to load existing whitelist for append")?
         } else {
-            WhitelistConfig { entries: Vec::new() }
+            WhitelistConfig {
+                entries: Vec::new(),
+            }
         };
 
         // 5. Append new entry to allowed_ips list
@@ -168,8 +185,9 @@ impl WhitelistManager {
         // Ensure parent directory exists
         if let Some(parent) = config_path.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create whitelist directory: {}", parent.display()))?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create whitelist directory: {}", parent.display())
+                })?;
             }
         }
 
@@ -182,28 +200,35 @@ impl WhitelistManager {
             .create_new(true)
             .truncate(true)
             .open(&temp_path)
-            .with_context(|| format!("Failed to create temp whitelist file: {}", temp_path.display()))?;
-
-        file.write_all(yaml_content.as_bytes())
-            .with_context(|| format!("Failed to write whitelist data to: {}", temp_path.display()))?;
-        file.flush()
-            .with_context(|| format!("Failed to flush whitelist data to: {}", temp_path.display()))?;
-
-        // Atomic rename
-        fs::rename(&temp_path, config_path)
             .with_context(|| {
                 format!(
-                    "Failed to atomically rename whitelist temp file {} to {}",
-                    temp_path.display(),
-                    config_path.display()
+                    "Failed to create temp whitelist file: {}",
+                    temp_path.display()
                 )
             })?;
+
+        file.write_all(yaml_content.as_bytes()).with_context(|| {
+            format!("Failed to write whitelist data to: {}", temp_path.display())
+        })?;
+        file.flush().with_context(|| {
+            format!("Failed to flush whitelist data to: {}", temp_path.display())
+        })?;
+
+        // Atomic rename
+        fs::rename(&temp_path, config_path).with_context(|| {
+            format!(
+                "Failed to atomically rename whitelist temp file {} to {}",
+                temp_path.display(),
+                config_path.display()
+            )
+        })?;
 
         // Release lock explicitly before reload (drop happens at end of scope)
         drop(lock_file);
 
         // 7. Reload in-memory state
-        self.reload().context("Failed to reload whitelist after append")?;
+        self.reload()
+            .context("Failed to reload whitelist after append")?;
 
         // 8. Log audit event
         tracing::info!(

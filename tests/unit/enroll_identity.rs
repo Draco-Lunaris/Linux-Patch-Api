@@ -3,7 +3,9 @@
 //! Comprehensive tests for cross-distribution identity extraction functions.
 //! Verifies machine-id, FQDN, IP address collection, and OS detail parsing.
 
-use linux_patch_api::enroll::identity::{get_fqdn, get_ip_addresses, get_machine_id, get_os_details};
+use linux_patch_api::enroll::identity::{
+    get_fqdn, get_ip_addresses, get_machine_id, get_os_details,
+};
 use linux_patch_api::enroll::EnrollmentRequest;
 use serde_json::Value;
 
@@ -46,10 +48,7 @@ fn test_machine_id_is_consistent() {
     // Multiple calls should return the same value (it's a persistent identifier)
     let id1 = get_machine_id().expect("Failed to get machine-id (call 1)");
     let id2 = get_machine_id().expect("Failed to get machine-id (call 2)");
-    assert_eq!(
-        id1, id2,
-        "machine-id should be consistent across calls"
-    );
+    assert_eq!(id1, id2, "machine-id should be consistent across calls");
 }
 
 #[test]
@@ -67,8 +66,12 @@ fn test_machine_id_fallback_file_check() {
     // Verify fallback file exists (may or may not be used)
     let fallback = std::path::Path::new("/var/lib/dbus/machine-id");
     if fallback.exists() {
-        let content = std::fs::read_to_string(fallback).expect("Failed to read fallback machine-id");
-        assert!(!content.trim().is_empty(), "Fallback machine-id should not be empty");
+        let content =
+            std::fs::read_to_string(fallback).expect("Failed to read fallback machine-id");
+        assert!(
+            !content.trim().is_empty(),
+            "Fallback machine-id should not be empty"
+        );
     }
     // If it doesn't exist, that's fine - primary file is used instead
 }
@@ -157,9 +160,9 @@ fn test_ip_addresses_are_valid_ipv4() {
         assert_eq!(parts.len(), 4, "IP '{}' should have 4 octets", addr);
 
         for part in &parts {
-            let _octet: u8 = part
-                .parse()
-                .unwrap_or_else(|_| panic!("IP octet '{}' in '{}' is not a valid number", part, addr));
+            let _octet: u8 = part.parse().unwrap_or_else(|_| {
+                panic!("IP octet '{}' in '{}' is not a valid number", part, addr)
+            });
             // u8 parse success guarantees 0-255 range
         }
     }
@@ -198,7 +201,10 @@ fn test_ip_addresses_no_broadcast() {
     let addrs = get_ip_addresses().expect("Failed to get IP addresses");
 
     for addr in &addrs {
-        assert_ne!(addr, "255.255.255.255", "Broadcast address should be excluded");
+        assert_ne!(
+            addr, "255.255.255.255",
+            "Broadcast address should be excluded"
+        );
     }
 }
 
@@ -238,7 +244,11 @@ fn test_ip_addresses_are_unicast() {
         assert!(first < 240, "Address '{}' is reserved", addr);
 
         // Not unspecified (0.0.0.0)
-        assert!(!(parts == vec![0, 0, 0, 0]), "Address '{}' is unspecified", addr);
+        assert!(
+            !(parts == vec![0, 0, 0, 0]),
+            "Address '{}' is unspecified",
+            addr
+        );
     }
 }
 
@@ -259,7 +269,9 @@ fn test_os_details_returns_valid_json_object() {
 #[test]
 fn test_os_details_contains_kernel_version() {
     let details = get_os_details().expect("Failed to get OS details");
-    let kernel = details.get("kernel").expect("OS details must contain 'kernel' field");
+    let kernel = details
+        .get("kernel")
+        .expect("OS details must contain 'kernel' field");
     assert!(kernel.is_string(), "Kernel version should be a string");
 
     let kernel_str = kernel.as_str().unwrap();
@@ -297,7 +309,10 @@ fn test_os_details_distro_is_valid_string() {
         assert!(distro.is_string(), "Distro should be a string");
         let distro_str = distro.as_str().unwrap();
         assert!(!distro_str.is_empty(), "Distro name should not be empty");
-        assert_ne!(distro_str, "unknown", "Distro should be identified on this system");
+        assert_ne!(
+            distro_str, "unknown",
+            "Distro should be identified on this system"
+        );
     }
 }
 
@@ -350,7 +365,8 @@ fn test_enrollment_payload_construction() {
     let os_details = get_os_details().expect("Failed to get OS details");
 
     // Use first non-loopback IP as the primary address
-    let primary_ip = ip_addrs.first()
+    let primary_ip = ip_addrs
+        .first()
         .expect("Should have at least one IP")
         .clone();
 
@@ -362,19 +378,30 @@ fn test_enrollment_payload_construction() {
     };
 
     // Verify payload serializes to valid JSON
-    let json = serde_json::to_string(&request)
-        .expect("EnrollmentRequest should serialize to valid JSON");
+    let json =
+        serde_json::to_string(&request).expect("EnrollmentRequest should serialize to valid JSON");
 
-    assert!(!json.is_empty(), "Serialized enrollment request should not be empty");
+    assert!(
+        !json.is_empty(),
+        "Serialized enrollment request should not be empty"
+    );
 
     // Verify JSON contains all required fields
-    let parsed: Value = serde_json::from_str(&json)
-        .expect("Should deserialize enrollment request");
+    let parsed: Value = serde_json::from_str(&json).expect("Should deserialize enrollment request");
 
-    assert!(parsed.get("machine_id").is_some(), "JSON must contain machine_id");
+    assert!(
+        parsed.get("machine_id").is_some(),
+        "JSON must contain machine_id"
+    );
     assert!(parsed.get("fqdn").is_some(), "JSON must contain fqdn");
-    assert!(parsed.get("ip_address").is_some(), "JSON must contain ip_address");
-    assert!(parsed.get("os_details").is_some(), "JSON must contain os_details");
+    assert!(
+        parsed.get("ip_address").is_some(),
+        "JSON must contain ip_address"
+    );
+    assert!(
+        parsed.get("os_details").is_some(),
+        "JSON must contain os_details"
+    );
 }
 
 #[test]
@@ -430,8 +457,8 @@ fn test_enrollment_payload_roundtrip() {
 
     // Serialize to JSON then deserialize back
     let json = serde_json::to_string(&request).expect("Failed to serialize");
-    let deserialized: EnrollmentRequest = serde_json::from_str(&json)
-        .expect("Failed to deserialize enrollment request");
+    let deserialized: EnrollmentRequest =
+        serde_json::from_str(&json).expect("Failed to deserialize enrollment request");
 
     assert_eq!(request.machine_id, deserialized.machine_id);
     assert_eq!(request.fqdn, deserialized.fqdn);
@@ -461,7 +488,10 @@ fn test_cross_distro_os_release_parsing() {
     }
 
     // Verify key fields are present (POSIX standard for os-release)
-    assert!(parsed.contains_key("NAME"), "os-release must contain NAME field");
+    assert!(
+        parsed.contains_key("NAME"),
+        "os-release must contain NAME field"
+    );
     assert!(parsed["NAME"].ne(&""), "NAME should not be empty");
 }
 

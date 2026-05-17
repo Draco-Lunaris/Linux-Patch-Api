@@ -66,8 +66,7 @@ pub fn get_fqdn() -> Result<String> {
 
 /// Collect all non-loopback IPv4 addresses from network interfaces.
 pub fn get_ip_addresses() -> Result<Vec<String>> {
-    let ifaces = if_addrs::get_if_addrs()
-        .context("Failed to enumerate network interfaces")?;
+    let ifaces = if_addrs::get_if_addrs().context("Failed to enumerate network interfaces")?;
 
     let mut addrs: Vec<String> = ifaces
         .iter()
@@ -105,16 +104,28 @@ pub fn get_os_details() -> Result<serde_json::Value> {
                 let unquoted = value.trim().trim_matches('"').trim_matches('\'');
                 match key {
                     "NAME" => {
-                        details.insert("distro".into(), serde_json::Value::String(unquoted.to_string()));
+                        details.insert(
+                            "distro".into(),
+                            serde_json::Value::String(unquoted.to_string()),
+                        );
                     }
                     "VERSION_ID" => {
-                        details.insert("version".into(), serde_json::Value::String(unquoted.to_string()));
+                        details.insert(
+                            "version".into(),
+                            serde_json::Value::String(unquoted.to_string()),
+                        );
                     }
                     "ID_LIKE" => {
-                        details.insert("id_like".into(), serde_json::Value::String(unquoted.to_string()));
+                        details.insert(
+                            "id_like".into(),
+                            serde_json::Value::String(unquoted.to_string()),
+                        );
                     }
                     "VERSION_CODENAME" => {
-                        details.insert("codename".into(), serde_json::Value::String(unquoted.to_string()));
+                        details.insert(
+                            "codename".into(),
+                            serde_json::Value::String(unquoted.to_string()),
+                        );
                     }
                     _ => {}
                 }
@@ -123,7 +134,10 @@ pub fn get_os_details() -> Result<serde_json::Value> {
     } else {
         // Fallback for systems without os-release (very rare)
         details.insert("distro".into(), serde_json::Value::String("unknown".into()));
-        details.insert("version".into(), serde_json::Value::String("unknown".into()));
+        details.insert(
+            "version".into(),
+            serde_json::Value::String("unknown".into()),
+        );
     }
 
     // Kernel version via uname -r
@@ -159,6 +173,9 @@ mod tests {
     #[test]
     fn os_details_contains_kernel() {
         let details = get_os_details().expect("Failed to get OS details");
-        assert!(details.get("kernel").is_some(), "OS details must contain kernel version");
+        assert!(
+            details.get("kernel").is_some(),
+            "OS details must contain kernel version"
+        );
     }
 }

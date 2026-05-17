@@ -9,13 +9,11 @@
 //! - Short polling intervals ensure tests complete quickly
 //! - serial_test prevents port conflicts between concurrent test runs
 
-use linux_patch_api::enroll::client::{
-    EnrollmentClient,
-};
+use linux_patch_api::enroll::client::EnrollmentClient;
 use serial_test::serial;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
     matchers::{method, path, path_regex},
+    Mock, MockServer, ResponseTemplate,
 };
 
 /// Test constants
@@ -54,8 +52,7 @@ async fn test_successful_enrollment_flow() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "test_token_123"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "test_token_123"}"#),
         )
         .named("enroll_registration")
         .mount(&server)
@@ -81,7 +78,10 @@ async fn test_successful_enrollment_flow() {
     let client = build_client(&base_url);
 
     // Phase 1: Register - should succeed with polling token
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
     assert_eq!(response.polling_token, TEST_TOKEN);
 
     // Phase 2: Poll for approval - should get PkiBundle immediately since mock returns approved
@@ -89,11 +89,23 @@ async fn test_successful_enrollment_flow() {
         .poll_for_approval(TEST_TOKEN, POLL_INTERVAL_SECONDS, 5)
         .await;
 
-    assert!(result.is_ok(), "Polling should succeed with approved status");
+    assert!(
+        result.is_ok(),
+        "Polling should succeed with approved status"
+    );
     let bundle = result.unwrap();
-    assert_eq!(bundle.ca_crt, "-----BEGIN CERTIFICATE-----\nCA_CERT_DATA\n-----END CERTIFICATE-----");
-    assert_eq!(bundle.server_crt, "-----BEGIN CERTIFICATE-----\nSERVER_CERT_DATA\n-----END CERTIFICATE-----");
-    assert_eq!(bundle.server_key, "-----BEGIN PRIVATE KEY-----\nSERVER_KEY_DATA\n-----END PRIVATE KEY-----");
+    assert_eq!(
+        bundle.ca_crt,
+        "-----BEGIN CERTIFICATE-----\nCA_CERT_DATA\n-----END CERTIFICATE-----"
+    );
+    assert_eq!(
+        bundle.server_crt,
+        "-----BEGIN CERTIFICATE-----\nSERVER_CERT_DATA\n-----END CERTIFICATE-----"
+    );
+    assert_eq!(
+        bundle.server_key,
+        "-----BEGIN PRIVATE KEY-----\nSERVER_KEY_DATA\n-----END PRIVATE KEY-----"
+    );
 }
 
 // =============================================================================
@@ -111,8 +123,7 @@ async fn test_pending_then_approved_sequence() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "seq_token_456"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "seq_token_456"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -121,16 +132,14 @@ async fn test_pending_then_approved_sequence() {
     // Status always returns approved (simplifies test while verifying the happy path)
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                r#"{
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
                     "status": "approved",
                     "ca_crt": "CA_PEM",
                     "server_crt": "SERVER_PEM",
                     "server_key": "KEY_PEM"
                 }"#,
-            ),
-        )
+        ))
         .named("status_approved")
         .mount(&server)
         .await;
@@ -168,8 +177,7 @@ async fn test_denied_enrollment() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "denied_token_789"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "denied_token_789"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -178,10 +186,7 @@ async fn test_denied_enrollment() {
     // Status returns denied immediately
     Mock::given(method("GET"))
         .and(path("/api/v1/enroll/status/denied_token_789"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(r#"{"status": "denied"}"#),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status": "denied"}"#))
         .named("status_denied")
         .expect(1) // Exactly one poll attempt
         .mount(&server)
@@ -190,7 +195,10 @@ async fn test_denied_enrollment() {
     let client = build_client(&base_url);
 
     // Register succeeds
-    let response = client.register().await.expect("Registration should succeed even for denied enrollment");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed even for denied enrollment");
     assert_eq!(response.polling_token, "denied_token_789");
 
     // Poll should return error
@@ -198,7 +206,10 @@ async fn test_denied_enrollment() {
         .poll_for_approval(&response.polling_token, POLL_INTERVAL_SECONDS, 10)
         .await;
 
-    assert!(result.is_err(), "Should receive error for denied enrollment");
+    assert!(
+        result.is_err(),
+        "Should receive error for denied enrollment"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("denied"),
@@ -223,8 +234,7 @@ async fn test_token_not_found_expired() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "expired_token_000"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "expired_token_000"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -233,10 +243,7 @@ async fn test_token_not_found_expired() {
     // Status returns notfound (serde rename_all="lowercase" converts NotFound -> "notfind")
     Mock::given(method("GET"))
         .and(path("/api/v1/enroll/status/expired_token_000"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(r#"{"status": "notfound"}"#),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status": "notfound"}"#))
         .named("status_not_found")
         .expect(1) // Exactly one poll attempt
         .mount(&server)
@@ -245,7 +252,10 @@ async fn test_token_not_found_expired() {
     let client = build_client(&base_url);
 
     // Register succeeds
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
 
     // Poll should return error about expired/invalid token
     let result = client
@@ -277,8 +287,7 @@ async fn test_max_attempts_timeout() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "timeout_token_abc"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "timeout_token_abc"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -287,10 +296,7 @@ async fn test_max_attempts_timeout() {
     // Status always returns pending - should be called exactly 3 times (max_attempts=3)
     Mock::given(method("GET"))
         .and(path("/api/v1/enroll/status/timeout_token_abc"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string(r#"{"status": "pending"}"#),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status": "pending"}"#))
         .named("status_pending_timeout")
         .expect(3) // Exactly 3 poll attempts before giving up
         .mount(&server)
@@ -298,7 +304,10 @@ async fn test_max_attempts_timeout() {
 
     let client = build_client(&base_url);
 
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
 
     // Poll with max_attempts=3, interval=1s
     let result = client
@@ -329,9 +338,10 @@ async fn test_rate_limit_on_registration() {
     // Registration returns 429
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
-        .respond_with(ResponseTemplate::new(429).set_body_string(
-            r#"{"error": "Too Many Requests", "retry_after": 60}"#,
-        ))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_string(r#"{"error": "Too Many Requests", "retry_after": 60}"#),
+        )
         .named("registration_rate_limited")
         .expect(1) // Exactly one attempt
         .mount(&server)
@@ -382,16 +392,14 @@ async fn test_registration_payload_structure() {
     // Status endpoint (for completeness)
     Mock::given(method("GET"))
         .and(path_regex(r"/api/v1/enroll/status/.+"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                r#"{
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
                     "status": "approved",
                     "ca_crt": "CA_TEST",
                     "server_crt": "CRT_TEST",
                     "server_key": "KEY_TEST"
                 }"#,
-            ),
-        )
+        ))
         .named("status_approved")
         .mount(&server)
         .await;
@@ -399,34 +407,45 @@ async fn test_registration_payload_structure() {
     let client = build_client(&base_url);
 
     // Execute registration and capture the actual request
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
     assert_eq!(response.polling_token, "payload_test_token");
 
     // Verify using server request logs
     let requests = server.received_requests().await.unwrap();
-    let post_request = requests.iter()
+    let post_request = requests
+        .iter()
         .find(|r| r.method.to_string() == "POST")
         .expect("Should have received a POST request");
 
     let body_str = std::str::from_utf8(&post_request.body).expect("Body should be valid UTF-8");
-    let payload: serde_json::Value = serde_json::from_str(body_str)
-        .expect("Request body should be valid JSON");
+    let payload: serde_json::Value =
+        serde_json::from_str(body_str).expect("Request body should be valid JSON");
 
     // Verify machine_id field
-    let machine_id = payload.get("machine_id")
+    let machine_id = payload
+        .get("machine_id")
         .and_then(|v| v.as_str())
         .expect("machine_id field must exist and be a string");
     assert!(!machine_id.is_empty(), "machine_id should not be empty");
-    assert_eq!(machine_id.len(), 32, "machine_id should be 32 characters (UUID hex)");
+    assert_eq!(
+        machine_id.len(),
+        32,
+        "machine_id should be 32 characters (UUID hex)"
+    );
 
     // Verify fqdn field
-    let fqdn = payload.get("fqdn")
+    let fqdn = payload
+        .get("fqdn")
         .and_then(|v| v.as_str())
         .expect("fqdn field must exist and be a string");
     assert!(!fqdn.is_empty(), "fqdn should not be empty");
 
     // Verify ip_address field
-    let ip_address = payload.get("ip_address")
+    let ip_address = payload
+        .get("ip_address")
         .and_then(|v| v.as_str())
         .expect("ip_address field must exist and be a string");
     assert!(!ip_address.is_empty(), "ip_address should not be empty");
@@ -438,12 +457,10 @@ async fn test_registration_payload_structure() {
     );
 
     // Verify os_details field is an object with expected keys
-    let os_details = payload.get("os_details")
+    let os_details = payload
+        .get("os_details")
         .expect("os_details field must exist");
-    assert!(
-        os_details.is_object(),
-        "os_details should be a JSON object"
-    );
+    assert!(os_details.is_object(), "os_details should be a JSON object");
 
     let os_obj = os_details.as_object().unwrap();
     assert!(!os_obj.is_empty(), "os_details should not be empty");
@@ -469,9 +486,9 @@ async fn test_server_error_on_registration() {
 
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
-        .respond_with(ResponseTemplate::new(500).set_body_string(
-            r#"{"error": "Internal Server Error"}"#,
-        ))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_string(r#"{"error": "Internal Server Error"}"#),
+        )
         .named("registration_server_error")
         .expect(1)
         .mount(&server)
@@ -506,8 +523,7 @@ async fn test_rate_limit_on_polling_retries() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "rl_poll_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "rl_poll_token"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -516,22 +532,23 @@ async fn test_rate_limit_on_polling_retries() {
     // Status returns approved on first poll
     Mock::given(method("GET"))
         .and(path("/api/v1/enroll/status/rl_poll_token"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                r#"{
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
                     "status": "approved",
                     "ca_crt": "CA_OK",
                     "server_crt": "CRT_OK",
                     "server_key": "KEY_OK"
                 }"#,
-            ),
-        )
+        ))
         .named("status_approved_after_retry")
         .mount(&server)
         .await;
 
     let client = build_client(&base_url);
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
 
     // Polling should succeed (mock returns approved directly)
     let bundle = client
@@ -579,8 +596,7 @@ async fn test_polling_default_parameters() {
     Mock::given(method("POST"))
         .and(path("/api/v1/enroll"))
         .respond_with(
-            ResponseTemplate::new(202)
-                .set_body_string(r#"{"polling_token": "defaults_token"}"#),
+            ResponseTemplate::new(202).set_body_string(r#"{"polling_token": "defaults_token"}"#),
         )
         .named("registration")
         .mount(&server)
@@ -589,22 +605,23 @@ async fn test_polling_default_parameters() {
     // Status returns approved immediately
     Mock::given(method("GET"))
         .and(path("/api/v1/enroll/status/defaults_token"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                r#"{
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{
                     "status": "approved",
                     "ca_crt": "DEFAULT_CA",
                     "server_crt": "DEFAULT_CRT",
                     "server_key": "DEFAULT_KEY"
                 }"#,
-            ),
-        )
+        ))
         .named("status_approved")
         .mount(&server)
         .await;
 
     let client = build_client(&base_url);
-    let response = client.register().await.expect("Registration should succeed");
+    let response = client
+        .register()
+        .await
+        .expect("Registration should succeed");
 
     // Call with interval=0 (should default to 60) and max_attempts=0 (should default to 1440)
     // But since mock returns approved on first try, we don't actually wait
