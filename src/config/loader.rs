@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_config_load_valid_yaml() {
-        let result = AppConfig::load("tests/fixtures/valid_config.yaml");
+        let result = AppConfig::load("tests/fixtures/valid_config.yaml", false);
         assert!(
             result.is_ok(),
             "Failed to load valid config: {:?}",
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_config_load_missing_file() {
-        let result = AppConfig::load("/nonexistent/path/config.yaml");
+        let result = AppConfig::load("/nonexistent/path/config.yaml", false);
         assert!(result.is_err(), "Should fail for missing file");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Failed to read config file"));
@@ -215,7 +215,7 @@ mod tests {
         let invalid_path = "/tmp/invalid_config_test.yaml";
         std::fs::write(invalid_path, "invalid: yaml: content: [").unwrap();
 
-        let result = AppConfig::load(invalid_path);
+        let result = AppConfig::load(invalid_path, false);
         assert!(result.is_err(), "Should fail for invalid yaml");
 
         std::fs::remove_file(invalid_path).unwrap();
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_config_validation_port_range() {
-        let result = AppConfig::load("tests/fixtures/valid_config.yaml");
+        let result = AppConfig::load("tests/fixtures/valid_config.yaml", false);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(config.server.port >= 1);
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_config_validation_bind_address() {
-        let result = AppConfig::load("tests/fixtures/valid_config.yaml");
+        let result = AppConfig::load("tests/fixtures/valid_config.yaml", false);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(!config.server.bind.is_empty());
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_config_validation_max_concurrent() {
-        let result = AppConfig::load("tests/fixtures/valid_config.yaml");
+        let result = AppConfig::load("tests/fixtures/valid_config.yaml", false);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(config.jobs.max_concurrent > 0);
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_config_validation_timeout() {
-        let result = AppConfig::load("tests/fixtures/valid_config.yaml");
+        let result = AppConfig::load("tests/fixtures/valid_config.yaml", false);
         assert!(result.is_ok());
         let config = result.unwrap();
         assert!(config.jobs.timeout_minutes >= 1 && config.jobs.timeout_minutes <= 1440);
