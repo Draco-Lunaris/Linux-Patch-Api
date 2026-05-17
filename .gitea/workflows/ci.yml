@@ -277,7 +277,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install build dependencies
         run: |
-          apk add --no-cache alpine-sdk rust cargo openssl-dev elogind-dev musl-dev abuild gcc
+          apk add --no-cache alpine-sdk rust cargo openssl-dev openssl-static elogind-dev musl-dev abuild gcc
       - name: Build release binary
         run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Build Alpine package
