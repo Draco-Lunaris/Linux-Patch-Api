@@ -138,6 +138,7 @@ impl WhitelistManager {
         let lock_path = format!("{}.lock", self.config_path);
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&lock_path)
             .with_context(|| format!("Failed to create lock file: {}", lock_path))?;
