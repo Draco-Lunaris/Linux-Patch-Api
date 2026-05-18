@@ -21,27 +21,38 @@ if ! command -v rpmbuild &> /dev/null; then
     fi
 fi
 
+# Get version from Cargo.toml
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+echo "Building version: $VERSION"
+
 # Setup RPM build directory structure
 mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
 # Create source tarball (required by %autosetup in spec file)
 echo "Creating source tarball..."
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 TMPDIR=$(mktemp -d)
 mkdir -p "$TMPDIR/linux-patch-api-${VERSION}"
-# Copy files excluding unwanted directories using find
+
+# Copy files excluding unnecessary directories
 cp -r . "$TMPDIR/linux-patch-api-${VERSION}/"
+
+# Remove unnecessary directories from tarball
 rm -rf "$TMPDIR/linux-patch-api-${VERSION}/target"
 rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.git"
 rm -rf "$TMPDIR/linux-patch-api-${VERSION}/releases"
 rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.github"
 rm -rf "$TMPDIR/linux-patch-api-${VERSION}/debian"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/arch-package"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.abuild"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/apk-package"
+rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.a0proj"
+
 tar -czf ~/rpmbuild/SOURCES/linux-patch-api-${VERSION}.tar.gz -C "$TMPDIR" "linux-patch-api-${VERSION}"
 rm -rf "$TMPDIR"
 
-# Copy spec file
+# Prepare spec file with dynamic version
 echo "Preparing spec file..."
-cp linux-patch-api.spec ~/rpmbuild/SPECS/
+sed "s/VERSION_PLACEHOLDER/$VERSION/" linux-patch-api.spec > ~/rpmbuild/SPECS/linux-patch-api.spec
 
 # Build RPM
 echo "Building RPM package..."

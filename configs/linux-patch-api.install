@@ -1,0 +1,98 @@
+# Arch Linux install hooks for linux-patch-api
+# Reference: debian/{preinst,postinst,prerm,postrm}
+
+post_install() {
+    # Create system group
+    if ! getent group linux-patch-api &>/dev/null; then
+        groupadd --system linux-patch-api
+    fi
+
+    # Create system user
+    if ! getent passwd linux-patch-api &>/dev/null; then
+        useradd --system \
+            --gid linux-patch-api \
+            --home-dir /var/lib/linux_patch_api \
+            --no-create-home \
+            --shell /usr/bin/nologin \
+            --comment "Linux Patch API Service" \
+            linux-patch-api
+    fi
+
+    # Create required directories
+    mkdir -p /etc/linux_patch_api/certs
+    mkdir -p /var/lib/linux_patch_api
+    mkdir -p /var/log/linux_patch_api
+
+    # Set proper ownership
+    chown -R linux-patch-api:linux-patch-api /var/lib/linux_patch_api
+    chown -R linux-patch-api:linux-patch-api /var/log/linux_patch_api
+
+    # Set secure permissions
+    chmod 750 /etc/linux_patch_api
+    chmod 750 /etc/linux_patch_api/certs
+    chmod 755 /var/lib/linux_patch_api
+    chmod 755 /var/log/linux_patch_api
+
+    # Copy example configs if they don't exist
+    if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
+        cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
+        chmod 640 /etc/linux_patch_api/config.yaml
+        chown linux-patch-api:linux-patch-api /etc/linux_patch_api/config.yaml
+    fi
+
+    if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
+        cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
+        chmod 640 /etc/linux_patch_api/whitelist.yaml
+        chown linux-patch-api:linux-patch-api /etc/linux_patch_api/whitelist.yaml
+    fi
+
+    # Reload systemd daemon
+    systemctl daemon-reload
+
+    # Enable the service (but don't start automatically - admin should configure first)
+    systemctl enable linux-patch-api.service
+
+    echo ""
+    echo "linux-patch-api installed successfully!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Configure /etc/linux_patch_api/config.yaml with your settings"
+    echo "  2. Place TLS certificates in /etc/linux_patch_api/certs/"
+    echo "  3. Configure IP whitelist in /etc/linux_patch_api/whitelist.yaml"
+    echo "  4. Start the service: systemctl start linux-patch-api"
+    echo "  5. Check status: systemctl status linux-patch-api"
+    echo ""
+}
+
+post_upgrade() {
+    # Reload systemd daemon on upgrade
+    systemctl daemon-reload
+}
+
+pre_remove() {
+    # Stop the service before removal
+    if systemctl is-active --quiet linux-patch-api.service; then
+        systemctl stop linux-patch-api.service
+        echo "Service stopped successfully"
+    else
+        echo "Service was not running"
+    fi
+
+    # Disable the service
+    if systemctl is-enabled --quiet linux-patch-api.service 2>/dev/null; then
+        systemctl disable linux-patch-api.service
+        echo "Service disabled"
+    fi
+}
+
+post_remove() {
+    # Reload systemd to remove service file
+    systemctl daemon-reload 2>/dev/null || true
+
+    # Remove directories only if empty (preserve user data on upgrade/reinstall)
+    # Arch doesn't have purge vs remove distinction like Debian
+    rmdir --ignore-fail-on-non-empty /var/lib/linux_patch_api 2>/dev/null || true
+    rmdir --ignore-fail-on-non-empty /var/log/linux_patch_api 2>/dev/null || true
+
+    echo "linux-patch-api removed"
+}

@@ -1,0 +1,91 @@
+#!/bin/sh
+# Alpine Linux install hooks for linux-patch-api
+# Reference: debian/{preinst,postinst,prerm,postrm}
+# Alpine APKBUILD install script format: pre-install, post-install, pre-deinstall, post-deinstall
+
+# Pre-install: Create user/group and directories before files are laid down
+pre_install() {
+    # Create system group
+    if ! getent group linux-patch-api >/dev/null; then
+        addgroup --system linux-patch-api
+    fi
+
+    # Create system user
+    if ! getent passwd linux-patch-api >/dev/null; then
+        adduser --system             --ingroup linux-patch-api             --home /var/lib/linux_patch_api             --no-create-home             --shell /sbin/nologin             --gecos "Linux Patch API Service"             --disabled-password             linux-patch-api
+    fi
+
+    # Create required directories
+    mkdir -p /etc/linux_patch_api/certs
+    mkdir -p /var/lib/linux_patch_api
+    mkdir -p /var/log/linux_patch_api
+
+    # Set proper ownership
+    chown -R linux-patch-api:linux-patch-api /var/lib/linux_patch_api
+    chown -R linux-patch-api:linux-patch-api /var/log/linux_patch_api
+
+    # Set secure permissions
+    chmod 750 /etc/linux_patch_api
+    chmod 750 /etc/linux_patch_api/certs
+    chmod 755 /var/lib/linux_patch_api
+    chmod 755 /var/log/linux_patch_api
+
+    echo "Pre-installation setup completed"
+}
+
+# Post-install: Copy example configs, enable service
+post_install() {
+    # Copy example configs if they don't exist
+    if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
+        if [ -f "/etc/linux_patch_api/config.yaml.example" ]; then
+            cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
+            chmod 640 /etc/linux_patch_api/config.yaml
+            chown linux-patch-api:linux-patch-api /etc/linux_patch_api/config.yaml
+        fi
+    fi
+
+    if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
+        if [ -f "/etc/linux_patch_api/whitelist.yaml.example" ]; then
+            cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
+            chmod 640 /etc/linux_patch_api/whitelist.yaml
+            chown linux-patch-api:linux-patch-api /etc/linux_patch_api/whitelist.yaml
+        fi
+    fi
+
+    # Enable the service (but don't start automatically - admin should configure first)
+    rc-update add linux-patch-api default
+
+    echo ""
+    echo "linux-patch-api installed successfully!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Configure /etc/linux_patch_api/config.yaml with your settings"
+    echo "  2. Place TLS certificates in /etc/linux_patch_api/certs/"
+    echo "  3. Configure IP whitelist in /etc/linux_patch_api/whitelist.yaml"
+    echo "  4. Start the service: rc-service linux-patch-api start"
+    echo "  5. Check status: rc-service linux-patch-api status"
+    echo ""
+}
+
+# Pre-deinstall: Stop and disable service before files are removed
+pre_deinstall() {
+    # Stop the service if running
+    if rc-service linux-patch-api status >/dev/null 2>&1; then
+        rc-service linux-patch-api stop
+        echo "Service stopped"
+    else
+        echo "Service was not running"
+    fi
+
+    # Disable the service
+    rc-update del linux-patch-api default 2>/dev/null || true
+}
+
+# Post-deinstall: Clean up on removal
+post_deinstall() {
+    # Remove directories only if empty (preserve user data on reinstall)
+    rmdir /var/lib/linux_patch_api 2>/dev/null || true
+    rmdir /var/log/linux_patch_api 2>/dev/null || true
+
+    echo "linux-patch-api removed"
+}

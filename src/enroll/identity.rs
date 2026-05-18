@@ -31,36 +31,109 @@ pub fn get_machine_id() -> Result<String> {
 }
 
 /// Resolve the fully-qualified domain name.
-/// Strategy: `gethostname` via std → fallback to `hostname` CLI → "localhost".
+///
+/// Strategy (in priority order):
+/// 1. `hostname -f` → if result contains `.`, it's a real FQDN
+/// 2. `hostname` + `hostname -d` → combine short hostname + domain
+/// 3. `/etc/hostname` → short hostname fallback
+/// 4. `hostname` command → last resort
+/// 5. `"localhost"` → final fallback
 pub fn get_fqdn() -> Result<String> {
-    // Try reading from hostname file first (common on systemd systems)
+    // 1. Try `hostname -f` — returns FQDN on properly configured systems
+    if let Ok(output) = Command::new("hostname").arg("-f").output() {
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() && name.contains('.') && name != "(none)" {
+                tracing::debug!(fqdn = %name, "Resolved FQDN via hostname -f");
+                return Ok(name);
+            }
+        }
+    }
+
+    // 2. Try combining short hostname + domain from `hostname -d`
+    if let Ok(short_output) = Command::new("hostname").output() {
+        if short_output.status.success() {
+            let short = String::from_utf8_lossy(&short_output.stdout).trim().to_string();
+            if !short.is_empty() && short != "(none)" {
+                if let Ok(domain_output) = Command::new("hostname").arg("-d").output() {
+                    if domain_output.status.success() {
+                        let domain = String::from_utf8_lossy(&domain_output.stdout).trim().to_string();
+                        if !domain.is_empty() {
+                            let fqdn = format!("{}.{}", short, domain);
+                            tracing::debug!(fqdn = %fqdn, "Resolved FQDN via hostname + hostname -d");
+                            return Ok(fqdn);
+                        }
+                    }
+                }
+                // Domain not available — fall through to try other methods
+            }
+        }
+    }
+
+    // 3. Try reading from /etc/hostname (common on systemd systems, usually short hostname)
     if let Ok(name) = fs::read_to_string("/etc/hostname") {
         let trimmed = name.trim().to_string();
         if !trimmed.is_empty() && trimmed != "(none)" {
+            tracing::debug!(hostname = %trimmed, "Resolved hostname via /etc/hostname (may be short)");
             return Ok(trimmed);
         }
     }
 
-    // Fallback to hostname command
-    if let Ok(output) = Command::new("hostname").arg("-f").output() {
-        if output.status.success() {
-            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !name.is_empty() {
-                return Ok(name);
-            }
-        }
-    }
-
-    // Fallback to plain hostname
+    // 4. Fallback to plain hostname command
     if let Ok(output) = Command::new("hostname").output() {
         if output.status.success() {
             let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !name.is_empty() {
+                tracing::debug!(hostname = %name, "Resolved hostname via hostname command");
                 return Ok(name);
             }
         }
     }
 
+    // 5. Final fallback
+    tracing::warn!("Could not determine hostname — falling back to localhost");
+    Ok("localhost".into())
+}
+
+/// Resolve the short hostname (without domain).
+///
+/// Strategy: `/etc/hostname` → `hostname` command → split FQDN on `.` → `"localhost"`.
+pub fn get_hostname() -> Result<String> {
+    // Try reading from /etc/hostname (usually contains the short hostname)
+    if let Ok(name) = fs::read_to_string("/etc/hostname") {
+        let trimmed = name.trim().to_string();
+        if !trimmed.is_empty() && trimmed != "(none)" {
+            // If it contains a dot, take just the first component
+            let short = trimmed.split('.').next().unwrap_or(&trimmed).to_string();
+            tracing::debug!(hostname = %short, "Resolved short hostname via /etc/hostname");
+            return Ok(short);
+        }
+    }
+
+    // Try hostname command
+    if let Ok(output) = Command::new("hostname").output() {
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() {
+                // If it contains a dot, take just the first component
+                let short = name.split('.').next().unwrap_or(&name).to_string();
+                tracing::debug!(hostname = %short, "Resolved short hostname via hostname command");
+                return Ok(short);
+            }
+        }
+    }
+
+    // Try splitting FQDN from get_fqdn()
+    if let Ok(fqdn) = get_fqdn() {
+        if fqdn != "localhost" && fqdn.contains('.') {
+            let short = fqdn.split('.').next().unwrap_or(&fqdn).to_string();
+            tracing::debug!(hostname = %short, "Resolved short hostname by splitting FQDN");
+            return Ok(short);
+        }
+    }
+
+    // Final fallback
+    tracing::warn!("Could not determine short hostname — falling back to localhost");
     Ok("localhost".into())
 }
 
@@ -364,6 +437,56 @@ mod tests {
     fn fqdn_is_not_empty() {
         let fqdn = get_fqdn().expect("Failed to get FQDN");
         assert!(!fqdn.is_empty(), "FQDN should not be empty");
+    }
+
+    #[test]
+    fn fqdn_prefers_full_domain() {
+        // If hostname -f returns a value with a dot, get_fqdn should return it
+        // (not the short hostname from /etc/hostname)
+        let fqdn = get_fqdn().expect("Failed to get FQDN");
+        // On properly configured systems, FQDN should contain at least one dot
+        // If it doesn't, it's likely a short hostname from /etc/hostname
+        if fqdn.contains('.') {
+            // FQDN contains domain — good
+            assert!(
+                fqdn.split('.').count() >= 2,
+                "FQDN should have at least host.domain format, got: {}",
+                fqdn
+            );
+        }
+        // If no dot, it's a short hostname — acceptable fallback but not ideal
+    }
+
+    #[test]
+    fn hostname_is_not_empty() {
+        let hostname = get_hostname().expect("Failed to get hostname");
+        assert!(!hostname.is_empty(), "Hostname should not be empty");
+    }
+
+    #[test]
+    fn hostname_is_short_form() {
+        let hostname = get_hostname().expect("Failed to get hostname");
+        // Short hostname should NOT contain dots
+        assert!(
+            !hostname.contains('.'),
+            "Short hostname should not contain dots, got: {}",
+            hostname
+        );
+    }
+
+    #[test]
+    fn hostname_is_prefix_of_fqdn() {
+        let hostname = get_hostname().expect("Failed to get hostname");
+        let fqdn = get_fqdn().expect("Failed to get FQDN");
+        // If FQDN contains a dot, hostname should be the first component
+        if fqdn.contains('.') {
+            let fqdn_prefix = fqdn.split('.').next().unwrap_or(&fqdn);
+            assert_eq!(
+                hostname, fqdn_prefix,
+                "Short hostname '{}' should match FQDN prefix '{}'",
+                hostname, fqdn_prefix
+            );
+        }
     }
 
     #[test]

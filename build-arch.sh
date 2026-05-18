@@ -24,34 +24,60 @@ fi
 
 # Create package directory
 PKGDIR=$(pwd)/arch-package
+rm -rf "$PKGDIR"
 mkdir -p "$PKGDIR"/usr/bin
-mkdir -p "$PKGDIR"/etc/linux_patch_api
+mkdir -p "$PKGDIR"/etc/linux_patch_api/certs
 mkdir -p "$PKGDIR"/usr/lib/systemd/system
+mkdir -p "$PKGDIR"/var/lib/linux_patch_api
+mkdir -p "$PKGDIR"/var/log/linux_patch_api
 
-# Copy files
+# Copy binary
+chmod 755 target/release/linux-patch-api
 cp target/release/linux-patch-api "$PKGDIR"/usr/bin/
-chmod 755 "$PKGDIR"/usr/bin/linux-patch-api
+
+# Copy systemd service
 cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
-cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml
-cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
+
+# Copy example configs (as .example files - install script creates live configs)
+cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml.example
+cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml.example
+
+# Copy install script
+cp configs/linux-patch-api.install PKGBUILD.install
 
 # Create PKGBUILD with quoted heredoc to prevent $pkgdir expansion
 # $pkgdir must be literal for makepkg to expand at runtime
 echo "Creating PKGBUILD..."
 cat > PKGBUILD << 'EOF'
 pkgname=linux-patch-api
-pkgver=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+pkgver=VERSION_PLACEHOLDER
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.moon-dragon.us/echo/linux_patch_api"
 arch=('x86_64')
 license=('MIT')
 depends=('systemd')
+install=linux-patch-api.install
+backup=(
+    'etc/linux_patch_api/config.yaml'
+    'etc/linux_patch_api/whitelist.yaml'
+)
 
 package() {
     cp -r /home/builduser/repo/arch-package/* "$pkgdir"/
+
+    # Ensure directories exist with proper structure
+    mkdir -p "$pkgdir"/etc/linux_patch_api/certs
+    mkdir -p "$pkgdir"/var/lib/linux_patch_api
+    mkdir -p "$pkgdir"/var/log/linux_patch_api
 }
 EOF
+
+# Replace version placeholder with actual version from Cargo.toml
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+sed -i "s/VERSION_PLACEHOLDER/$VERSION/" PKGBUILD
+
+echo "PKGBUILD version: $VERSION"
 
 # Create .SRCINFO
 echo "Creating .SRCINFO..."

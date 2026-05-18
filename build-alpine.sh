@@ -46,25 +46,41 @@ fi
 
 # Create package directory in /home/builduser (accessible by builduser)
 PKGDIR=/home/builduser/apk-package
+rm -rf "$PKGDIR"
 mkdir -p "$PKGDIR"/usr/bin
-mkdir -p "$PKGDIR"/etc/linux_patch_api
+mkdir -p "$PKGDIR"/etc/linux_patch_api/certs
 mkdir -p "$PKGDIR"/etc/init.d
+mkdir -p "$PKGDIR"/var/lib/linux_patch_api
+mkdir -p "$PKGDIR"/var/log/linux_patch_api
 
-# Copy files
+# Copy binary
+chmod 755 target/x86_64-unknown-linux-musl/release/linux-patch-api
 cp target/x86_64-unknown-linux-musl/release/linux-patch-api "$PKGDIR"/usr/bin/
-chmod 755 "$PKGDIR"/usr/bin/linux-patch-api
+
+# Copy OpenRC init script
 cp configs/linux-patch-api-openrc "$PKGDIR"/etc/init.d/linux-patch-api
 chmod 755 "$PKGDIR"/etc/init.d/linux-patch-api
-cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
+
+# Copy example configs (as .example files - install script creates live configs)
+cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml.example
+cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml.example
+
+# Copy install script for APKBUILD
+mkdir -p /home/builduser/repo
+cp configs/linux-patch-api.apk-install /home/builduser/repo/linux-patch-api.apk-install
 
 # Use /home/builduser as workspace for APKBUILD
 WORKSPACE_DIR=/home/builduser
 
+# Get version from Cargo.toml
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+
 # Create APKBUILD
+# Note: install= must use literal package name, not $pkgname (unquoted heredoc expands variables)
 echo "Creating APKBUILD..."
 cat > APKBUILD << EOF
 pkgname=linux-patch-api
-pkgver=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+pkgver=${VERSION}
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.moon-dragon.us/echo/linux_patch_api"
@@ -72,12 +88,17 @@ arch="x86_64"
 license="MIT"
 makedepends=""
 depends="openrc"
+install="linux-patch-api.apk-install"
+subpackages=""
 source=""
 
 package() {
     install -d "\$pkgdir"/usr/bin
-    install -d "\$pkgdir"/etc/linux_patch_api
+    install -d "\$pkgdir"/etc/linux_patch_api/certs
     install -d "\$pkgdir"/etc/init.d
+    install -d "\$pkgdir"/var/lib/linux_patch_api
+    install -d "\$pkgdir"/var/log/linux_patch_api
+
     cp -r ${WORKSPACE_DIR}/apk-package/usr/bin/* "\$pkgdir"/usr/bin/
     cp -r ${WORKSPACE_DIR}/apk-package/etc/linux_patch_api/* "\$pkgdir"/etc/linux_patch_api/
     cp -r ${WORKSPACE_DIR}/apk-package/etc/init.d/* "\$pkgdir"/etc/init.d/

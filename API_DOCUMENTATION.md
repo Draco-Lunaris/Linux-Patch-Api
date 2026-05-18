@@ -909,6 +909,7 @@ Enrollment endpoints enable new hosts to register with the Patch Manager and rec
 | `fqdn` | string | Yes | Fully qualified domain name of the host |
 | `ip_address` | string | Yes | Primary non-loopback IPv4 address |
 | `os_details` | object | Yes | OS metadata (free-form JSON object) |
+| `hostname` | string | No | Short hostname (without domain). Used by the manager to populate `display_name` on approval. If omitted, the manager falls back to the FQDN. |
 
 **`os_details` common fields:**
 
@@ -933,7 +934,8 @@ curl -X POST https://manager.example.com/api/v1/enroll \
       "version_id": "12",
       "kernel": "6.1.0-kali9-amd64",
       "id_like": "debian"
-    }
+    },
+    "hostname": "host-01"
   }'
 ```
 

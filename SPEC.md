@@ -169,7 +169,7 @@ The enrollment flow runs before mTLS server startup. On success, the daemon proc
 ### Phase 1: Registration Request
 - **Identity Extraction:**
   - `/etc/machine-id` (fallback: `/var/lib/dbus/machine-id`)
-  - FQDN from `/etc/hostname` → `hostname -f` → `hostname` → `localhost`
+  - FQDN from `hostname -f` (validated contains `.`) → `hostname` + `hostname -d` → `/etc/hostname` → `hostname` → `localhost`
   - Non-loopback IPv4 addresses via network interface enumeration
   - OS details from `/etc/os-release` (distro, version, id_like, codename) + kernel version (`uname -r`)
 - **Submission:** Unauthenticated `POST /api/v1/enroll` to manager with identity payload

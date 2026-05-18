@@ -16,8 +16,8 @@ pub use client::{
 };
 /// Re-export identity extraction functions.
 pub use identity::{
-    get_fqdn, get_ip_addresses, get_ip_for_interface, get_machine_id, get_os_details,
-    get_primary_ip, get_route_source_ip, is_container_bridge, is_link_local,
+    get_fqdn, get_hostname, get_ip_addresses, get_ip_for_interface, get_machine_id,
+    get_os_details, get_primary_ip, get_route_source_ip, is_container_bridge, is_link_local,
 };
 
 /// Run the full enrollment flow against the manager at the given URL.

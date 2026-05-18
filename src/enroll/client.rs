@@ -18,6 +18,10 @@ pub struct EnrollmentRequest {
     pub fqdn: String,
     pub ip_address: String,
     pub os_details: serde_json::Value,
+    /// Short hostname (from /etc/hostname or hostname command).
+    /// Used by the manager to populate `display_name` on approval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 /// Response from `POST /api/v1/enroll` (HTTP 202).
@@ -220,12 +224,18 @@ impl EnrollmentClient {
         let os_details = identity::get_os_details()
             .context("Failed to collect OS details — /etc/os-release may be missing")?;
 
-        // 2. Build EnrollmentRequest struct
+        // 2. Collect short hostname for display_name on manager
+        let hostname = identity::get_hostname()
+            .map_err(|e| tracing::warn!(error = %e, "Failed to determine hostname — display_name will use FQDN fallback"))
+            .ok();
+
+        // 3. Build EnrollmentRequest struct
         let request = EnrollmentRequest {
             machine_id,
             fqdn,
             ip_address,
             os_details,
+            hostname,
         };
 
         tracing::info!(
@@ -502,6 +512,7 @@ mod tests {
             fqdn: "node.example.com".into(),
             ip_address: "192.168.1.10".into(),
             os_details: serde_json::json!({"distro": "Debian", "version": "12"}),
+            hostname: Some("node".into()),
         };
         let json = serde_json::to_string(&request).expect("Failed to serialize EnrollmentRequest");
         assert!(json.contains("machine_id"));

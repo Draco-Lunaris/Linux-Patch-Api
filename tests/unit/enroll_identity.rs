@@ -4,7 +4,7 @@
 //! Verifies machine-id, FQDN, IP address collection, and OS detail parsing.
 
 use linux_patch_api::enroll::identity::{
-    get_fqdn, get_ip_addresses, get_machine_id, get_os_details, get_primary_ip,
+    get_fqdn, get_hostname, get_ip_addresses, get_machine_id, get_os_details, get_primary_ip,
     get_route_source_ip, is_container_bridge, is_link_local,
 };
 use linux_patch_api::enroll::EnrollmentRequest;
@@ -135,6 +135,97 @@ fn test_fqdn_reasonable_length() {
         fqdn.len() < 254,
         "FQDN should be less than 254 characters, got {}",
         fqdn.len()
+    );
+}
+
+// =============================================================================
+// Hostname Tests
+// =============================================================================
+
+#[test]
+fn test_hostname_returns_non_empty() {
+    let hostname = get_hostname().expect("Failed to get hostname");
+    assert!(!hostname.is_empty(), "Hostname should not be empty");
+}
+
+#[test]
+fn test_hostname_is_short_form() {
+    let hostname = get_hostname().expect("Failed to get hostname");
+    // Short hostname should NOT contain dots (that would be an FQDN)
+    assert!(
+        !hostname.contains('.'),
+        "Short hostname should not contain dots, got: {}",
+        hostname
+    );
+}
+
+#[test]
+fn test_hostname_is_consistent() {
+    let h1 = get_hostname().expect("Failed to get hostname (call 1)");
+    let h2 = get_hostname().expect("Failed to get hostname (call 2)");
+    assert_eq!(h1, h2, "Hostname should be consistent across calls");
+}
+
+#[test]
+fn test_hostname_is_subset_of_fqdn() {
+    let hostname = get_hostname().expect("Failed to get hostname");
+    let fqdn = get_fqdn().expect("Failed to get FQDN");
+    // If FQDN contains a dot, the short hostname should be the first component
+    if fqdn.contains('.') {
+        let fqdn_prefix = fqdn.split('.').next().unwrap_or(&fqdn);
+        assert_eq!(
+            hostname, fqdn_prefix,
+            "Short hostname '{}' should match FQDN prefix '{}'",
+            hostname, fqdn_prefix
+        );
+    }
+}
+
+#[test]
+fn test_hostname_valid_characters() {
+    let hostname = get_hostname().expect("Failed to get hostname");
+    for c in hostname.chars() {
+        assert!(
+            c.is_alphanumeric() || c == '-',
+            "Short hostname contains invalid character: {:?}",
+            c
+        );
+    }
+}
+
+#[test]
+fn test_enrollment_hostname_field_serializes() {
+    // Verify that hostname field serializes correctly when Some and when None
+    let request_with_hostname = EnrollmentRequest {
+        machine_id: "test-id".to_string(),
+        fqdn: "host.example.com".to_string(),
+        ip_address: "10.0.0.1".to_string(),
+        os_details: serde_json::json!({"name": "Test"}),
+        hostname: Some("host".to_string()),
+    };
+    let json_with = serde_json::to_string(&request_with_hostname)
+        .expect("Should serialize with hostname");
+    assert!(
+        json_with.contains("\"hostname\""),
+        "hostname field should be present in JSON when Some"
+    );
+    assert!(
+        json_with.contains("\"host\""),
+        "hostname value should be 'host' in JSON"
+    );
+
+    let request_without_hostname = EnrollmentRequest {
+        machine_id: "test-id".to_string(),
+        fqdn: "host.example.com".to_string(),
+        ip_address: "10.0.0.1".to_string(),
+        os_details: serde_json::json!({"name": "Test"}),
+        hostname: None,
+    };
+    let json_without = serde_json::to_string(&request_without_hostname)
+        .expect("Should serialize without hostname");
+    assert!(
+        !json_without.contains("\"hostname\""),
+        "hostname field should be omitted from JSON when None (skip_serializing_if)"
     );
 }
 
@@ -371,11 +462,14 @@ fn test_enrollment_payload_construction() {
         .cloned()
         .unwrap_or_else(|| "127.0.0.1".to_string());
 
+    let hostname = get_hostname().ok();
+
     let request = EnrollmentRequest {
         machine_id,
         fqdn,
         ip_address: primary_ip,
         os_details,
+        hostname,
     };
 
     // Verify payload serializes to valid JSON
@@ -412,11 +506,14 @@ fn test_enrollment_payload_matches_manager_schema() {
     let ip_addrs = get_ip_addresses().expect("Failed to get IP addresses");
     let os_details = get_os_details().expect("Failed to get OS details");
 
+    let hostname = get_hostname().ok();
+
     let request = EnrollmentRequest {
         machine_id: machine_id.clone(),
         fqdn: fqdn.clone(),
         ip_address: ip_addrs.first().cloned().unwrap_or_default(),
         os_details: os_details.clone(),
+        hostname,
     };
 
     // Validate against expected manager API schema
@@ -449,11 +546,14 @@ fn test_enrollment_payload_roundtrip() {
     let ip_addrs = get_ip_addresses().expect("Failed to get IP addresses");
     let os_details = get_os_details().expect("Failed to get OS details");
 
+    let hostname = get_hostname().ok();
+
     let request = EnrollmentRequest {
         machine_id,
         fqdn,
         ip_address: ip_addrs.first().cloned().unwrap_or_default(),
         os_details,
+        hostname,
     };
 
     // Serialize to JSON then deserialize back
@@ -464,6 +564,7 @@ fn test_enrollment_payload_roundtrip() {
     assert_eq!(request.machine_id, deserialized.machine_id);
     assert_eq!(request.fqdn, deserialized.fqdn);
     assert_eq!(request.ip_address, deserialized.ip_address);
+    assert_eq!(request.hostname, deserialized.hostname);
 }
 
 // =============================================================================
@@ -505,6 +606,10 @@ fn test_identity_functions_do_not_panic() {
 
     let _ = std::panic::catch_unwind(|| {
         let _ = get_fqdn();
+    });
+
+    let _ = std::panic::catch_unwind(|| {
+        let _ = get_hostname();
     });
 
     let _ = std::panic::catch_unwind(|| {

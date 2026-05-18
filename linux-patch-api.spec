@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           linux-patch-api
-Version:        1.0.0
+Version:        VERSION_PLACEHOLDER
 Release:        1%{?dist}
 Summary:        Secure remote package management API for Linux systems
 License:        MIT
@@ -162,6 +162,8 @@ fi
 /lib/systemd/system/linux-patch-api.service
 %config(noreplace) /etc/linux_patch_api/config.yaml.example
 %config(noreplace) /etc/linux_patch_api/whitelist.yaml.example
+%ghost %config(noreplace) /etc/linux_patch_api/config.yaml
+%ghost %config(noreplace) /etc/linux_patch_api/whitelist.yaml
 %dir /etc/linux_patch_api
 %dir /etc/linux_patch_api/certs
 %dir /var/lib/linux_patch_api
@@ -169,7 +171,7 @@ fi
 
 # Changelog
 %changelog
-* Thu Apr 09 2026 Echo <echo@moon-dragon.us> - 1.0.0-1
+* Thu Apr 09 2026 Echo <echo@moon-dragon.us> - 1.1.7-1
 - Initial production release
 - Secure mTLS-authenticated REST API for remote package management
 - 15 API endpoints for package install/remove, patch application, system management
