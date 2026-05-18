@@ -57,6 +57,11 @@ async fn main() -> Result<()> {
     // Initialize logging
     let _guard = init_logging(args.verbose)?;
 
+    // Install rustls crypto provider (required for mTLS and HTTPS clients)
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider (aws-lc-rs)");
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
         config_path = args.config,
