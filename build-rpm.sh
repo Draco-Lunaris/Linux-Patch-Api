@@ -26,7 +26,7 @@ mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
 # Create source tarball (required by %autosetup in spec file)
 echo "Creating source tarball..."
-VERSION="1.0.0"
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 TMPDIR=$(mktemp -d)
 mkdir -p "$TMPDIR/linux-patch-api-${VERSION}"
 # Copy files excluding unwanted directories using find

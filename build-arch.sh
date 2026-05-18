@@ -40,7 +40,7 @@ cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml
 echo "Creating PKGBUILD..."
 cat > PKGBUILD << 'EOF'
 pkgname=linux-patch-api
-pkgver=1.0.0
+pkgver=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.moon-dragon.us/echo/linux_patch_api"

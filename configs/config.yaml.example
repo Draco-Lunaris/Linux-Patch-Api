@@ -62,6 +62,12 @@ package_manager:
 #   # Example: "eth0", "ens192", "enp0s3"
 #   report_interface: "eth0"
 #   # Explicit IPv4 address reported to the manager.
-#   # Highest priority — overrides both report_interface and auto-detect.
+#   # Highest priority — overrides both report_interface and route-based selection.
 #   # Useful when the host has multiple IPs or runs inside a container.
 #   report_ip: "192.168.3.36"
+#   # Route-based IP selection is enabled by default when manager_url is set.
+#   The agent resolves the manager hostname to an IP, then uses `ip route get <manager_ip>`
+#   to determine which local source IP the kernel would use to reach the manager.
+#   This is the most accurate method for multi-homed hosts because it queries
+#   the kernel routing table directly.
+#   Priority order: report_ip > report_interface > route-based > auto-detect

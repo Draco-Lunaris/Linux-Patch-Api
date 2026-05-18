@@ -5,7 +5,7 @@
 
 use linux_patch_api::enroll::identity::{
     get_fqdn, get_ip_addresses, get_machine_id, get_os_details, get_primary_ip,
-    is_container_bridge, is_link_local,
+    get_route_source_ip, is_container_bridge, is_link_local,
 };
 use linux_patch_api::enroll::EnrollmentRequest;
 use serde_json::Value;
@@ -586,7 +586,7 @@ fn test_get_ip_addresses_excludes_link_local() {
 #[test]
 fn test_get_primary_ip_auto_detect_no_bridge() {
     // In Docker containers, auto-detect may find no routable IPs — that's valid
-    match get_primary_ip(None, None) {
+    match get_primary_ip(None, None, None) {
         Ok(ip) => {
             assert!(!ip.is_empty(), "Primary IP should not be empty");
             let parsed: std::net::Ipv4Addr = ip.parse().expect("Primary IP should be valid IPv4");
@@ -603,14 +603,14 @@ fn test_get_primary_ip_auto_detect_no_bridge() {
 
 #[test]
 fn test_get_primary_ip_explicit_override() {
-    let ip = get_primary_ip(None, Some("10.99.99.1")).expect("Failed with explicit IP");
+    let ip = get_primary_ip(None, Some("10.99.99.1"), None).expect("Failed with explicit IP");
     assert_eq!(ip, "10.99.99.1");
 }
 
 #[test]
 fn test_get_primary_ip_rejects_loopback_override() {
     // Loopback override should fall back to auto-detect; if auto-detect also fails, that's valid
-    match get_primary_ip(None, Some("127.0.0.1")) {
+    match get_primary_ip(None, Some("127.0.0.1"), None) {
         Ok(ip) => assert_ne!(ip, "127.0.0.1"),
         Err(_) => {
             eprintln!(
@@ -623,11 +623,69 @@ fn test_get_primary_ip_rejects_loopback_override() {
 #[test]
 fn test_get_primary_ip_invalid_override_falls_back() {
     // Invalid IP override should fall back to auto-detect; if auto-detect also fails, that's valid
-    match get_primary_ip(None, Some("not-an-ip")) {
+    match get_primary_ip(None, Some("not-an-ip"), None) {
         Ok(ip) => assert!(!ip.is_empty()),
         Err(_) => {
             eprintln!(
                 "NOTE: Invalid IP rejected but no routable IPs for fallback — Docker container"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_get_primary_ip_route_target_priority() {
+    // Route-based selection should be tried before auto-detect
+    // If iproute2 is available this may succeed, otherwise falls back gracefully
+    match get_primary_ip(None, None, Some("8.8.8.8")) {
+        Ok(ip) => {
+            assert!(!ip.is_empty(), "Route-based IP should not be empty");
+            let parsed: std::net::Ipv4Addr =
+                ip.parse().expect("Route-based IP should be valid IPv4");
+            assert!(
+                !is_container_bridge(&parsed),
+                "Route-based IP should not be Docker bridge"
+            );
+            assert!(!parsed.is_loopback(), "Route-based IP should not be loopback");
+        }
+        Err(_) => {
+            eprintln!(
+                "NOTE: Route-based selection failed — iproute2 may not be available in this environment"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_get_primary_ip_explicit_overrides_route_target() {
+    // Explicit report_ip should take priority over route_target
+    let ip = get_primary_ip(None, Some("10.99.99.1"), Some("8.8.8.8"))
+        .expect("Explicit IP should override route_target");
+    assert_eq!(ip, "10.99.99.1");
+}
+
+#[test]
+fn test_get_route_source_ip_known_target() {
+    // Test route-based IP detection with a well-known target
+    // Requires iproute2 to be installed
+    match get_route_source_ip("8.8.8.8") {
+        Ok(ip) => {
+            let parsed: std::net::Ipv4Addr =
+                ip.parse().expect("Route source IP should be valid IPv4");
+            assert!(!parsed.is_loopback(), "Route source IP should not be loopback");
+            assert!(
+                !is_container_bridge(&parsed),
+                "Route source IP should not be Docker bridge"
+            );
+            assert!(
+                !is_link_local(&parsed),
+                "Route source IP should not be link-local"
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "NOTE: Route-based IP detection failed: {} — may be unavailable in this environment",
+                e
             );
         }
     }

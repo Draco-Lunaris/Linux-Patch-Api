@@ -1,3 +1,13 @@
+linux-patch-api (1.1.5-1) unstable; urgency=low
+
+  * Fix enrollment IP detection: filter Docker bridge subnets (172.16.0.0/12)
+  * Fix enrollment IP detection: filter link-local addresses (169.254.0.0/16)
+  * Add report_interface and report_ip config options for explicit IP override
+  * Add route-based IP selection using kernel routing table
+  * Fix package versioning to derive from Cargo.toml
+
+ -- Echo <echo@moon-dragon.us>  Sun, 18 May 2026 02:00:00 -0500
+
 linux-patch-api (0.3.12-1) unstable; urgency=low
 
   * Fix socket activation detection to use resolved service name

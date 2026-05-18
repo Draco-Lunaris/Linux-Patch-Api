@@ -123,6 +123,60 @@ pub fn is_link_local(addr: &Ipv4Addr) -> bool {
     octets[0] == 169 && octets[1] == 254
 }
 
+/// Determine the local source IP that would be used to reach a target IP.
+/// Uses the kernel routing table via `ip route get <target>`.
+///
+/// This is the most accurate way to select the correct local IP because it
+/// queries the kernel routing table directly, which accounts for all routing
+/// rules, interface priorities, and source address selection.
+pub fn get_route_source_ip(target_ip: &str) -> Result<String> {
+    let output = Command::new("ip")
+        .args(["route", "get", target_ip])
+        .output()
+        .context("Failed to execute 'ip route get' — is iproute2 installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "'ip route get {}' failed: {}",
+            target_ip,
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse output like: "192.168.3.36 via 192.168.1.1 dev eth0 src 192.168.3.36 uid ..."
+    // We want the 'src' field value
+    let mut found_src = false;
+    for part in stdout.split_whitespace() {
+        if found_src {
+            // Validate it's a valid IPv4 address
+            if part.parse::<Ipv4Addr>().is_ok() {
+                let addr = part.parse::<Ipv4Addr>().unwrap();
+                if !addr.is_loopback() && !is_container_bridge(&addr) && !is_link_local(&addr) {
+                    tracing::info!(
+                        target_ip = target_ip,
+                        source_ip = part,
+                        "Route-based IP selection: local source IP for reaching target"
+                    );
+                    return Ok(part.to_string());
+                }
+            }
+            break;
+        }
+        if part == "src" {
+            found_src = true;
+        }
+    }
+
+    Err(anyhow!(
+        "Could not determine source IP for route to '{}' — 'ip route get' output: {}",
+        target_ip,
+        stdout.trim()
+    ))
+}
+
 /// Get the IPv4 address of a specific network interface by name.
 ///
 /// Returns the first non-loopback IPv4 address on the named interface.
@@ -158,8 +212,13 @@ pub fn get_ip_for_interface(interface_name: &str) -> Result<String> {
 /// Resolution priority:
 /// 1. `report_ip` — explicit IP from config (highest priority)
 /// 2. `report_interface` — IP from a named interface
-/// 3. Auto-detect — first IP from `get_ip_addresses()` (bridge subnets already filtered)
-pub fn get_primary_ip(report_interface: Option<&str>, report_ip: Option<&str>) -> Result<String> {
+/// 3. `route_target` — route-based selection using kernel routing table
+/// 4. Auto-detect — first IP from `get_ip_addresses()` (bridge subnets already filtered)
+pub fn get_primary_ip(
+    report_interface: Option<&str>,
+    report_ip: Option<&str>,
+    route_target: Option<&str>,
+) -> Result<String> {
     // Priority 1: Explicit IP override
     if let Some(ip) = report_ip {
         // Validate it parses as IPv4
@@ -188,13 +247,34 @@ pub fn get_primary_ip(report_interface: Option<&str>, report_ip: Option<&str>) -
                 tracing::warn!(
                     interface = iface,
                     error = %e,
-                    "Configured report_interface lookup failed — falling back to auto-detect"
+                    "Configured report_interface lookup failed — falling back to route-based or auto-detect"
                 );
             }
         }
     }
 
-    // Priority 3: Auto-detect (bridge subnets already filtered by get_ip_addresses)
+    // Priority 3: Route-based selection using kernel routing table
+    if let Some(target) = route_target {
+        match get_route_source_ip(target) {
+            Ok(ip) => {
+                tracing::info!(
+                    target = target,
+                    ip = %ip,
+                    "Using route-based IP selection for target"
+                );
+                return Ok(ip);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target = target,
+                    error = %e,
+                    "Route-based IP selection failed — falling back to auto-detect"
+                );
+            }
+        }
+    }
+
+    // Priority 4: Auto-detect (bridge subnets already filtered by get_ip_addresses)
     let addrs = get_ip_addresses()?;
     addrs
         .first()
@@ -368,7 +448,7 @@ mod tests {
     fn test_get_primary_ip_auto_detect() {
         // Without overrides, should return a valid non-bridge IP
         // In Docker containers, auto-detect may find no routable IPs — that's valid
-        match get_primary_ip(None, None) {
+        match get_primary_ip(None, None, None) {
             Ok(ip) => {
                 assert!(!ip.is_empty(), "Primary IP should not be empty");
                 let parsed: Ipv4Addr = ip.parse().expect("Primary IP should be valid IPv4");
@@ -386,7 +466,7 @@ mod tests {
     #[test]
     fn test_get_primary_ip_explicit_override() {
         // Explicit IP should be returned as-is
-        let ip = get_primary_ip(None, Some("10.99.99.1")).expect("Failed with explicit IP");
+        let ip = get_primary_ip(None, Some("10.99.99.1"), None).expect("Failed with explicit IP");
         assert_eq!(ip, "10.99.99.1");
     }
 
@@ -394,7 +474,7 @@ mod tests {
     fn test_get_primary_ip_rejects_loopback_override() {
         // Loopback in report_ip should fall back to auto-detect
         // In Docker containers, auto-detect may also fail — that's valid
-        match get_primary_ip(None, Some("127.0.0.1")) {
+        match get_primary_ip(None, Some("127.0.0.1"), None) {
             Ok(ip) => assert_ne!(ip, "127.0.0.1"),
             Err(_) => {
                 eprintln!(
@@ -408,11 +488,75 @@ mod tests {
     fn test_get_primary_ip_invalid_override_falls_back() {
         // Invalid IP in report_ip should fall back to auto-detect
         // In Docker containers, auto-detect may also fail — that's valid
-        match get_primary_ip(None, Some("not-an-ip")) {
+        match get_primary_ip(None, Some("not-an-ip"), None) {
             Ok(ip) => assert!(!ip.is_empty()),
             Err(_) => {
                 eprintln!(
                     "NOTE: Invalid IP rejected but no routable IPs for fallback — Docker container"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_primary_ip_route_target_priority() {
+        // Route-based selection should be tried before auto-detect
+        // We test with a well-known IP; if iproute2 is available this may succeed,
+        // otherwise it falls back gracefully
+        match get_primary_ip(None, None, Some("8.8.8.8")) {
+            Ok(ip) => {
+                assert!(!ip.is_empty(), "Route-based IP should not be empty");
+                let parsed: Ipv4Addr = ip.parse().expect("Route-based IP should be valid IPv4");
+                assert!(
+                    !is_container_bridge(&parsed),
+                    "Route-based IP should not be Docker bridge"
+                );
+                assert!(
+                    !parsed.is_loopback(),
+                    "Route-based IP should not be loopback"
+                );
+            }
+            Err(_) => {
+                eprintln!(
+                    "NOTE: Route-based selection failed — iproute2 may not be available in this environment"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_primary_ip_explicit_overrides_route_target() {
+        // Explicit report_ip should take priority over route_target
+        let ip = get_primary_ip(None, Some("10.99.99.1"), Some("8.8.8.8"))
+            .expect("Explicit IP should override route_target");
+        assert_eq!(ip, "10.99.99.1");
+    }
+
+    #[test]
+    fn test_get_route_source_ip_known_target() {
+        // Test route-based IP detection with a well-known target
+        // This test requires iproute2 to be installed
+        match get_route_source_ip("8.8.8.8") {
+            Ok(ip) => {
+                let parsed: Ipv4Addr = ip.parse().expect("Route source IP should be valid IPv4");
+                assert!(
+                    !parsed.is_loopback(),
+                    "Route source IP should not be loopback"
+                );
+                assert!(
+                    !is_container_bridge(&parsed),
+                    "Route source IP should not be Docker bridge"
+                );
+                assert!(
+                    !is_link_local(&parsed),
+                    "Route source IP should not be link-local"
+                );
+            }
+            Err(e) => {
+                // Acceptable in containers without iproute2 or routing
+                eprintln!(
+                    "NOTE: Route-based IP detection failed: {} — may be unavailable in this environment",
+                    e
                 );
             }
         }

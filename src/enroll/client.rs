@@ -103,7 +103,8 @@ impl EnrollmentClient {
     /// See [`identity::get_primary_ip`] for resolution priority:
     /// 1. `report_ip` — explicit IP (highest priority)
     /// 2. `report_interface` — IP from named interface
-    /// 3. Auto-detect — first routable IP (container bridge subnets filtered)
+    /// 3. Route-based — IP from kernel routing table for reaching the manager
+    /// 4. Auto-detect — first routable IP (container bridge subnets filtered)
     pub fn with_ip_overrides(
         manager_url: &str,
         report_interface: Option<String>,
@@ -202,7 +203,10 @@ impl EnrollmentClient {
     /// - `Ok(EnrollmentResponse)` with the polling token on HTTP 202
     /// - Error on 429 (rate limited), 5xx (server error), or network failure
     pub async fn register(&self) -> Result<EnrollmentResponse> {
-        // 1. Collect identity data
+        // 1. Resolve manager IP for route-based IP selection
+        let route_target = self.manager_ip().await.ok();
+
+        // 2. Collect identity data
         let machine_id = identity::get_machine_id()
             .context("Failed to read machine-id — host cannot enroll without identity")?;
         let fqdn = identity::get_fqdn()
@@ -210,6 +214,7 @@ impl EnrollmentClient {
         let ip_address = identity::get_primary_ip(
             self.report_interface.as_deref(),
             self.report_ip.as_deref(),
+            route_target.as_deref(),
         )
         .context("Failed to determine reportable IP address — check network configuration or set report_interface/report_ip in config")?;
         let os_details = identity::get_os_details()
