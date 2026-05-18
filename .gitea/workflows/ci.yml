@@ -171,6 +171,10 @@ jobs:
           sudo apt-get update
           sudo apt-get -f install -y
           sudo apt-get install -y build-essential debhelper pkg-config libsystemd-dev libssl-dev
+      - name: Clean previous build artifacts
+        run: |
+          cargo clean
+          rm -f ../linux-patch-api_*.deb
       - name: Build Debian package
         run: |
           sudo dpkg-buildpackage -us -uc -b -d
@@ -204,6 +208,10 @@ jobs:
           sudo apt-get update
           sudo apt-get -f install -y
           sudo apt-get install -y build-essential debhelper pkg-config libsystemd-dev libssl-dev
+      - name: Clean previous build artifacts
+        run: |
+          cargo clean
+          rm -f ../linux-patch-api_*.deb
       - name: Build Debian package
         run: |
           sudo dpkg-buildpackage -us -uc -b -d

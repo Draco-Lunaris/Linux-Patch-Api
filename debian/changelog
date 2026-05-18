@@ -1,3 +1,10 @@
+linux-patch-api (1.1.7-1) unstable; urgency=low
+
+  * Fix CI pipeline: add cargo clean and remove old .deb artifacts before packaging
+  * Bump version to 1.1.7 to ensure clean build with correct binary
+
+ -- Echo <echo@moon-dragon.us>  Mon, 18 May 2026 12:20:00 -0500
+
 linux-patch-api (1.1.6-1) unstable; urgency=low
 
   * Fix rustls CryptoProvider initialization panic on server startup
