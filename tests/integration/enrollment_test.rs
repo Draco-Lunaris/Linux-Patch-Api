@@ -36,11 +36,7 @@ async fn create_mock_manager() -> (MockServer, String) {
 /// Uses a test report_ip so enrollment works inside Docker containers
 /// where the only IPs are in the 172.16.0.0/12 bridge range (filtered).
 fn build_client(base_url: &str) -> EnrollmentClient {
-    EnrollmentClient::with_ip_overrides(
-        base_url,
-        None,
-        Some("192.168.1.10".to_string()),
-    )
+    EnrollmentClient::with_ip_overrides(base_url, None, Some("192.168.1.10".to_string()))
 }
 
 // =============================================================================

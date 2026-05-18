@@ -4,8 +4,8 @@
 //! Verifies machine-id, FQDN, IP address collection, and OS detail parsing.
 
 use linux_patch_api::enroll::identity::{
-    get_fqdn, get_ip_addresses, get_machine_id, get_os_details,
-    get_primary_ip, is_container_bridge, is_link_local,
+    get_fqdn, get_ip_addresses, get_machine_id, get_os_details, get_primary_ip,
+    is_container_bridge, is_link_local,
 };
 use linux_patch_api::enroll::EnrollmentRequest;
 use serde_json::Value;
@@ -367,7 +367,10 @@ fn test_enrollment_payload_construction() {
     let os_details = get_os_details().expect("Failed to get OS details");
 
     // In Docker containers, all IPs may be in 172.16.0.0/12 (filtered), so use fallback
-    let primary_ip = ip_addrs.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+    let primary_ip = ip_addrs
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     let request = EnrollmentRequest {
         machine_id,
@@ -559,8 +562,7 @@ fn test_is_not_link_local() {
 fn test_get_ip_addresses_excludes_docker_bridge() {
     let addrs = get_ip_addresses().expect("Failed to get IP addresses");
     for addr in &addrs {
-        let parsed: std::net::Ipv4Addr =
-            addr.parse().expect("Should parse as IPv4");
+        let parsed: std::net::Ipv4Addr = addr.parse().expect("Should parse as IPv4");
         assert!(
             !is_container_bridge(&parsed),
             "IP '{}' is in Docker bridge range 172.16.0.0/12 — should be excluded",
@@ -573,8 +575,7 @@ fn test_get_ip_addresses_excludes_docker_bridge() {
 fn test_get_ip_addresses_excludes_link_local() {
     let addrs = get_ip_addresses().expect("Failed to get IP addresses");
     for addr in &addrs {
-        let parsed: std::net::Ipv4Addr =
-            addr.parse().expect("Should parse as IPv4");
+        let parsed: std::net::Ipv4Addr = addr.parse().expect("Should parse as IPv4");
         assert!(
             !is_link_local(&parsed),
             "IP '{}' is link-local 169.254.0.0/16 — should be excluded",
@@ -603,8 +604,7 @@ fn test_get_primary_ip_auto_detect_no_bridge() {
 
 #[test]
 fn test_get_primary_ip_explicit_override() {
-    let ip = get_primary_ip(None, Some("10.99.99.1"))
-        .expect("Failed with explicit IP");
+    let ip = get_primary_ip(None, Some("10.99.99.1")).expect("Failed with explicit IP");
     assert_eq!(ip, "10.99.99.1");
 }
 
@@ -614,7 +614,9 @@ fn test_get_primary_ip_rejects_loopback_override() {
     match get_primary_ip(None, Some("127.0.0.1")) {
         Ok(ip) => assert_ne!(ip, "127.0.0.1"),
         Err(_) => {
-            eprintln!("NOTE: Loopback rejected but no routable IPs for fallback — Docker container");
+            eprintln!(
+                "NOTE: Loopback rejected but no routable IPs for fallback — Docker container"
+            );
         }
     }
 }
@@ -625,7 +627,9 @@ fn test_get_primary_ip_invalid_override_falls_back() {
     match get_primary_ip(None, Some("not-an-ip")) {
         Ok(ip) => assert!(!ip.is_empty()),
         Err(_) => {
-            eprintln!("NOTE: Invalid IP rejected but no routable IPs for fallback — Docker container");
+            eprintln!(
+                "NOTE: Invalid IP rejected but no routable IPs for fallback — Docker container"
+            );
         }
     }
 }

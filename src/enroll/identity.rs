@@ -165,10 +165,7 @@ pub fn get_primary_ip(report_interface: Option<&str>, report_ip: Option<&str>) -
         // Validate it parses as IPv4
         if let Ok(addr) = ip.parse::<Ipv4Addr>() {
             if !addr.is_loopback() {
-                tracing::info!(
-                    ip = ip,
-                    "Using explicitly configured report_ip"
-                );
+                tracing::info!(ip = ip, "Using explicitly configured report_ip");
                 return Ok(ip.to_string());
             }
             tracing::warn!(
@@ -375,7 +372,10 @@ mod tests {
             Ok(ip) => {
                 assert!(!ip.is_empty(), "Primary IP should not be empty");
                 let parsed: Ipv4Addr = ip.parse().expect("Primary IP should be valid IPv4");
-                assert!(!is_container_bridge(&parsed), "Auto-detected IP should not be Docker bridge");
+                assert!(
+                    !is_container_bridge(&parsed),
+                    "Auto-detected IP should not be Docker bridge"
+                );
             }
             Err(_) => {
                 eprintln!("NOTE: No routable IPs found — likely running inside a Docker container");
@@ -386,8 +386,7 @@ mod tests {
     #[test]
     fn test_get_primary_ip_explicit_override() {
         // Explicit IP should be returned as-is
-        let ip = get_primary_ip(None, Some("10.99.99.1"))
-            .expect("Failed with explicit IP");
+        let ip = get_primary_ip(None, Some("10.99.99.1")).expect("Failed with explicit IP");
         assert_eq!(ip, "10.99.99.1");
     }
 
@@ -398,7 +397,9 @@ mod tests {
         match get_primary_ip(None, Some("127.0.0.1")) {
             Ok(ip) => assert_ne!(ip, "127.0.0.1"),
             Err(_) => {
-                eprintln!("NOTE: Loopback rejected but no routable IPs for fallback — Docker container");
+                eprintln!(
+                    "NOTE: Loopback rejected but no routable IPs for fallback — Docker container"
+                );
             }
         }
     }
@@ -410,7 +411,9 @@ mod tests {
         match get_primary_ip(None, Some("not-an-ip")) {
             Ok(ip) => assert!(!ip.is_empty()),
             Err(_) => {
-                eprintln!("NOTE: Invalid IP rejected but no routable IPs for fallback — Docker container");
+                eprintln!(
+                    "NOTE: Invalid IP rejected but no routable IPs for fallback — Docker container"
+                );
             }
         }
     }
