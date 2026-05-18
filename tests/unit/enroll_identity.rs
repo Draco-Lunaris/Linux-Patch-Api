@@ -148,7 +148,6 @@ fn test_ip_addresses_returns_at_least_one() {
     // In Docker containers, all IPs may be in 172.16.0.0/12 (filtered), so empty is valid
     if addrs.is_empty() {
         eprintln!("NOTE: No routable IPs found — likely running inside a Docker container with only bridge IPs");
-        return;
     }
 }
 
