@@ -646,7 +646,10 @@ fn test_get_primary_ip_route_target_priority() {
                 !is_container_bridge(&parsed),
                 "Route-based IP should not be Docker bridge"
             );
-            assert!(!parsed.is_loopback(), "Route-based IP should not be loopback");
+            assert!(
+                !parsed.is_loopback(),
+                "Route-based IP should not be loopback"
+            );
         }
         Err(_) => {
             eprintln!(
@@ -672,7 +675,10 @@ fn test_get_route_source_ip_known_target() {
         Ok(ip) => {
             let parsed: std::net::Ipv4Addr =
                 ip.parse().expect("Route source IP should be valid IPv4");
-            assert!(!parsed.is_loopback(), "Route source IP should not be loopback");
+            assert!(
+                !parsed.is_loopback(),
+                "Route source IP should not be loopback"
+            );
             assert!(
                 !is_container_bridge(&parsed),
                 "Route source IP should not be Docker bridge"
