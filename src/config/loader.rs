@@ -114,6 +114,14 @@ pub struct EnrollmentConfig {
     pub polling_interval_seconds: u64,
     #[serde(default = "default_max_poll_attempts")]
     pub max_poll_attempts: u32,
+    /// Network interface whose IPv4 address is reported to the manager.
+    /// Overrides auto-detection. Example: `"eth0"`, `"ens192"`.
+    #[serde(default)]
+    pub report_interface: Option<String>,
+    /// Explicit IPv4 address reported to the manager.
+    /// Highest priority — overrides both `report_interface` and auto-detect.
+    #[serde(default)]
+    pub report_ip: Option<String>,
 }
 
 fn default_polling_interval() -> u64 {

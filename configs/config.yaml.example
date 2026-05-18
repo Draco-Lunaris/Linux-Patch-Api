@@ -57,3 +57,11 @@ package_manager:
 #   # Maximum number of polling attempts before giving up
 #   # Default: 1440 (24 hours at 60s intervals = 86400 seconds total)
 #   max_poll_attempts: 1440
+#   # Network interface whose IPv4 address is reported to the manager.
+#   # Overrides auto-detection when the wrong IP is selected (e.g., Docker bridge).
+#   # Example: "eth0", "ens192", "enp0s3"
+#   report_interface: "eth0"
+#   # Explicit IPv4 address reported to the manager.
+#   # Highest priority — overrides both report_interface and auto-detect.
+#   # Useful when the host has multiple IPs or runs inside a container.
+#   report_ip: "192.168.3.36"

@@ -15,7 +15,7 @@ pub use client::{
     EnrollmentClient, EnrollmentRequest, EnrollmentResponse, EnrollmentStatusResponse, PkiBundle,
 };
 /// Re-export identity extraction functions.
-pub use identity::{get_fqdn, get_ip_addresses, get_machine_id, get_os_details};
+pub use identity::{get_fqdn, get_ip_addresses, get_ip_for_interface, get_machine_id, get_os_details, get_primary_ip, is_container_bridge, is_link_local};
 
 /// Run the full enrollment flow against the manager at the given URL.
 ///
@@ -28,7 +28,14 @@ pub use identity::{get_fqdn, get_ip_addresses, get_machine_id, get_os_details};
 /// Returns Err on registration failure, polling timeout, denial, user interruption,
 /// PKI provisioning failure, or whitelist update failure.
 pub async fn run_enrollment(manager_url: &str, config: &super::AppConfig) -> Result<()> {
-    let client = EnrollmentClient::new(manager_url);
+    // Extract IP reporting overrides from enrollment config
+    let (report_interface, report_ip) = config
+        .enrollment
+        .as_ref()
+        .map(|e| (e.report_interface.clone(), e.report_ip.clone()))
+        .unwrap_or((None, None));
+
+    let client = EnrollmentClient::with_ip_overrides(manager_url, report_interface, report_ip);
 
     // Phase 1: Registration
     tracing::info!(

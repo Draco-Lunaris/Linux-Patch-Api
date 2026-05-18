@@ -77,6 +77,10 @@ pub struct EnrollmentClient {
     pub manager_url: String,
     /// Pre-configured reqwest client with insecure TLS and timeout.
     http_client: reqwest::Client,
+    /// Network interface whose IP is reported to the manager (overrides auto-detect).
+    report_interface: Option<String>,
+    /// Explicit IPv4 address reported to the manager (highest priority override).
+    report_ip: Option<String>,
 }
 
 impl EnrollmentClient {
@@ -91,6 +95,20 @@ impl EnrollmentClient {
     /// contains a valid host component. Rejects dangerous schemes like `file://`,
     /// `gopher://`, or URLs without a host.
     pub fn new(manager_url: &str) -> Self {
+        Self::with_ip_overrides(manager_url, None, None)
+    }
+
+    /// Create a new enrollment client with optional IP reporting overrides.
+    ///
+    /// See [`identity::get_primary_ip`] for resolution priority:
+    /// 1. `report_ip` — explicit IP (highest priority)
+    /// 2. `report_interface` — IP from named interface
+    /// 3. Auto-detect — first routable IP (container bridge subnets filtered)
+    pub fn with_ip_overrides(
+        manager_url: &str,
+        report_interface: Option<String>,
+        report_ip: Option<String>,
+    ) -> Self {
         // SECURITY: Validate URL scheme before building HTTP client.
         // Only http and https are permitted to prevent path traversal, SSRF,
         // or local file access via dangerous schemes (file://, gopher://, etc.).
@@ -124,6 +142,8 @@ impl EnrollmentClient {
         Self {
             manager_url: manager_url.to_string(),
             http_client,
+            report_interface,
+            report_ip,
         }
     }
 
@@ -187,16 +207,13 @@ impl EnrollmentClient {
             .context("Failed to read machine-id — host cannot enroll without identity")?;
         let fqdn = identity::get_fqdn()
             .context("Failed to determine FQDN — check hostname configuration")?;
-        let ip_addresses = identity::get_ip_addresses()
-            .context("Failed to enumerate network interfaces — check network configuration")?;
+        let ip_address = identity::get_primary_ip(
+            self.report_interface.as_deref(),
+            self.report_ip.as_deref(),
+        )
+        .context("Failed to determine reportable IP address — check network configuration or set report_interface/report_ip in config")?;
         let os_details = identity::get_os_details()
             .context("Failed to collect OS details — /etc/os-release may be missing")?;
-
-        // Use first non-loopback IP (manager expects single string)
-        let ip_address = ip_addresses
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
 
         // 2. Build EnrollmentRequest struct
         let request = EnrollmentRequest {
