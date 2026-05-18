@@ -53,11 +53,15 @@ pub fn get_fqdn() -> Result<String> {
     // 2. Try combining short hostname + domain from `hostname -d`
     if let Ok(short_output) = Command::new("hostname").output() {
         if short_output.status.success() {
-            let short = String::from_utf8_lossy(&short_output.stdout).trim().to_string();
+            let short = String::from_utf8_lossy(&short_output.stdout)
+                .trim()
+                .to_string();
             if !short.is_empty() && short != "(none)" {
                 if let Ok(domain_output) = Command::new("hostname").arg("-d").output() {
                     if domain_output.status.success() {
-                        let domain = String::from_utf8_lossy(&domain_output.stdout).trim().to_string();
+                        let domain = String::from_utf8_lossy(&domain_output.stdout)
+                            .trim()
+                            .to_string();
                         if !domain.is_empty() {
                             let fqdn = format!("{}.{}", short, domain);
                             tracing::debug!(fqdn = %fqdn, "Resolved FQDN via hostname + hostname -d");

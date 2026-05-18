@@ -203,8 +203,8 @@ fn test_enrollment_hostname_field_serializes() {
         os_details: serde_json::json!({"name": "Test"}),
         hostname: Some("host".to_string()),
     };
-    let json_with = serde_json::to_string(&request_with_hostname)
-        .expect("Should serialize with hostname");
+    let json_with =
+        serde_json::to_string(&request_with_hostname).expect("Should serialize with hostname");
     assert!(
         json_with.contains("\"hostname\""),
         "hostname field should be present in JSON when Some"

@@ -477,7 +477,10 @@ async fn test_registration_payload_structure() {
     // Verify hostname field (optional, may be present or absent)
     // When present, it should be a non-empty string without dots (short hostname)
     if let Some(hostname) = payload.get("hostname").and_then(|v| v.as_str()) {
-        assert!(!hostname.is_empty(), "hostname should not be empty when present");
+        assert!(
+            !hostname.is_empty(),
+            "hostname should not be empty when present"
+        );
         assert!(
             !hostname.contains('.'),
             "hostname should be short form (no dots), got: {}",
