@@ -42,8 +42,8 @@ cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml.example
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml.example
 
-# Copy install script
-cp configs/linux-patch-api.install PKGBUILD.install
+# Copy install script (must match filename in PKGBUILD install= line)
+cp configs/linux-patch-api.install linux-patch-api.install
 
 # Create PKGBUILD with quoted heredoc to prevent $pkgdir expansion
 # $pkgdir must be literal for makepkg to expand at runtime
