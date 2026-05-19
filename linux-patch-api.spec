@@ -171,6 +171,11 @@ fi
 
 # Changelog
 %changelog
+* Mon May 18 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
+- Fix FQDN resolution: prioritize hostname -f over /etc/hostname
+- Fix display_name blank: add hostname field to enrollment request
+- Fix Arch/Alpine/RPM packaging: install scripts, user creation, directory creation
+
 * Thu Apr 09 2026 Echo <echo@moon-dragon.us> - 1.1.7-1
 - Initial production release
 - Secure mTLS-authenticated REST API for remote package management

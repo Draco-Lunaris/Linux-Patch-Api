@@ -1,3 +1,13 @@
+linux-patch-api (1.1.8-1) unstable; urgency=low
+
+  * Fix FQDN resolution: prioritize hostname -f over /etc/hostname for full domain
+  * Fix display_name blank: add hostname field to enrollment request
+  * Fix Arch package: add install scripts, user creation, directory creation
+  * Fix Alpine package: add install scripts, user creation, missing config.yaml
+  * Fix RPM package: dynamic version, config handling, tarball exclusions
+
+ -- Echo <echo@moon-dragon.us>  Mon, 18 May 2026 19:34:00 -0500
+
 linux-patch-api (1.1.7-1) unstable; urgency=low
 
   * Fix CI pipeline: add cargo clean and remove old .deb artifacts before packaging
