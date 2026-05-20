@@ -249,19 +249,46 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo dnf install -y gcc rpm-build systemd-devel pkg-config openssl-devel
+      - name: Clean stale RPM artifacts
+        run: |
+          rm -f ~/rpmbuild/RPMS/x86_64/linux-patch-api-*.rpm
+          rm -f releases/linux-patch-api-*.rpm
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
         run: |
           chmod +x build-rpm.sh
-          ./build-rpm.sh
+          SKIP_CARGO_BUILD=1 ./build-rpm.sh
+      - name: Verify RPM package
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+          RPM_FILE=$(ls ~/rpmbuild/RPMS/x86_64/linux-patch-api-${VERSION}-*.rpm 2>/dev/null | head -1)
+          if [ -z "$RPM_FILE" ]; then
+            echo "ERROR: RPM package not found for version $VERSION!"
+            ls -la ~/rpmbuild/RPMS/x86_64/ 2>/dev/null || echo "RPM directory empty or missing"
+            exit 1
+          fi
+          RPM_VERSION=$(rpm -qp --queryformat '%{VERSION}' "$RPM_FILE" 2>/dev/null || true)
+          echo "RPM file: $RPM_FILE"
+          echo "RPM version: $RPM_VERSION"
+          echo "Expected version: $VERSION"
+          if [ "$RPM_VERSION" != "$VERSION" ]; then
+            echo "ERROR: RPM version ($RPM_VERSION) does not match expected version ($VERSION)!"
+            exit 1
+          fi
+          echo "RPM verification passed"
       - name: Upload to Gitea Release
         if: github.ref_type == 'tag'
         env:
           GITEA_TOKEN: ${{ secrets.GITEATOKEN }}
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          FILE=$(ls ~/rpmbuild/RPMS/x86_64/*.rpm 2>/dev/null | head -1)
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+          FILE=$(ls ~/rpmbuild/RPMS/x86_64/linux-patch-api-${VERSION}-*.rpm 2>/dev/null | head -1)
+          if [ -z "$FILE" ]; then
+            echo "ERROR: No RPM found with version $VERSION for upload!"
+            exit 1
+          fi
           chmod +x scripts/upload-release.sh
           ./scripts/upload-release.sh "$TAG_NAME" "$FILE"
 

@@ -21,8 +21,7 @@ BuildArch:      x86_64
 # BuildRequires:  pkgconfig(systemd)
 
 # Runtime requirements
-Requires:       systemd
-Requires:       libsystemd
+Requires:       systemd-libs
 Requires:       openssl-libs
 Requires:       ca-certificates
 
@@ -45,10 +44,11 @@ Features:
 %prep
 %autosetup -n linux-patch-api-%{version}
 
-# Build
+# Build - no-op, binary is pre-built and included in source tarball
+# The binary is built by build-rpm.sh BEFORE creating the tarball,
+# so cargo does not need to be in rpmbuild's PATH.
 %build
-export RUSTFLAGS="-C target-cpu=native"
-cargo build --release --target x86_64-unknown-linux-gnu
+# Binary already built - nothing to do
 
 # Install
 %install
@@ -59,8 +59,8 @@ mkdir -p %{buildroot}/lib/systemd/system
 mkdir -p %{buildroot}/var/log/linux_patch_api
 mkdir -p %{buildroot}/var/lib/linux_patch_api
 
-# Install binary
-cp target/x86_64-unknown-linux-gnu/release/linux-patch-api %{buildroot}/usr/bin/
+# Install binary (pre-built, included in tarball at target/release/)
+cp target/release/linux-patch-api %{buildroot}/usr/bin/
 chmod 755 %{buildroot}/usr/bin/linux-patch-api
 
 # Install systemd service
@@ -149,6 +149,7 @@ fi
 
 # Files
 %files
+%defattr(-,root,root,-)
 /usr/bin/linux-patch-api
 /lib/systemd/system/linux-patch-api.service
 %config(noreplace) /etc/linux_patch_api/config.yaml.example
@@ -162,6 +163,15 @@ fi
 
 # Changelog
 %changelog
+* Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.14-1
+- Fix RPM packaging: pre-build binary before tarball (like Alpine/Arch pattern)
+- Fix rpmbuild can't find cargo in PATH - binary now included in source tarball
+- Fix config file ownership: add %defattr(-,root,root,-) in %files section
+- Fix Requires: libsystemd -> systemd-libs for Fedora compatibility
+- Remove Requires: systemd (not needed, may not exist in containers)
+- Add stale RPM cleanup and version verification to build-rpm.sh
+- Support SKIP_CARGO_BUILD=1 like Alpine/Arch builds
+
 * Wed May 20 2026 Echo <echo@moon-dragon.us> - 1.1.12-1
 - Add APK (Alpine Linux) package manager backend
 - Add machine-id generation to Alpine pre-install script
@@ -198,7 +208,3 @@ fi
 - Initial production release
 - Secure mTLS-authenticated REST API for remote package management
 - 15 API endpoints for package install/remove, patch application, system management
-- Asynchronous job processing with WebSocket status streaming
-- IP whitelist enforcement and comprehensive audit logging
-- Systemd integration with security hardening
-- Supports RHEL 8/9, CentOS 8/9, Fedora 38+

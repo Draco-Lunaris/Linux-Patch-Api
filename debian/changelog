@@ -1,3 +1,15 @@
+linux-patch-api (1.1.14) unstable; urgency=medium
+
+  * Fix RPM packaging: pre-build binary before tarball (like Alpine/Arch pattern)
+  * Fix rpmbuild can't find cargo in PATH - binary now included in source tarball
+  * Fix config file ownership: add %defattr(-,root,root,-) in %files section
+  * Fix Requires: libsystemd -> systemd-libs for Fedora compatibility
+  * Remove Requires: systemd (not needed, may not exist in containers)
+  * Add stale RPM cleanup and version verification to build-rpm.sh
+  * Support SKIP_CARGO_BUILD=1 like Alpine/Arch builds
+
+ -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 14:44:00 -0500
+
 linux-patch-api (1.1.13) unstable; urgency=medium
 
   * Fix APK backend detection for Alpine (/sbin/apk not /usr/bin/apk)
