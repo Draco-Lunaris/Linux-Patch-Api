@@ -1,3 +1,15 @@
+linux-patch-api (1.1.9-1) unstable; urgency=low
+
+  * Fix non-Ubuntu packages: align Arch, RPM, Alpine with Debian baseline
+  * Remove system user creation (service runs as root)
+  * Fix ownership to root:root across all platforms
+  * Fix Alpine: co-locate install script with APKBUILD
+  * Fix Arch: correct $startdir path in PKGBUILD
+  * Fix RPM: add runtime deps, comment BuildRequires for CI
+  * Add comprehensive installation docs for all platforms
+
+ -- Echo <echo@moon-dragon.us>  Tue, 19 May 2026 21:54:00 -0500
+
 linux-patch-api (1.1.8-1) unstable; urgency=low
 
   * Fix FQDN resolution: prioritize hostname -f over /etc/hostname for full domain

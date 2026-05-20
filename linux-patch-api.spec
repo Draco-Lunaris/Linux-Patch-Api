@@ -162,6 +162,15 @@ fi
 
 # Changelog
 %changelog
+* Tue May 19 2026 Echo <echo@moon-dragon.us> - 1.1.9-1
+- Fix non-Ubuntu packages: align Arch, RPM, Alpine with Debian baseline
+- Remove system user creation (service runs as root)
+- Fix ownership to root:root across all platforms
+- Fix Alpine: co-locate install script with APKBUILD
+- Fix Arch: correct $startdir path in PKGBUILD
+- Fix RPM: add runtime deps, comment BuildRequires for CI
+- Add comprehensive installation docs for all platforms
+
 * Tue May 19 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
 - Fix RPM packaging: runtime deps, match Debian install behavior, comment BuildRequires for CI
 - Remove system user creation (service runs as root per systemd unit)
