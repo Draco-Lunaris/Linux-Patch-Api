@@ -185,6 +185,13 @@ For detailed enrollment procedures, see [DEPLOYMENT_GUIDE.md - Self-Enrollment D
 
 ### Package Installation
 
+All platform packages produce identical installation results:
+- Creates `/etc/linux_patch_api/`, `/etc/linux_patch_api/certs/`, `/var/lib/linux_patch_api/`, `/var/log/linux_patch_api/`
+- Copies example configs to live configs if not already present
+- Enables the service (does not start automatically)
+- Sets correct permissions (750 on config dirs, 755 on data/log dirs)
+- Ownership: root:root (service runs as root)
+
 #### Debian/Ubuntu (.deb)
 
 ```bash
@@ -197,18 +204,101 @@ apt-get install -f -y
 # Verify installation
 systemctl status linux-patch-api
 linux-patch-api --version
+
+# Check installed files
+dpkg -L linux-patch-api
+
+# Remove package (keeping configs)
+dpkg -r linux-patch-api
+
+# Purge package (removing all configs)
+dpkg -P linux-patch-api
 ```
+
+**Prerequisites:** `systemd`, `libsystemd0`
+
+**Post-install:** The package automatically copies example configs, enables the service, and prints next steps. Configure `/etc/linux_patch_api/config.yaml` and place TLS certificates in `/etc/linux_patch_api/certs/` before starting.
 
 #### RHEL/CentOS/Fedora (.rpm)
 
 ```bash
-# Install the package
-rpm -ivh linux-patch-api-1.0.0-1.x86_64.rpm
+# Install the package (recommended - resolves dependencies automatically)
+dnf install -y ./linux-patch-api-1.0.0-1.el9.x86_64.rpm
+
+# Or with yum
+yum install -y ./linux-patch-api-1.0.0-1.el9.x86_64.rpm
+
+# Or with rpm (does NOT resolve dependencies)
+rpm -ivh linux-patch-api-1.0.0-1.el9.x86_64.rpm
 
 # Verify installation
 systemctl status linux-patch-api
 linux-patch-api --version
+
+# Check installed files
+rpm -ql linux-patch-api
+
+# Remove package
+rpm -e linux-patch-api
 ```
+
+**Prerequisites (auto-resolved with dnf/yum):** `systemd`, `libsystemd`, `openssl-libs`, `ca-certificates`
+
+**Post-install:** The package automatically creates directories, copies example configs, enables the service, and prints next steps. Configure `/etc/linux_patch_api/config.yaml` and place TLS certificates in `/etc/linux_patch_api/certs/` before starting.
+
+**Note:** Use `dnf install` or `yum install` instead of `rpm -ivh` to automatically resolve dependencies. The `rpm -ivh` command will fail if required packages are not already installed.
+
+#### Arch Linux (.pkg.tar.zst)
+
+```bash
+# Install the package
+sudo pacman -U ./linux-patch-api-1.0.0-1-x86_64.pkg.tar.zst
+
+# Verify installation
+systemctl status linux-patch-api
+linux-patch-api --version
+
+# Check installed files
+pacman -Ql linux-patch-api
+
+# Remove package
+sudo pacman -R linux-patch-api
+```
+
+**Prerequisites:** `systemd` (included by default on Arch)
+
+**Post-install:** The package automatically creates directories, copies example configs, enables the service, and prints next steps. Configure `/etc/linux_patch_api/config.yaml` and place TLS certificates in `/etc/linux_patch_api/certs/` before starting.
+
+**Note:** Arch uses systemd by default. The install hook runs `systemctl enable` but does not start the service. You must configure before starting.
+
+#### Alpine Linux (.apk)
+
+```bash
+# Install the package
+sudo apk add --allow-unstable ./linux-patch-api-1.0.0-r0.apk
+
+# Verify installation
+rc-service linux-patch-api status
+linux-patch-api --version
+
+# Check installed files
+apk info -L linux-patch-api
+
+# Remove package
+sudo apk del linux-patch-api
+```
+
+**Prerequisites:** `openrc` (included by default on Alpine)
+
+**Post-install:** The package automatically creates directories, copies example configs, adds the service to the default runlevel, and prints next steps. Configure `/etc/linux_patch_api/config.yaml` and place TLS certificates in `/etc/linux_patch_api/certs/` before starting.
+
+**Important differences from systemd-based systems:**
+- Alpine uses **OpenRC** instead of systemd. Use `rc-service` commands instead of `systemctl`
+- Start service: `rc-service linux-patch-api start`
+- Stop service: `rc-service linux-patch-api stop`
+- Check status: `rc-service linux-patch-api status`
+- The service is added to the `default` runlevel automatically on install
+- Service init script: `/etc/init.d/linux-patch-api`
 
 ### Manual Installation
 
@@ -216,32 +306,70 @@ For systems without package manager support:
 
 ```bash
 # Run interactive installer (requires root)
-./install.sh
+sudo ./install.sh
 ```
 
 The installer will:
 - Detect operating system
-- Create system user and group
-- Set up directory structure
-- Install binary and configuration files
+- Create directory structure (`/etc/linux_patch_api/`, `/var/lib/linux_patch_api/`, `/var/log/linux_patch_api/`)
+- Install binary to `/usr/bin/linux-patch-api`
+- Install example configs
 - Configure systemd service
+- Set correct permissions
 
 ### Building from Source
 
+#### Prerequisites (all platforms)
+
+- Rust toolchain (stable channel, 1.75+)
+- OpenSSL development headers
+- systemd development headers
+- C compiler (gcc)
+
+#### Build Debian Package (.deb)
+
 ```bash
-# Clone repository
-git clone https://gitea.internal/linux-patch-api.git
-cd linux-patch-api
-
-# Build release binary
-cargo build --release --target x86_64-unknown-linux-gnu
-
-# Build Debian package
-dpkg-buildpackage -us -uc -b
-
-# Or build RPM package
-rpmbuild -ba linux-patch-api.spec
+# On Debian/Ubuntu
+apt-get install -y build-essential debhelper pkg-config libsystemd-dev libssl-dev cargo rustc
+cargo build --release
+sudo dpkg-buildpackage -us -uc -b
 ```
+
+#### Build RPM Package (.rpm)
+
+```bash
+# On Fedora/RHEL/CentOS
+dnf install -y rpm-build cargo rust gcc openssl-devel systemd-devel pkgconfig
+cargo build --release --target x86_64-unknown-linux-gnu
+chmod +x build-rpm.sh
+./build-rpm.sh
+```
+
+**Note:** The RPM spec includes `BuildRequires` for native RPM build environments. When building in CI containers (where deps are pre-installed via apt-get), these are informational only.
+
+#### Build Arch Package (.pkg.tar.zst)
+
+```bash
+# On Arch Linux/Manjaro
+pacman -Syu --noconfirm rust cargo systemd git base-devel gcc
+cargo build --release
+chmod +x build-arch.sh
+SKIP_CARGO_BUILD=1 ./build-arch.sh
+```
+
+**Note:** The build script creates a `builduser` for `makepkg` when running as root (typical in CI). The `.install` hook handles directory creation, config copying, and service enablement.
+
+#### Build Alpine Package (.apk)
+
+```bash
+# On Alpine Linux 3.18+
+apk add --no-cache alpine-sdk rust cargo openssl openssl-dev elogind-dev musl-dev abuild gcc
+cargo build --release --target x86_64-unknown-linux-musl
+chmod +x build-alpine.sh
+SKIP_CARGO_BUILD=1 ./build-alpine.sh
+```
+
+**Important:** Alpine requires the `x86_64-unknown-linux-musl` target for static linking. The build script handles `abuild` key generation and runs as a `builduser` when executed as root.
 
 See [BUILD_PACKAGES.md](./BUILD_PACKAGES.md) for detailed build instructions.
 

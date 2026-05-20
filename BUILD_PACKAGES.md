@@ -1,6 +1,6 @@
 # Linux Patch API - Package Build Guide
 
-This document provides comprehensive instructions for building production-ready Debian (.deb) and RPM (.rpm) packages for the Linux Patch API.
+This document provides comprehensive instructions for building production-ready packages for the Linux Patch API across all supported platforms: Debian/Ubuntu (.deb), RHEL/CentOS/Fedora (.rpm), Arch Linux (.pkg.tar.zst), and Alpine Linux (.apk).
 
 ## Prerequisites
 
@@ -173,6 +173,152 @@ rpm -ql linux-patch-api
 rpm -e linux-patch-api
 ```
 
+## Building Arch Package (.pkg.tar.zst)
+
+### Quick Build
+
+```bash
+cd /path/to/linux_patch_api
+
+# Build release binary
+cargo build --release
+
+# Build Arch package
+chmod +x build-arch.sh
+SKIP_CARGO_BUILD=1 ./build-arch.sh
+
+# Package will be created in releases/
+ls -la releases/*.pkg.tar.zst
+```
+
+### Detailed Build Process
+
+```bash
+# 1. Install build dependencies (Arch Linux)
+sudo pacman -Syu --noconfirm rust cargo systemd git base-devel gcc
+
+# 2. Build release binary
+cargo build --release
+
+# 3. Run build script
+chmod +x build-arch.sh
+./build-arch.sh
+
+# 4. Verify package contents
+bsdtar -tf releases/linux-patch-api-*.pkg.tar.zst
+
+# 5. Verify package info
+pacman -Qi releases/linux-patch-api-*.pkg.tar.zst
+```
+
+### Install Script Hooks
+
+The Arch package includes an `.install` file (`configs/linux-patch-api.install`) that runs automatically on install:
+
+- **post_install**: Creates directories, copies example configs, enables systemd service
+- **post_upgrade**: Reloads systemd daemon
+- **pre_remove**: Stops and disables service
+- **post_remove**: Cleans up empty directories
+
+### Installation Test
+
+```bash
+# Install the package
+sudo pacman -U ./releases/linux-patch-api-*.pkg.tar.zst
+
+# Verify installation
+systemctl status linux-patch-api
+linux-patch-api --version
+
+# Check installed files
+pacman -Ql linux-patch-api
+
+# Verify config files exist
+ls -la /etc/linux_patch_api/
+
+# Remove package
+sudo pacman -R linux-patch-api
+```
+
+**Note:** The build script creates a `builduser` for `makepkg` when running as root (typical in CI environments). The `.install` hook handles directory creation, config copying, and service enablement.
+
+## Building Alpine Package (.apk)
+
+### Quick Build
+
+```bash
+cd /path/to/linux_patch_api
+
+# Build release binary (MUSL target for Alpine)
+cargo build --release --target x86_64-unknown-linux-musl
+
+# Build Alpine package
+chmod +x build-alpine.sh
+SKIP_CARGO_BUILD=1 ./build-alpine.sh
+
+# Package will be created in releases/
+ls -la releases/*.apk
+```
+
+### Detailed Build Process
+
+```bash
+# 1. Install build dependencies (Alpine Linux)
+apk add --no-cache alpine-sdk rust cargo openssl openssl-dev elogind-dev musl-dev abuild gcc
+
+# 2. Add Rust MUSL target
+rustup target add x86_64-unknown-linux-musl
+
+# 3. Build release binary
+cargo build --release --target x86_64-unknown-linux-musl
+
+# 4. Run build script
+chmod +x build-alpine.sh
+./build-alpine.sh
+
+# 5. Verify package contents
+apk verify releases/*.apk
+
+# 6. List package contents
+tar -tzf releases/*.apk
+```
+
+### Install Script Hooks
+
+The Alpine package includes an install script (`configs/linux-patch-api.apk-install`) that runs automatically on install:
+
+- **pre_install**: Creates directories, sets ownership and permissions
+- **post_install**: Copies example configs, adds service to default runlevel
+- **pre_deinstall**: Stops and removes service from runlevel
+- **post_deinstall**: Cleans up empty directories
+
+### Installation Test
+
+```bash
+# Install the package
+sudo apk add --allow-unstable ./releases/linux-patch-api-*.apk
+
+# Verify installation
+rc-service linux-patch-api status
+linux-patch-api --version
+
+# Check installed files
+apk info -L linux-patch-api
+
+# Verify config files exist
+ls -la /etc/linux_patch_api/
+
+# Remove package
+sudo apk del linux-patch-api
+```
+
+**Important:** Alpine uses **OpenRC** instead of systemd. Key differences:
+- Start service: `rc-service linux-patch-api start`
+- Stop service: `rc-service linux-patch-api stop`
+- Check status: `rc-service linux-patch-api status`
+- Service init script: `/etc/init.d/linux-patch-api`
+- The `abuild` tool generates signing keys automatically for CI builds
+
 ## Using the Interactive Installer
 
 For manual deployment without package managers:
@@ -209,15 +355,17 @@ The installer will:
 | `/var/lib/linux_patch_api/` | Data directory | 755 |
 | `/var/log/linux_patch_api/` | Log directory | 755 |
 
-### System User/Group
+### Service Account
 
 | Property | Value |
 |----------|-------|
-| User | linux-patch-api |
-| Group | linux-patch-api |
+| User | root |
+| Group | root |
 | Home | /var/lib/linux_patch_api |
-| Shell | /usr/sbin/nologin |
-| Type | System account |
+| Shell | N/A (systemd service) |
+| Type | Runs as root (required for package management) |
+
+**Note:** The service runs as root because package management operations (apt, dnf, apk, pacman) require root privileges. Security is provided by mTLS + IP whitelist, not process isolation.
 
 ## Supported Distributions
 
@@ -239,6 +387,19 @@ The installer will:
 | Fedora | 38+ | ✅ Supported |
 | AlmaLinux | 8, 9 | ✅ Supported |
 | Rocky Linux | 8, 9 | ✅ Supported |
+
+### Arch Package (.pkg.tar.zst)
+
+| Distribution | Versions | Status |
+|--------------|----------|--------|
+| Arch Linux | Rolling | ✅ Supported |
+| Manjaro | Rolling | ✅ Supported |
+
+### Alpine Package (.apk)
+
+| Distribution | Versions | Status |
+|--------------|----------|--------|
+| Alpine Linux | 3.18+ | ✅ Supported |
 
 ## Troubleshooting
 
@@ -276,15 +437,84 @@ cat ~/rpmbuild/BUILDROOT/*/var/log/rpmbuild.log
 dnf install -y systemd-devel pkgconfig
 ```
 
+### Arch Package Issues
+
+**Error: `makepkg: cannot run as root`**
+```bash
+# The build script handles this automatically by creating builduser
+# If running manually:
+useradd -m builduser
+su - builduser -c "cd /path/to/repo && makepkg -f --noconfirm"
+```
+
+**Error: `install script not found`**
+```bash
+# Ensure linux-patch-api.install is in the same directory as PKGBUILD
+ls -la configs/linux-patch-api.install
+# The build script copies it automatically
+```
+
+**Error: `Permission denied` on config files**
+```bash
+# Verify ownership is root:root
+ls -la /etc/linux_patch_api/
+# Fix if needed:
+sudo chown -R root:root /etc/linux_patch_api/
+sudo chmod 750 /etc/linux_patch_api /etc/linux_patch_api/certs
+```
+
+### Alpine Package Issues
+
+**Error: `abuild: UNTRUSTED signature`**
+```bash
+# The build script handles key generation automatically
+# If running manually:
+abuild-keygen -a -n
+cp /root/.abuild/*.rsa.pub /etc/apk/keys/
+```
+
+**Error: `apk add: ERROR: failed to create directory`**
+```bash
+# Verify the install script ran correctly
+ls -la /etc/linux_patch_api/
+ls -la /var/lib/linux_patch_api/
+# Manually create if needed:
+sudo mkdir -p /etc/linux_patch_api/certs /var/lib/linux_patch_api /var/log/linux_patch_api
+```
+
+**Error: `rc-service: service not found`**
+```bash
+# Verify the init script exists
+ls -la /etc/init.d/linux-patch-api
+# Re-add to default runlevel
+sudo rc-update add linux-patch-api default
+```
+
 ### Service Issues
 
-**Service fails to start:**
+**Service fails to start (systemd):**
 ```bash
 # Check service status
 systemctl status linux-patch-api
 
 # View logs
 journalctl -u linux-patch-api -f
+
+# Check configuration
+linux-patch-api --config /etc/linux_patch_api/config.yaml --check
+
+# Verify certificates
+ls -la /etc/linux_patch_api/certs/
+```
+
+**Service fails to start (OpenRC/Alpine):**
+```bash
+# Check service status
+rc-service linux-patch-api status
+
+# View logs
+cat /var/log/linux_patch_api/linux-patch-api.log
+cat /var/log/linux_patch_api/linux-patch-api.err
 
 # Check configuration
 linux-patch-api --config /etc/linux_patch_api/config.yaml --check
@@ -383,7 +613,7 @@ jobs:
 - Packages are signed with maintainer GPG key for production deployments
 - All maintainer scripts run with `set -e` for fail-fast behavior
 - Configuration files are marked as conffiles to preserve user modifications
-- System user has minimal privileges (nologin shell, no home directory)
+- Service runs as root (required for package management operations)
 - Directory permissions follow principle of least privilege
 - TLS certificates should be replaced with CA-signed certs in production
 
