@@ -1,0 +1,15 @@
+#!/bin/sh
+# Alpine Linux pre-deinstall script for linux-patch-api
+# Runs before package files are removed
+# Matches Debian prerm behavior: stop and disable service
+
+# Stop the service if running
+if rc-service linux-patch-api status >/dev/null 2>&1; then
+    rc-service linux-patch-api stop
+    echo "Service stopped"
+else
+    echo "Service was not running"
+fi
+
+# Disable the service
+rc-update del linux-patch-api default 2>/dev/null || true

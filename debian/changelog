@@ -1,3 +1,12 @@
+linux-patch-api (1.1.10-1) unstable; urgency=low
+
+  * Fix Alpine install scripts: use separate files with valid abuild suffixes
+  * Root cause: .apk-install is not a valid abuild suffix (abuild silently fails)
+  * Correct format: pkgname.pre-install, .post-install, .pre-deinstall, .post-deinstall
+  * Verified on actual Alpine runner: install script suffixes now pass abuild validation
+
+ -- Echo <echo@moon-dragon.us>  Wed, 20 May 2026 07:43:00 -0500
+
 linux-patch-api (1.1.9-1) unstable; urgency=low
 
   * Fix non-Ubuntu packages: align Arch, RPM, Alpine with Debian baseline

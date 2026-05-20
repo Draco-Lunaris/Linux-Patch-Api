@@ -1,0 +1,10 @@
+#!/bin/sh
+# Alpine Linux post-deinstall script for linux-patch-api
+# Runs after package files are removed
+# Matches Debian postrm behavior: clean up empty directories
+
+# Remove directories only if empty (preserve user data on reinstall)
+rmdir /var/lib/linux_patch_api 2>/dev/null || true
+rmdir /var/log/linux_patch_api 2>/dev/null || true
+
+echo "linux-patch-api removed"

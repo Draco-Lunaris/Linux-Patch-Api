@@ -70,18 +70,21 @@ cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml.e
 
 # Prepare workspace for abuild
 WORKSPACE_DIR=/home/builduser/repo
+rm -rf "$WORKSPACE_DIR"
 mkdir -p "$WORKSPACE_DIR"
-
-# Copy install script to workspace (must be co-located with APKBUILD)
-cp configs/linux-patch-api.apk-install "$WORKSPACE_DIR"/linux-patch-api.apk-install
 
 # Copy package directory to workspace
 cp -r "$PKGDIR" "$WORKSPACE_DIR"/apk-package
 
-# Copy entire repo to workspace for source references
-cp -r . "$WORKSPACE_DIR"/src/
+# Copy install scripts to workspace (must be co-located with APKBUILD)
+# Alpine abuild requires SEPARATE files with valid suffixes:
+#   pkgname.pre-install, pkgname.post-install, pkgname.pre-deinstall, pkgname.post-deinstall
+cp configs/linux-patch-api.pre-install "$WORKSPACE_DIR"/linux-patch-api.pre-install
+cp configs/linux-patch-api.post-install "$WORKSPACE_DIR"/linux-patch-api.post-install
+cp configs/linux-patch-api.pre-deinstall "$WORKSPACE_DIR"/linux-patch-api.pre-deinstall
+cp configs/linux-patch-api.post-deinstall "$WORKSPACE_DIR"/linux-patch-api.post-deinstall
 
-# Create APKBUILD in workspace directory (co-located with install script)
+# Create APKBUILD in workspace directory (co-located with install scripts)
 echo "Creating APKBUILD..."
 cat > "$WORKSPACE_DIR"/APKBUILD << EOF
 pkgname=linux-patch-api
@@ -93,7 +96,7 @@ arch="x86_64"
 license="MIT"
 makedepends=""
 depends="openrc"
-install="linux-patch-api.apk-install"
+install="linux-patch-api.pre-install linux-patch-api.post-install linux-patch-api.pre-deinstall linux-patch-api.post-deinstall"
 subpackages=""
 source=""
 
@@ -141,16 +144,15 @@ if [ "$(id -u)" = "0" ]; then
     cp /home/builduser/.abuild/*.rsa.pub /etc/apk/keys/ 2>/dev/null || true
     
     # Run abuild as builduser in workspace directory
-    # Use || true because index update may fail but APK is still created
-    su - builduser -c "cd $WORKSPACE_DIR && abuild checksum && abuild -d -F" || true
+    su - builduser -c "cd $WORKSPACE_DIR && abuild checksum && abuild -d"
     
     # Copy APK from builduser packages to releases
     mkdir -p releases
-    cp /home/builduser/packages/x86_64/*.apk releases/ 2>/dev/null || cp /home/builduser/packages/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
+    cp /home/builduser/packages/home/x86_64/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
 else
     cd "$WORKSPACE_DIR"
     abuild checksum
-    abuild -F -r
+    abuild -r
     cd -
     mkdir -p releases
     cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || true
@@ -161,4 +163,4 @@ echo "=== Build Complete ==="
 echo "Package: releases/linux-patch-api-*.apk"
 echo ""
 echo "Install with:"
-echo "  sudo apk add --allow-unstable ./releases/linux-patch-api-*.apk"
+echo "  sudo apk add ./releases/linux-patch-api-*.apk"

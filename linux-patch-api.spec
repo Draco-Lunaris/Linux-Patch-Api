@@ -162,6 +162,12 @@ fi
 
 # Changelog
 %changelog
+* Wed May 20 2026 Echo <echo@moon-dragon.us> - 1.1.10-1
+- Fix Alpine install scripts: use separate files with valid abuild suffixes
+- Root cause: .apk-install is not a valid abuild suffix (abuild silently fails)
+- Correct format: pkgname.pre-install, .post-install, .pre-deinstall, .post-deinstall
+- Verified on actual Alpine runner: install script suffixes now pass abuild validation
+
 * Tue May 19 2026 Echo <echo@moon-dragon.us> - 1.1.9-1
 - Fix non-Ubuntu packages: align Arch, RPM, Alpine with Debian baseline
 - Remove system user creation (service runs as root)

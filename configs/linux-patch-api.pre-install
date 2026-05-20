@@ -1,0 +1,19 @@
+#!/bin/sh
+# Alpine Linux pre-install script for linux-patch-api
+# Runs before package files are laid down
+# Matches Debian preinst behavior: create directories, set permissions
+
+# Create required directories
+mkdir -p /etc/linux_patch_api/certs
+mkdir -p /var/lib/linux_patch_api
+mkdir -p /var/log/linux_patch_api
+
+# Set proper ownership (service runs as root)
+chown -R root:root /var/lib/linux_patch_api
+chown -R root:root /var/log/linux_patch_api
+
+# Set secure permissions
+chmod 750 /etc/linux_patch_api
+chmod 750 /etc/linux_patch_api/certs
+chmod 755 /var/lib/linux_patch_api
+chmod 755 /var/log/linux_patch_api
