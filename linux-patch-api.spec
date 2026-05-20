@@ -162,6 +162,12 @@ fi
 
 # Changelog
 %changelog
+* Wed May 20 2026 Echo <echo@moon-dragon.us> - 1.1.12-1
+- Add APK (Alpine Linux) package manager backend
+- Add machine-id generation to Alpine pre-install script
+- Fix OpenRC init script ownership (root:root)
+
+
 * Wed May 20 2026 Echo <echo@moon-dragon.us> - 1.1.10-1
 - Fix Alpine install scripts: use separate files with valid abuild suffixes
 - Root cause: .apk-install is not a valid abuild suffix (abuild silently fails)

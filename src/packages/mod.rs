@@ -1,7 +1,7 @@
 //! Packages Module - Package Manager Backend
 //!
 //! Provides abstraction layer for package management operations.
-//! Supports apt/dpkg (Debian/Ubuntu) with pluggable backend architecture.
+//! Supports apt/dpkg (Debian/Ubuntu) and apk (Alpine Linux) with pluggable backend architecture.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -670,6 +670,508 @@ impl Default for AptBackend {
     }
 }
 
+/// APK package manager backend (Alpine Linux)
+pub struct ApkBackend {
+    _marker: std::marker::PhantomData<()>,
+}
+
+impl ApkBackend {
+    pub fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Run apk command and capture output
+    fn run_apk(&self, args: &[&str]) -> Result<String> {
+        // Service runs as root on Alpine - no sudo needed for apk commands
+        let output = Command::new("apk")
+            .args(args)
+            .output()
+            .context("Failed to execute apk command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("apk command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Parse name and version from apk package identifier (name-version format).
+    /// Alpine package names can contain hyphens (e.g., "gcc-gnat"), so we find
+    /// the first hyphen followed by a digit to separate name from version.
+    fn parse_name_version(&self, ident: &str) -> (String, String) {
+        let bytes = ident.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                return (ident[..i].to_string(), ident[i + 1..].to_string());
+            }
+        }
+        // Fallback: no version separator found
+        (ident.to_string(), String::new())
+    }
+
+    /// Parse package list from `apk list --installed` output.
+    /// Format: {name}-{version} [{repo}] {description}
+    fn parse_apk_package_list(&self, output: &str) -> Vec<Package> {
+        let mut packages = Vec::new();
+
+        for line in output.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // Split on " [" to separate package identifier from repo and description
+            let (ident, rest) = if let Some(pos) = line.find(" [") {
+                (&line[..pos], &line[pos + 2..])
+            } else if let Some(pos) = line.find(' ') {
+                (&line[..pos], &line[pos + 1..])
+            } else {
+                // No separator found, treat entire line as identifier
+                let (name, version) = self.parse_name_version(line.trim());
+                packages.push(Package {
+                    name,
+                    version,
+                    status: PackageStatus::Installed,
+                    upgradable: false,
+                    latest_version: None,
+                    description: String::new(),
+                    dependencies: Vec::new(),
+                    reverse_dependencies: Vec::new(),
+                    install_date: None,
+                    size_installed: None,
+                });
+                continue;
+            };
+
+            let (name, version) = self.parse_name_version(ident);
+
+            // Parse rest: "{repo}] {description}" or just "{description}"
+            let description = if let Some(bracket_end) = rest.find("] ") {
+                rest[bracket_end + 2..].to_string()
+            } else if let Some(bracket_end) = rest.find(']') {
+                rest[bracket_end + 1..].trim().to_string()
+            } else {
+                rest.to_string()
+            };
+
+            packages.push(Package {
+                name,
+                version,
+                status: PackageStatus::Installed,
+                upgradable: false,
+                latest_version: None,
+                description,
+                dependencies: Vec::new(),
+                reverse_dependencies: Vec::new(),
+                install_date: None,
+                size_installed: None,
+            });
+        }
+
+        packages
+    }
+
+    /// Parse detailed package info from `apk info -a {name}` output.
+    /// Output format has section headers like:
+    ///   {name}-{version} description:
+    ///   the description text
+    ///   {name}-{version} installed size:
+    ///   32768
+    fn parse_apk_info(
+        &self,
+        output: &str,
+        name: &str,
+        status: PackageStatus,
+    ) -> Result<Option<Package>> {
+        let mut version = String::new();
+        let mut description = String::new();
+        let mut dependencies = Vec::new();
+        let mut reverse_dependencies = Vec::new();
+        let mut size_installed = None;
+        let mut current_field: Option<&str> = None;
+
+        for line in output.lines() {
+            if line.contains(" description:") {
+                current_field = Some("description");
+                // Extract version from the header line
+                let header = line.split(" description:").next().unwrap_or("");
+                let (parsed_name, v) = self.parse_name_version(header.trim());
+                if parsed_name == name || version.is_empty() {
+                    version = v;
+                }
+            } else if line.contains(" webpage:") {
+                current_field = Some("webpage");
+            } else if line.contains(" installed size:") {
+                current_field = Some("installed_size");
+                // Size might be on the same line after the header
+                if let Some(pos) = line.find(" installed size:") {
+                    let size_str = line[pos + " installed size:".len()..].trim();
+                    if !size_str.is_empty() {
+                        size_installed = Some(format!("{} bytes", size_str));
+                    }
+                }
+            } else if line.contains(" dependencies:") {
+                current_field = Some("dependencies");
+            } else if line.contains(" provides:") {
+                current_field = Some("provides");
+            } else if line.contains(" required by:") {
+                current_field = Some("required_by");
+            } else if !line.trim().is_empty() {
+                match current_field {
+                    Some("description") if description.is_empty() => {
+                        description = line.trim().to_string();
+                    }
+                    Some("dependencies") => {
+                        for dep in line.split_whitespace() {
+                            // APK dependencies use prefixes like "so:", "cmd:", "pc:" - strip them
+                            let dep_name = dep
+                                .trim_start_matches("so:")
+                                .trim_start_matches("cmd:")
+                                .trim_start_matches("pc:");
+                            dependencies.push(dep_name.to_string());
+                        }
+                    }
+                    Some("required_by") => {
+                        for req in line.split_whitespace() {
+                            let (req_name, _) = self.parse_name_version(req);
+                            reverse_dependencies.push(req_name);
+                        }
+                    }
+                    Some("installed_size") => {
+                        let size_str = line.trim();
+                        if !size_str.is_empty() && size_installed.is_none() {
+                            size_installed = Some(format!("{} bytes", size_str));
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                current_field = None;
+            }
+        }
+
+        // Check if upgradable
+        let upgradable = self
+            .run_apk(&["list", "--upgradable", name])
+            .map(|o| !o.trim().is_empty() && o.contains(name))
+            .unwrap_or(false);
+
+        let latest_version = if upgradable {
+            // Try to get the candidate version from apk info
+            self.run_apk(&["info", name]).ok().and_then(|o| {
+                o.lines().next().and_then(|l| {
+                    let (_, v) = self.parse_name_version(l.trim());
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(v)
+                    }
+                })
+            })
+        } else {
+            Some(version.clone())
+        };
+
+        Ok(Some(Package {
+            name: name.to_string(),
+            version,
+            status,
+            upgradable,
+            latest_version,
+            description,
+            dependencies,
+            reverse_dependencies,
+            install_date: None,
+            size_installed,
+        }))
+    }
+}
+
+impl PackageManagerBackend for ApkBackend {
+    fn list_packages(&self, filter: Option<&str>) -> Result<Vec<Package>> {
+        let args = match filter {
+            Some(f) => vec!["list", "--installed", f],
+            None => vec!["list", "--installed"],
+        };
+
+        let output = self.run_apk(&args)?;
+        Ok(self.parse_apk_package_list(&output))
+    }
+
+    fn get_package(&self, name: &str) -> Result<Option<Package>> {
+        // Validate package name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") || name.contains(' ') {
+            return Err(anyhow::anyhow!("Invalid package name: {}", name));
+        }
+
+        // Check if package is installed using apk list --installed
+        let list_output = self.run_apk(&["list", "--installed", name])?;
+
+        if !list_output.trim().is_empty() && list_output.contains(name) {
+            // Package is installed, get detailed info
+            let info_output = self.run_apk(&["info", "-a", name])?;
+            return self.parse_apk_info(&info_output, name, PackageStatus::Installed);
+        }
+
+        // Check if package is available (not installed) using apk search
+        let search_output = self.run_apk(&["search", name]);
+        if let Ok(output) = search_output {
+            if !output.trim().is_empty() && output.contains(name) {
+                // Parse first matching line
+                if let Some(first_line) = output.lines().next() {
+                    let (pkg_name, version) = self.parse_name_version(first_line.trim());
+                    return Ok(Some(Package {
+                        name: pkg_name,
+                        version,
+                        status: PackageStatus::Available,
+                        upgradable: false,
+                        latest_version: None,
+                        description: String::new(),
+                        dependencies: Vec::new(),
+                        reverse_dependencies: Vec::new(),
+                        install_date: None,
+                        size_installed: None,
+                    }));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn install_packages(&self, packages: &[PackageSpec], options: &InstallOptions) -> Result<()> {
+        let mut args: Vec<String> = vec!["add".to_string()];
+
+        if options.force {
+            args.push("--force".to_string());
+        }
+
+        for pkg in packages {
+            let pkg_arg = if let Some(version) = &pkg.version {
+                format!("{}={}", pkg.name, version)
+            } else {
+                pkg.name.clone()
+            };
+            args.push(pkg_arg);
+        }
+
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.run_apk(&args_ref)?;
+        info!(
+            "Installed packages: {:?}",
+            packages.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    fn update_package(&self, name: &str) -> Result<()> {
+        self.run_apk(&["upgrade", name])?;
+        info!("Updated package: {}", name);
+        Ok(())
+    }
+
+    fn remove_package(&self, name: &str, _purge: bool) -> Result<()> {
+        // APK doesn't have a purge concept - just remove the package
+        self.run_apk(&["del", name])?;
+        info!("Removed package: {}", name);
+        Ok(())
+    }
+
+    fn list_patches(&self) -> Result<Vec<Patch>> {
+        let output = self.run_apk(&["list", "--upgradable"])?;
+        let mut patches = Vec::new();
+
+        for line in output.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // Parse upgradable package line
+            // Format: {name}-{new_version} < {old_version} [{repo}] {description}
+            // or fallback: {name}-{new_version} [{repo}] {description}
+            let (ident, current_version) = if let Some(pos) = line.find(" < ") {
+                let ident = &line[..pos];
+                let rest = &line[pos + 3..];
+                // Old version ends at the next space or bracket
+                let cv = if let Some(space_pos) = rest.find(' ') {
+                    rest[..space_pos].to_string()
+                } else {
+                    rest.to_string()
+                };
+                (ident, cv)
+            } else if let Some(pos) = line.find(' ') {
+                (&line[..pos], String::new())
+            } else {
+                continue;
+            };
+
+            let (name, available_version) = self.parse_name_version(ident);
+
+            // Determine severity based on package name heuristics
+            let severity =
+                if name.contains("kernel") || name.contains("ssl") || name.contains("security") {
+                    "critical".to_string()
+                } else if name.contains("lib") {
+                    "high".to_string()
+                } else {
+                    "medium".to_string()
+                };
+
+            patches.push(Patch {
+                name,
+                current_version,
+                available_version,
+                severity,
+                description: String::from("Package update available"),
+                cve_ids: Vec::new(),
+                requires_reboot: false,
+            });
+        }
+
+        Ok(patches)
+    }
+
+    fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
+        match packages {
+            Some(pkgs) => {
+                let mut args: Vec<&str> = vec!["upgrade"];
+                for pkg in pkgs {
+                    args.push(pkg);
+                }
+                self.run_apk(&args)?;
+                info!("Applied patches for packages: {:?}", packages);
+            }
+            None => {
+                self.run_apk(&["upgrade"])?;
+                info!("Applied all available patches");
+            }
+        }
+        Ok(())
+    }
+
+    fn get_system_info(&self) -> Result<SystemInfo> {
+        let hostname = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let os_info = std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .map(|content| {
+                let mut os = "Linux".to_string();
+                let mut version = "unknown".to_string();
+
+                for line in content.lines() {
+                    if line.starts_with("PRETTY_NAME=") {
+                        os = line
+                            .trim_start_matches("PRETTY_NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("NAME=") {
+                        os = line
+                            .trim_start_matches("NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION=") {
+                        version = line
+                            .trim_start_matches("VERSION=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION_ID=") {
+                        version = line
+                            .trim_start_matches("VERSION_ID=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    }
+                }
+
+                (os, version)
+            })
+            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
+
+        let kernel = Command::new("uname")
+            .arg("-r")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let architecture = Command::new("uname")
+            .arg("-m")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Alpine uses /boot/.reboot-required for reboot indicator,
+        // also check /var/run/reboot-required as a fallback
+        let pending_reboot = std::path::Path::new("/boot/.reboot-required").exists()
+            || std::path::Path::new("/var/run/reboot-required").exists();
+
+        Ok(SystemInfo {
+            hostname,
+            os: os_info.0,
+            os_version: os_info.1,
+            kernel,
+            architecture,
+            last_update_check: None,
+            last_update_apply: None,
+            pending_reboot,
+        })
+    }
+
+    fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
+        if delay_seconds > 0 {
+            // Use shutdown command for delayed reboot (converts seconds to minutes, minimum 1)
+            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
+            info!(
+                "Scheduling system reboot in {} minutes (requested {} seconds)",
+                delay_minutes, delay_seconds
+            );
+            Command::new("shutdown")
+                .args(["-r", &format!("+{}", delay_minutes)])
+                .status()
+                .context("Failed to schedule delayed reboot")?;
+            info!("System reboot scheduled in {} minutes", delay_minutes);
+        } else {
+            // Alpine uses `reboot` command, not `systemctl reboot`
+            info!("Initiating immediate system reboot");
+            Command::new("reboot")
+                .status()
+                .context("Failed to execute reboot command")?;
+            info!("System reboot initiated");
+        }
+
+        Ok(())
+    }
+
+    fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
+        // Validate service name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") {
+            return Err(anyhow::anyhow!("Invalid service name: {}", name));
+        }
+
+        // Alpine uses OpenRC for service management
+        get_openrc_service_status(name)
+    }
+}
+
+impl Default for ApkBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Package manager factory
 pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
     // Detect package manager and return appropriate backend
@@ -679,8 +1181,7 @@ pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
         // TODO: Implement DnfBackend for RHEL/CentOS/Fedora
         Err(anyhow::anyhow!("DNF backend not yet implemented"))
     } else if std::path::Path::new("/usr/bin/apk").exists() {
-        // TODO: Implement ApkBackend for Alpine
-        Err(anyhow::anyhow!("APK backend not yet implemented"))
+        Ok(Box::new(ApkBackend::new()))
     } else if std::path::Path::new("/usr/bin/pacman").exists() {
         // TODO: Implement PacmanBackend for Arch
         Err(anyhow::anyhow!("Pacman backend not yet implemented"))
@@ -704,5 +1205,56 @@ mod tests {
         let status = PackageStatus::Installed;
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("Installed"));
+    }
+
+    #[test]
+    fn test_apk_backend_creation() {
+        let _backend = ApkBackend::new();
+        // Test passes if backend creation doesn't panic
+    }
+
+    #[test]
+    fn test_apk_parse_name_version_simple() {
+        let backend = ApkBackend::new();
+        let (name, version) = backend.parse_name_version("bash-5.2.21-r0");
+        assert_eq!(name, "bash");
+        assert_eq!(version, "5.2.21-r0");
+    }
+
+    #[test]
+    fn test_apk_parse_name_version_hyphenated() {
+        let backend = ApkBackend::new();
+        // Package names with hyphens like gcc-gnat
+        let (name, version) = backend.parse_name_version("gcc-gnat-13.2.1-r0");
+        assert_eq!(name, "gcc-gnat");
+        assert_eq!(version, "13.2.1-r0");
+    }
+
+    #[test]
+    fn test_apk_parse_name_version_no_version() {
+        let backend = ApkBackend::new();
+        let (name, version) = backend.parse_name_version("nohyphen");
+        assert_eq!(name, "nohyphen");
+        assert_eq!(version, "");
+    }
+
+    #[test]
+    fn test_apk_parse_name_version_multiple_hyphens() {
+        let backend = ApkBackend::new();
+        let (name, version) = backend.parse_name_version("perl-net-ssleay-1.94-r0");
+        assert_eq!(name, "perl-net-ssleay");
+        assert_eq!(version, "1.94-r0");
+    }
+
+    #[test]
+    fn test_apk_parse_package_list() {
+        let backend = ApkBackend::new();
+        let output = "bash-5.2.21-r0 [main] The GNU Bourne Again shell\nopenssl-3.1.4-r0 [main] Toolkit for SSL/TLS";
+        let packages = backend.parse_apk_package_list(output);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name, "bash");
+        assert_eq!(packages[0].version, "5.2.21-r0");
+        assert_eq!(packages[1].name, "openssl");
+        assert_eq!(packages[1].version, "3.1.4-r0");
     }
 }

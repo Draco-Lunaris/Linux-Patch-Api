@@ -1,3 +1,11 @@
+linux-patch-api (1.1.12) unstable; urgency=medium
+
+  * Add APK (Alpine Linux) package manager backend
+  * Add machine-id generation to Alpine pre-install script
+  * Fix OpenRC init script ownership (root:root)
+
+ -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 12:25:00 -0500
+
 linux-patch-api (1.1.10-1) unstable; urgency=low
 
   * Fix Alpine install scripts: use separate files with valid abuild suffixes
@@ -129,3 +137,11 @@ linux-patch-api (0.3.2-1) unstable; urgency=low
   * Bump version to 0.3.2
 
  -- Echo <echo@moon-dragon.us>  Fri, 02 May 2026 21:30:00 -0500
+linux-patch-api (1.1.12) unstable; urgency=medium
+
+  * Add APK (Alpine Linux) package manager backend
+  * Add machine-id generation to Alpine pre-install script
+  * Fix OpenRC init script ownership (root:root)
+
+ -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 12:25:00 -0500
+
