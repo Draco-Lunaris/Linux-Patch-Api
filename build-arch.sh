@@ -14,6 +14,11 @@ if ! command -v makepkg &> /dev/null; then
     exit 1
 fi
 
+# Clean stale packages from previous builds
+rm -f releases/linux-patch-api-*.pkg.tar.zst 2>/dev/null || true
+rm -f /home/builduser/repo/releases/linux-patch-api-*.pkg.tar.zst 2>/dev/null || true
+rm -f /home/builduser/repo/*.pkg.tar.zst 2>/dev/null || true
+
 # Build release binary
 if [ -z "$SKIP_CARGO_BUILD" ]; then
     echo "Building release binary..."

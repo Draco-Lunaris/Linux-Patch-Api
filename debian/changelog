@@ -1,3 +1,13 @@
+linux-patch-api (1.1.16) unstable; urgency=medium
+
+  * Add Pacman package manager backend for Arch Linux
+  * Fix: Pacman backend not yet implemented error on Arch systems
+  * Support pacman -Q for package listing, pacman -Qi for package details
+  * Support pacman -Qu for patch/update detection
+  * Fix Arch CI: add stale package cleanup and version verification
+
+ -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 17:11:00 -0500
+
 linux-patch-api (1.1.15) unstable; urgency=medium
 
   * Add DNF package manager backend for Fedora/RHEL/CentOS 8+

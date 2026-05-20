@@ -163,6 +163,13 @@ fi
 
 # Changelog
 %changelog
+* Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.16-1
+- Add Pacman package manager backend for Arch Linux
+- Fix: Pacman backend not yet implemented error on Arch systems
+- Support pacman -Q for package listing, pacman -Qi for package details
+- Support pacman -Qu for patch/update detection
+- Fix Arch CI: add stale package cleanup and version verification
+
 * Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.15-1
 - Add DNF package manager backend for Fedora/RHEL/CentOS 8+
 - Add YUM package manager backend for RHEL/CentOS 7

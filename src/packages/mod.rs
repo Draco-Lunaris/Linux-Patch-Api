@@ -1,8 +1,8 @@
 //! Packages Module - Package Manager Backend
 //!
 //! Provides abstraction layer for package management operations.
-//! Supports apt/dpkg (Debian/Ubuntu), apk (Alpine Linux), dnf (Fedora/RHEL), and yum (CentOS 7)
-//! with pluggable backend architecture.
+//! Supports apt/dpkg (Debian/Ubuntu), apk (Alpine Linux), dnf (Fedora/RHEL), yum (CentOS 7),
+//! and pacman (Arch Linux) with pluggable backend architecture.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -2247,6 +2247,431 @@ impl Default for YumBackend {
     }
 }
 
+/// Pacman package manager backend (Arch Linux)
+pub struct PacmanBackend {
+    _marker: std::marker::PhantomData<()>,
+}
+
+impl PacmanBackend {
+    pub fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Run pacman command and capture output
+    fn run_pacman(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("pacman")
+            .args(args)
+            .output()
+            .context("Failed to execute pacman command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("pacman command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Parse package list from `pacman -Q` output.
+    /// Format: name version (space separated, one per line)
+    fn parse_pacman_package_list(&self, output: &str) -> Vec<Package> {
+        let mut packages = Vec::new();
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // pacman -Q format: "name version"
+            let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+            if parts.len() >= 2 {
+                let name = parts[0].to_string();
+                let version = parts[1].to_string();
+
+                packages.push(Package {
+                    name,
+                    version,
+                    status: PackageStatus::Installed,
+                    upgradable: false,
+                    latest_version: None,
+                    description: String::new(),
+                    dependencies: Vec::new(),
+                    reverse_dependencies: Vec::new(),
+                    install_date: None,
+                    size_installed: None,
+                });
+            }
+        }
+
+        packages
+    }
+
+    /// Parse detailed package info from `pacman -Qi <name>` output.
+    /// Format: multiline with field names like Name:, Version:, Description:, etc.
+    fn parse_pacman_info(&self, output: &str, name: &str) -> Result<Option<Package>> {
+        let mut version = String::new();
+        let mut description = String::new();
+        let mut dependencies = Vec::new();
+        let mut reverse_dependencies = Vec::new();
+        let mut install_date = None;
+        let mut size_installed = None;
+
+        for line in output.lines() {
+            // pacman -Qi output has format: "Field      : value"
+            // with potential continuation lines indented
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim();
+
+                match key {
+                    "Version" => version = value.to_string(),
+                    "Description" => description = value.to_string(),
+                    "Installed Size" => size_installed = Some(value.to_string()),
+                    "Install Date" => install_date = Some(value.to_string()),
+                    "Depends On" if !value.is_empty() && value != "None" => {
+                        for dep in value.split_whitespace() {
+                            dependencies.push(dep.to_string());
+                        }
+                    }
+                    "Required By" if !value.is_empty() && value != "None" => {
+                        for req in value.split_whitespace() {
+                            reverse_dependencies.push(req.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Check if upgradable via pacman -Qu
+        let upgradable = self
+            .run_pacman(&["-Qu", name])
+            .map(|o| !o.trim().is_empty())
+            .unwrap_or(false);
+
+        let latest_version = if upgradable {
+            // Try to get the new version from pacman -Qu output
+            self.run_pacman(&["-Qu", name]).ok().and_then(|o| {
+                o.lines().find_map(|line| {
+                    // Format: name old_version -> new_version
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 && parts[0] == name {
+                        Some(parts[3].to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+        } else {
+            Some(version.clone())
+        };
+
+        Ok(Some(Package {
+            name: name.to_string(),
+            version,
+            status: PackageStatus::Installed,
+            upgradable,
+            latest_version,
+            description,
+            dependencies,
+            reverse_dependencies,
+            install_date,
+            size_installed,
+        }))
+    }
+}
+
+impl PackageManagerBackend for PacmanBackend {
+    fn list_packages(&self, filter: Option<&str>) -> Result<Vec<Package>> {
+        let args = match filter {
+            Some(f) => vec!["-Q", f],
+            None => vec!["-Q"],
+        };
+
+        let output = self.run_pacman(&args)?;
+        let mut packages = self.parse_pacman_package_list(&output);
+
+        // If a filter was provided, filter the results by name
+        if let Some(f) = filter {
+            packages.retain(|p| p.name.contains(f));
+        }
+
+        Ok(packages)
+    }
+
+    fn get_package(&self, name: &str) -> Result<Option<Package>> {
+        // Validate package name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") || name.contains(' ') {
+            return Err(anyhow::anyhow!("Invalid package name: {}", name));
+        }
+
+        // Check if package is installed using pacman -Q
+        let query_result = self.run_pacman(&["-Q", name]);
+
+        if query_result.is_err() {
+            // Package not installed, check if available via pacman -Si
+            let search_output = Command::new("pacman").args(["-Si", name]).output();
+
+            if let Ok(output) = search_output {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let mut version = String::new();
+                    let mut description = String::new();
+
+                    for line in stdout.lines() {
+                        if let Some((key, value)) = line.split_once(':') {
+                            let key = key.trim();
+                            let value = value.trim();
+                            match key {
+                                "Version" => version = value.to_string(),
+                                "Description" => description = value.to_string(),
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    return Ok(Some(Package {
+                        name: name.to_string(),
+                        version,
+                        status: PackageStatus::Available,
+                        upgradable: false,
+                        latest_version: None,
+                        description,
+                        dependencies: Vec::new(),
+                        reverse_dependencies: Vec::new(),
+                        install_date: None,
+                        size_installed: None,
+                    }));
+                }
+            }
+            return Ok(None);
+        }
+
+        // Package is installed, get detailed info
+        let info_output = self.run_pacman(&["-Qi", name])?;
+        self.parse_pacman_info(&info_output, name)
+    }
+
+    fn install_packages(&self, packages: &[PackageSpec], options: &InstallOptions) -> Result<()> {
+        let mut args: Vec<String> = vec![
+            "-S".to_string(),
+            "--noconfirm".to_string(),
+            "--needed".to_string(),
+        ];
+
+        if options.force {
+            args.push("--overwrite".to_string());
+            args.push("'*'".to_string());
+        }
+
+        for pkg in packages {
+            args.push(pkg.name.clone());
+        }
+
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.run_pacman(&args_ref)?;
+        info!(
+            "Installed packages: {:?}",
+            packages.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    fn update_package(&self, name: &str) -> Result<()> {
+        self.run_pacman(&["-S", "--noconfirm", name])?;
+        info!("Updated package: {}", name);
+        Ok(())
+    }
+
+    fn remove_package(&self, name: &str, _purge: bool) -> Result<()> {
+        // pacman doesn't have a purge concept - just remove the package
+        self.run_pacman(&["-R", "--noconfirm", name])?;
+        info!("Removed package: {} (purge={})", name, _purge);
+        Ok(())
+    }
+
+    fn list_patches(&self) -> Result<Vec<Patch>> {
+        let output = self.run_pacman(&["-Qu"])?;
+        let mut patches = Vec::new();
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // pacman -Qu format: name old_version -> new_version
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 4 && parts[2] == "->" {
+                let name = parts[0].to_string();
+                let current_version = parts[1].to_string();
+                let available_version = parts[3].to_string();
+
+                // Determine severity based on package name heuristics
+                let severity =
+                    if name.contains("kernel") || name.contains("ssl") || name.contains("security")
+                    {
+                        "critical".to_string()
+                    } else if name.contains("lib") {
+                        "high".to_string()
+                    } else {
+                        "medium".to_string()
+                    };
+
+                patches.push(Patch {
+                    name,
+                    current_version,
+                    available_version,
+                    severity,
+                    description: String::from("Package update available"),
+                    cve_ids: Vec::new(),
+                    requires_reboot: false,
+                });
+            }
+        }
+
+        Ok(patches)
+    }
+
+    fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
+        match packages {
+            Some(pkgs) => {
+                let mut args: Vec<&str> = vec!["-S", "--noconfirm", "--needed"];
+                for pkg in pkgs {
+                    args.push(pkg);
+                }
+                self.run_pacman(&args)?;
+                info!("Applied patches for packages: {:?}", packages);
+            }
+            None => {
+                self.run_pacman(&["-Syu", "--noconfirm"])?;
+                info!("Applied all available patches");
+            }
+        }
+        Ok(())
+    }
+
+    fn get_system_info(&self) -> Result<SystemInfo> {
+        let hostname = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let os_info = std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .map(|content| {
+                let mut os = "Linux".to_string();
+                let mut version = "unknown".to_string();
+
+                for line in content.lines() {
+                    if line.starts_with("PRETTY_NAME=") {
+                        os = line
+                            .trim_start_matches("PRETTY_NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("NAME=") {
+                        os = line
+                            .trim_start_matches("NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION=") {
+                        version = line
+                            .trim_start_matches("VERSION=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION_ID=") {
+                        version = line
+                            .trim_start_matches("VERSION_ID=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    }
+                }
+
+                (os, version)
+            })
+            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
+
+        let kernel = Command::new("uname")
+            .arg("-r")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let architecture = Command::new("uname")
+            .arg("-m")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Arch Linux uses systemd, check for reboot-required indicator
+        let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists();
+
+        Ok(SystemInfo {
+            hostname,
+            os: os_info.0,
+            os_version: os_info.1,
+            kernel,
+            architecture,
+            last_update_check: None,
+            last_update_apply: None,
+            pending_reboot,
+        })
+    }
+
+    fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
+        if delay_seconds > 0 {
+            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
+            info!(
+                "Scheduling system reboot in {} minutes (requested {} seconds)",
+                delay_minutes, delay_seconds
+            );
+            Command::new("shutdown")
+                .args(["-r", &format!("+{}", delay_minutes)])
+                .status()
+                .context("Failed to schedule delayed reboot")?;
+            info!("System reboot scheduled in {} minutes", delay_minutes);
+        } else {
+            info!("Initiating immediate system reboot");
+            Command::new("systemctl")
+                .arg("reboot")
+                .status()
+                .context("Failed to execute reboot command")?;
+            info!("System reboot initiated");
+        }
+
+        Ok(())
+    }
+
+    fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
+        // Validate service name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") {
+            return Err(anyhow::anyhow!("Invalid service name: {}", name));
+        }
+
+        // Arch Linux uses systemd for service management
+        get_systemd_service_status(name)
+    }
+}
+
+impl Default for PacmanBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Package manager factory
 pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
     // Detect package manager and return appropriate backend
@@ -2261,8 +2686,7 @@ pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
     {
         Ok(Box::new(ApkBackend::new()))
     } else if std::path::Path::new("/usr/bin/pacman").exists() {
-        // TODO: Implement PacmanBackend for Arch
-        Err(anyhow::anyhow!("Pacman backend not yet implemented"))
+        Ok(Box::new(PacmanBackend::new()))
     } else {
         Err(anyhow::anyhow!("No supported package manager found"))
     }
@@ -2418,5 +2842,50 @@ mod tests {
         assert_eq!(packages[0].version, "4.2.46-34.el7");
         assert_eq!(packages[1].name, "openssl");
         assert_eq!(packages[1].version, "1.0.2k-25.el7");
+    }
+
+    // Pacman backend tests
+
+    #[test]
+    fn test_pacman_backend_creation() {
+        let _backend = PacmanBackend::new();
+        // Test passes if backend creation doesn't panic
+    }
+
+    #[test]
+    fn test_pacman_parse_package_list() {
+        let backend = PacmanBackend::new();
+        let output = "bash 5.2.21-1\nopenssl 3.1.4-1\ncurl 8.6.0-1";
+        let packages = backend.parse_pacman_package_list(output);
+        assert_eq!(packages.len(), 3);
+        assert_eq!(packages[0].name, "bash");
+        assert_eq!(packages[0].version, "5.2.21-1");
+        assert_eq!(packages[1].name, "openssl");
+        assert_eq!(packages[1].version, "3.1.4-1");
+        assert_eq!(packages[2].name, "curl");
+        assert_eq!(packages[2].version, "8.6.0-1");
+    }
+
+    #[test]
+    fn test_pacman_parse_package_list_empty() {
+        let backend = PacmanBackend::new();
+        let output = "";
+        let packages = backend.parse_pacman_package_list(output);
+        assert!(packages.is_empty());
+    }
+
+    #[test]
+    fn test_pacman_parse_info() {
+        let backend = PacmanBackend::new();
+        let output = "Name            : bash\nVersion         : 5.2.21-1\nDescription     : The GNU Bourne Again shell\nInstalled Size  : 12.50 MiB\nDepends On      : readline  glibc  ncurses\nRequired By     : none\nInstall Date    : Mon 20 May 2026 10:00:00 AM CDT";
+        let result = backend.parse_pacman_info(output, "bash").unwrap();
+        assert!(result.is_some());
+        let pkg = result.unwrap();
+        assert_eq!(pkg.name, "bash");
+        assert_eq!(pkg.version, "5.2.21-1");
+        assert_eq!(pkg.description, "The GNU Bourne Again shell");
+        assert_eq!(pkg.size_installed, Some("12.50 MiB".to_string()));
+        assert_eq!(pkg.dependencies.len(), 3);
+        assert!(pkg.dependencies.contains(&"readline".to_string()));
     }
 }
