@@ -1173,7 +1173,6 @@ impl Default for ApkBackend {
     }
 }
 
-
 /// DNF package manager backend (Fedora/RHEL/CentOS 8+)
 pub struct DnfBackend {
     _marker: std::marker::PhantomData<()>,
@@ -1246,7 +1245,10 @@ impl DnfBackend {
             let without_arch = if let Some(pos) = trimmed.rfind('.') {
                 // Verify the suffix looks like an arch (only alphanumeric, no dots)
                 let suffix = &trimmed[pos + 1..];
-                if suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                if suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
                     &trimmed[..pos]
                 } else {
                     trimmed
@@ -1303,9 +1305,7 @@ impl DnfBackend {
             } else if line.starts_with("Release") {
                 release = line.split(':').nth(1).unwrap_or("").trim().to_string();
             } else if line.starts_with("Install Date") {
-                install_date = Some(
-                    line.split(':').nth(1).unwrap_or("").trim().to_string(),
-                );
+                install_date = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
             } else if line.starts_with("Size") {
                 size_installed = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
             } else if line.starts_with("Summary") {
@@ -1368,11 +1368,7 @@ impl DnfBackend {
                 // RPM dependencies can be complex: "rpmlib(...) >= value"
                 // or simple: "libc.so.6()(64bit)" or "bash >= 4.0"
                 // Extract just the base name
-                let dep_name = dep
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let dep_name = dep.split_whitespace().next().unwrap_or("").to_string();
                 // Skip rpmlib and capability-style deps
                 if dep_name.starts_with("rpmlib") || dep_name.starts_with("rtld") {
                     continue;
@@ -1425,9 +1421,7 @@ impl PackageManagerBackend for DnfBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via dnf
-            let search_output = Command::new("dnf")
-                .args(["info", "-q", name])
-                .output();
+            let search_output = Command::new("dnf").args(["info", "-q", name]).output();
 
             if let Ok(output) = search_output {
                 if output.status.success() {
@@ -1797,7 +1791,10 @@ impl YumBackend {
 
             let without_arch = if let Some(pos) = trimmed.rfind('.') {
                 let suffix = &trimmed[pos + 1..];
-                if suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                if suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
                     &trimmed[..pos]
                 } else {
                     trimmed
@@ -1853,9 +1850,7 @@ impl YumBackend {
             } else if line.starts_with("Release") {
                 release = line.split(':').nth(1).unwrap_or("").trim().to_string();
             } else if line.starts_with("Install Date") {
-                install_date = Some(
-                    line.split(':').nth(1).unwrap_or("").trim().to_string(),
-                );
+                install_date = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
             } else if line.starts_with("Size") {
                 size_installed = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
             } else if line.starts_with("Summary") {
@@ -1911,11 +1906,7 @@ impl YumBackend {
                 if dep.is_empty() {
                     continue;
                 }
-                let dep_name = dep
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let dep_name = dep.split_whitespace().next().unwrap_or("").to_string();
                 if dep_name.starts_with("rpmlib") || dep_name.starts_with("rtld") {
                     continue;
                 }
@@ -1966,9 +1957,7 @@ impl PackageManagerBackend for YumBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via yum
-            let search_output = Command::new("yum")
-                .args(["info", "-q", name])
-                .output();
+            let search_output = Command::new("yum").args(["info", "-q", name]).output();
 
             if let Ok(output) = search_output {
                 if output.status.success() {
@@ -2383,7 +2372,8 @@ mod tests {
     #[test]
     fn test_dnf_parse_rpm_package_list() {
         let backend = DnfBackend::new();
-        let output = "bash-5.2.21-1.fc43.x86_64\nopenssl-3.1.4-1.fc43.x86_64\ncurl-8.6.0-1.fc43.noarch";
+        let output =
+            "bash-5.2.21-1.fc43.x86_64\nopenssl-3.1.4-1.fc43.x86_64\ncurl-8.6.0-1.fc43.noarch";
         let packages = backend.parse_rpm_package_list(output);
         assert_eq!(packages.len(), 3);
         assert_eq!(packages[0].name, "bash");
