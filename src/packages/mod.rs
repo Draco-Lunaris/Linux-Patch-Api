@@ -1180,7 +1180,9 @@ pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
     } else if std::path::Path::new("/usr/bin/dnf").exists() {
         // TODO: Implement DnfBackend for RHEL/CentOS/Fedora
         Err(anyhow::anyhow!("DNF backend not yet implemented"))
-    } else if std::path::Path::new("/usr/bin/apk").exists() {
+    } else if std::path::Path::new("/usr/bin/apk").exists()
+        || std::path::Path::new("/sbin/apk").exists()
+    {
         Ok(Box::new(ApkBackend::new()))
     } else if std::path::Path::new("/usr/bin/pacman").exists() {
         // TODO: Implement PacmanBackend for Arch

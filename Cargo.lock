@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "linux-patch-api"
-version = "1.1.12"
+version = "1.1.13"
 dependencies = [
  "actix",
  "actix-rt",
