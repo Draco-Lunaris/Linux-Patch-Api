@@ -1,3 +1,9 @@
+linux-patch-api (1.1.13) unstable; urgency=medium
+
+  * Fix APK backend detection for Alpine (/sbin/apk not /usr/bin/apk)
+
+ -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 13:55:00 -0500
+
 linux-patch-api (1.1.12) unstable; urgency=medium
 
   * Add APK (Alpine Linux) package manager backend
