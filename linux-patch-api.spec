@@ -163,6 +163,14 @@ fi
 
 # Changelog
 %changelog
+* Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.15-1
+- Add DNF package manager backend for Fedora/RHEL/CentOS 8+
+- Add YUM package manager backend for RHEL/CentOS 7
+- Fix: DNF backend not yet implemented error on Fedora systems
+- Support rpm -qa for package listing, rpm -qi for package details
+- Support dnf check-update (exit code 100) for patch detection
+- Support yum check-update (exit code 100) for patch detection
+
 * Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.14-1
 - Fix RPM packaging: pre-build binary before tarball (like Alpine/Arch pattern)
 - Fix rpmbuild can't find cargo in PATH - binary now included in source tarball

@@ -1,7 +1,8 @@
 //! Packages Module - Package Manager Backend
 //!
 //! Provides abstraction layer for package management operations.
-//! Supports apt/dpkg (Debian/Ubuntu) and apk (Alpine Linux) with pluggable backend architecture.
+//! Supports apt/dpkg (Debian/Ubuntu), apk (Alpine Linux), dnf (Fedora/RHEL), and yum (CentOS 7)
+//! with pluggable backend architecture.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1172,14 +1173,1100 @@ impl Default for ApkBackend {
     }
 }
 
+
+/// DNF package manager backend (Fedora/RHEL/CentOS 8+)
+pub struct DnfBackend {
+    _marker: std::marker::PhantomData<()>,
+}
+
+impl DnfBackend {
+    pub fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Run dnf command and capture output
+    fn run_dnf(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("dnf")
+            .args(args)
+            .output()
+            .context("Failed to execute dnf command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("dnf command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Run rpm command and capture output
+    fn run_rpm(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("rpm")
+            .args(args)
+            .output()
+            .context("Failed to execute rpm command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("rpm command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Parse name and version from RPM package identifier (name-version-release.arch).
+    /// RPM package names can contain hyphens (e.g., "perl-Net-SSLeay"), so we find
+    /// the first hyphen followed by a digit to separate name from version, similar to
+    /// the APK parsing logic.
+    fn parse_rpm_name_version(&self, ident: &str) -> (String, String) {
+        let bytes = ident.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                return (ident[..i].to_string(), ident[i + 1..].to_string());
+            }
+        }
+        // Fallback: no version separator found
+        (ident.to_string(), String::new())
+    }
+
+    /// Parse package list from `rpm -qa` output.
+    /// Format: name-version-release.arch
+    fn parse_rpm_package_list(&self, output: &str) -> Vec<Package> {
+        let mut packages = Vec::new();
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Strip .arch suffix (e.g., .x86_64, .noarch, .aarch64)
+            let without_arch = if let Some(pos) = trimmed.rfind('.') {
+                // Verify the suffix looks like an arch (only alphanumeric, no dots)
+                let suffix = &trimmed[pos + 1..];
+                if suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    &trimmed[..pos]
+                } else {
+                    trimmed
+                }
+            } else {
+                trimmed
+            };
+
+            let (name, version) = self.parse_rpm_name_version(without_arch);
+
+            packages.push(Package {
+                name,
+                version,
+                status: PackageStatus::Installed,
+                upgradable: false,
+                latest_version: None,
+                description: String::new(),
+                dependencies: Vec::new(),
+                reverse_dependencies: Vec::new(),
+                install_date: None,
+                size_installed: None,
+            });
+        }
+
+        packages
+    }
+
+    /// Parse detailed package info from `rpm -qi <name>` output.
+    fn parse_rpm_info(&self, output: &str, name: &str) -> Result<Option<Package>> {
+        let mut version = String::new();
+        let mut release = String::new();
+        let mut description = String::new();
+        let mut dependencies = Vec::new();
+        let mut size_installed = None;
+        let mut install_date = None;
+        let mut in_description = false;
+
+        for line in output.lines() {
+            // Once we're in the description block, collect lines until we hit another field
+            if in_description {
+                if line.starts_with(' ') || line.is_empty() {
+                    if !description.is_empty() {
+                        description.push(' ');
+                    }
+                    description.push_str(line.trim());
+                    continue;
+                } else {
+                    in_description = false;
+                }
+            }
+
+            if line.starts_with("Version") {
+                version = line.split(':').nth(1).unwrap_or("").trim().to_string();
+            } else if line.starts_with("Release") {
+                release = line.split(':').nth(1).unwrap_or("").trim().to_string();
+            } else if line.starts_with("Install Date") {
+                install_date = Some(
+                    line.split(':').nth(1).unwrap_or("").trim().to_string(),
+                );
+            } else if line.starts_with("Size") {
+                size_installed = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+            } else if line.starts_with("Summary") {
+                // Use Summary as the description if no Description block follows
+                let summary = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                if description.is_empty() {
+                    description = summary;
+                }
+            } else if line.starts_with("Description") {
+                in_description = true;
+                // Capture any text after "Description :" on the same line
+                let rest = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                if !rest.is_empty() {
+                    description = rest;
+                }
+            }
+        }
+
+        // Combine version and release for full version string
+        let full_version = if release.is_empty() {
+            version.clone()
+        } else {
+            format!("{}-{}", version, release)
+        };
+
+        // Check if upgradable via dnf check-update
+        // dnf check-update returns exit code 100 when updates are available
+        let check_output = Command::new("dnf")
+            .args(["check-update", "-q", name])
+            .output();
+
+        let (upgradable, latest_version) = match check_output {
+            Ok(ref o) if o.status.code() == Some(100) => {
+                // Updates available - try to parse the available version
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let candidate = stdout.lines().find_map(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 && parts[0].starts_with(name) {
+                        // Format: name.arch  version-release  repo
+                        if let Some(pos) = parts[0].rfind('.') {
+                            if &parts[0][..pos] == name {
+                                return Some(parts[1].to_string());
+                            }
+                        }
+                    }
+                    None
+                });
+                (true, candidate)
+            }
+            _ => (false, Some(full_version.clone())),
+        };
+
+        // Get dependencies via rpm -qR
+        if let Ok(deps_output) = self.run_rpm(&["-qR", name]) {
+            for dep in deps_output.lines() {
+                let dep = dep.trim();
+                if dep.is_empty() {
+                    continue;
+                }
+                // RPM dependencies can be complex: "rpmlib(...) >= value"
+                // or simple: "libc.so.6()(64bit)" or "bash >= 4.0"
+                // Extract just the base name
+                let dep_name = dep
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                // Skip rpmlib and capability-style deps
+                if dep_name.starts_with("rpmlib") || dep_name.starts_with("rtld") {
+                    continue;
+                }
+                dependencies.push(dep_name);
+            }
+        }
+
+        Ok(Some(Package {
+            name: name.to_string(),
+            version: full_version,
+            status: PackageStatus::Installed,
+            upgradable,
+            latest_version,
+            description,
+            dependencies,
+            reverse_dependencies: Vec::new(),
+            install_date,
+            size_installed,
+        }))
+    }
+}
+
+impl PackageManagerBackend for DnfBackend {
+    fn list_packages(&self, filter: Option<&str>) -> Result<Vec<Package>> {
+        let args = match filter {
+            Some(f) => vec!["-qa", f],
+            None => vec!["-qa"],
+        };
+
+        let output = self.run_rpm(&args)?;
+        let mut packages = self.parse_rpm_package_list(&output);
+
+        // If a filter was provided, filter the results by name
+        if let Some(f) = filter {
+            packages.retain(|p| p.name.contains(f));
+        }
+
+        Ok(packages)
+    }
+
+    fn get_package(&self, name: &str) -> Result<Option<Package>> {
+        // Validate package name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") || name.contains(' ') {
+            return Err(anyhow::anyhow!("Invalid package name: {}", name));
+        }
+
+        // Check if package is installed using rpm -q
+        let query_result = self.run_rpm(&["-q", name]);
+
+        if query_result.is_err() {
+            // Package not installed, check if available via dnf
+            let search_output = Command::new("dnf")
+                .args(["info", "-q", name])
+                .output();
+
+            if let Ok(output) = search_output {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Parse available package info from dnf info output
+                    let mut version = String::new();
+                    let mut release = String::new();
+                    let mut description = String::new();
+
+                    for line in stdout.lines() {
+                        if line.starts_with("Version") {
+                            version = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        } else if line.starts_with("Release") {
+                            release = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        } else if line.starts_with("Description") {
+                            // Take first line of description
+                            let rest = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                            if !rest.is_empty() {
+                                description = rest;
+                            }
+                        }
+                    }
+
+                    let full_version = if release.is_empty() {
+                        version
+                    } else {
+                        format!("{}-{}", version, release)
+                    };
+
+                    return Ok(Some(Package {
+                        name: name.to_string(),
+                        version: full_version,
+                        status: PackageStatus::Available,
+                        upgradable: false,
+                        latest_version: None,
+                        description,
+                        dependencies: Vec::new(),
+                        reverse_dependencies: Vec::new(),
+                        install_date: None,
+                        size_installed: None,
+                    }));
+                }
+            }
+            return Ok(None);
+        }
+
+        // Package is installed, get detailed info
+        let info_output = self.run_rpm(&["-qi", name])?;
+        self.parse_rpm_info(&info_output, name)
+    }
+
+    fn install_packages(&self, packages: &[PackageSpec], options: &InstallOptions) -> Result<()> {
+        let mut args: Vec<String> = vec!["install".to_string(), "-y".to_string()];
+
+        if options.no_recommends {
+            args.push("--setopt=install_weak_deps=0".to_string());
+        }
+
+        if options.force {
+            args.push("--allowerasing".to_string());
+        }
+
+        for pkg in packages {
+            let pkg_arg = if let Some(version) = &pkg.version {
+                format!("{}-{}", pkg.name, version)
+            } else {
+                pkg.name.clone()
+            };
+            args.push(pkg_arg);
+        }
+
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.run_dnf(&args_ref)?;
+        info!(
+            "Installed packages: {:?}",
+            packages.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    fn update_package(&self, name: &str) -> Result<()> {
+        self.run_dnf(&["upgrade", "-y", name])?;
+        info!("Updated package: {}", name);
+        Ok(())
+    }
+
+    fn remove_package(&self, name: &str, purge: bool) -> Result<()> {
+        let args = if purge {
+            vec!["remove", "-y", "--noautoremove", name]
+        } else {
+            vec!["remove", "-y", name]
+        };
+        self.run_dnf(&args)?;
+        info!("Removed package: {} (purge={})", name, purge);
+        Ok(())
+    }
+
+    fn list_patches(&self) -> Result<Vec<Patch>> {
+        // dnf check-update returns exit code 100 when updates are available,
+        // exit code 0 when no updates, and other codes for errors.
+        let output = Command::new("dnf")
+            .args(["check-update", "-q"])
+            .output()
+            .context("Failed to execute dnf check-update")?;
+
+        // Exit code 100 means updates available, 0 means no updates
+        let exit_code = output.status.code().unwrap_or(-1);
+        if exit_code != 100 && exit_code != 0 {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("dnf check-update failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut patches = Vec::new();
+
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Format: name.arch  version-release  repo
+            // e.g.: bash.x86_64  5.2.21-2.fc43  updates
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 3 {
+                // Strip .arch suffix from package name
+                let full_name = parts[0];
+                let name = if let Some(pos) = full_name.rfind('.') {
+                    full_name[..pos].to_string()
+                } else {
+                    full_name.to_string()
+                };
+                let available_version = parts[1].to_string();
+                let repo = parts[2].to_string();
+
+                // Get current installed version via rpm -q
+                let current_version = self
+                    .run_rpm(&["-q", "--qf", "%{VERSION}-%{RELEASE}", &name])
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+
+                // Determine severity based on package name heuristics
+                let severity =
+                    if name.contains("kernel") || name.contains("ssl") || name.contains("security")
+                    {
+                        "critical".to_string()
+                    } else if name.contains("lib") {
+                        "high".to_string()
+                    } else {
+                        "medium".to_string()
+                    };
+
+                patches.push(Patch {
+                    name,
+                    current_version,
+                    available_version,
+                    severity,
+                    description: format!("Package update available from {}", repo),
+                    cve_ids: Vec::new(),
+                    requires_reboot: false,
+                });
+            }
+        }
+
+        Ok(patches)
+    }
+
+    fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
+        match packages {
+            Some(pkgs) => {
+                let mut args: Vec<&str> = vec!["upgrade", "-y"];
+                for pkg in pkgs {
+                    args.push(pkg);
+                }
+                self.run_dnf(&args)?;
+                info!("Applied patches for packages: {:?}", packages);
+            }
+            None => {
+                self.run_dnf(&["upgrade", "-y"])?;
+                info!("Applied all available patches");
+            }
+        }
+        Ok(())
+    }
+
+    fn get_system_info(&self) -> Result<SystemInfo> {
+        let hostname = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let os_info = std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .map(|content| {
+                let mut os = "Linux".to_string();
+                let mut version = "unknown".to_string();
+
+                for line in content.lines() {
+                    if line.starts_with("PRETTY_NAME=") {
+                        os = line
+                            .trim_start_matches("PRETTY_NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("NAME=") {
+                        os = line
+                            .trim_start_matches("NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION=") {
+                        version = line
+                            .trim_start_matches("VERSION=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION_ID=") {
+                        version = line
+                            .trim_start_matches("VERSION_ID=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    }
+                }
+
+                (os, version)
+            })
+            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
+
+        let kernel = Command::new("uname")
+            .arg("-r")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let architecture = Command::new("uname")
+            .arg("-m")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // RPM-based systems use /var/run/reboot-required or need-reboot plugin
+        let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists();
+
+        Ok(SystemInfo {
+            hostname,
+            os: os_info.0,
+            os_version: os_info.1,
+            kernel,
+            architecture,
+            last_update_check: None,
+            last_update_apply: None,
+            pending_reboot,
+        })
+    }
+
+    fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
+        if delay_seconds > 0 {
+            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
+            info!(
+                "Scheduling system reboot in {} minutes (requested {} seconds)",
+                delay_minutes, delay_seconds
+            );
+            Command::new("shutdown")
+                .args(["-r", &format!("+{}", delay_minutes)])
+                .status()
+                .context("Failed to schedule delayed reboot")?;
+            info!("System reboot scheduled in {} minutes", delay_minutes);
+        } else {
+            info!("Initiating immediate system reboot");
+            Command::new("systemctl")
+                .arg("reboot")
+                .status()
+                .context("Failed to execute reboot command")?;
+            info!("System reboot initiated");
+        }
+
+        Ok(())
+    }
+
+    fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
+        // Validate service name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") {
+            return Err(anyhow::anyhow!("Invalid service name: {}", name));
+        }
+
+        // Fedora/RHEL use systemd for service management
+        get_systemd_service_status(name)
+    }
+}
+
+impl Default for DnfBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// YUM package manager backend (RHEL/CentOS 7)
+pub struct YumBackend {
+    _marker: std::marker::PhantomData<()>,
+}
+
+impl YumBackend {
+    pub fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Run yum command and capture output
+    fn run_yum(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("yum")
+            .args(args)
+            .output()
+            .context("Failed to execute yum command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("yum command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Run rpm command and capture output
+    fn run_rpm(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("rpm")
+            .args(args)
+            .output()
+            .context("Failed to execute rpm command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("rpm command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Parse name and version from RPM package identifier (name-version-release.arch).
+    /// Same logic as DnfBackend::parse_rpm_name_version.
+    fn parse_rpm_name_version(&self, ident: &str) -> (String, String) {
+        let bytes = ident.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                return (ident[..i].to_string(), ident[i + 1..].to_string());
+            }
+        }
+        (ident.to_string(), String::new())
+    }
+
+    /// Parse package list from `rpm -qa` output.
+    fn parse_rpm_package_list(&self, output: &str) -> Vec<Package> {
+        let mut packages = Vec::new();
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let without_arch = if let Some(pos) = trimmed.rfind('.') {
+                let suffix = &trimmed[pos + 1..];
+                if suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    &trimmed[..pos]
+                } else {
+                    trimmed
+                }
+            } else {
+                trimmed
+            };
+
+            let (name, version) = self.parse_rpm_name_version(without_arch);
+
+            packages.push(Package {
+                name,
+                version,
+                status: PackageStatus::Installed,
+                upgradable: false,
+                latest_version: None,
+                description: String::new(),
+                dependencies: Vec::new(),
+                reverse_dependencies: Vec::new(),
+                install_date: None,
+                size_installed: None,
+            });
+        }
+
+        packages
+    }
+
+    /// Parse detailed package info from `rpm -qi <name>` output.
+    fn parse_rpm_info(&self, output: &str, name: &str) -> Result<Option<Package>> {
+        let mut version = String::new();
+        let mut release = String::new();
+        let mut description = String::new();
+        let mut dependencies = Vec::new();
+        let mut size_installed = None;
+        let mut install_date = None;
+        let mut in_description = false;
+
+        for line in output.lines() {
+            if in_description {
+                if line.starts_with(' ') || line.is_empty() {
+                    if !description.is_empty() {
+                        description.push(' ');
+                    }
+                    description.push_str(line.trim());
+                    continue;
+                } else {
+                    in_description = false;
+                }
+            }
+
+            if line.starts_with("Version") {
+                version = line.split(':').nth(1).unwrap_or("").trim().to_string();
+            } else if line.starts_with("Release") {
+                release = line.split(':').nth(1).unwrap_or("").trim().to_string();
+            } else if line.starts_with("Install Date") {
+                install_date = Some(
+                    line.split(':').nth(1).unwrap_or("").trim().to_string(),
+                );
+            } else if line.starts_with("Size") {
+                size_installed = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+            } else if line.starts_with("Summary") {
+                let summary = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                if description.is_empty() {
+                    description = summary;
+                }
+            } else if line.starts_with("Description") {
+                in_description = true;
+                let rest = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                if !rest.is_empty() {
+                    description = rest;
+                }
+            }
+        }
+
+        let full_version = if release.is_empty() {
+            version.clone()
+        } else {
+            format!("{}-{}", version, release)
+        };
+
+        // Check if upgradable via yum check-update
+        // yum check-update returns exit code 100 when updates are available
+        let check_output = Command::new("yum")
+            .args(["check-update", "-q", name])
+            .output();
+
+        let (upgradable, latest_version) = match check_output {
+            Ok(ref o) if o.status.code() == Some(100) => {
+                // Updates available - try to parse the available version
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let candidate = stdout.lines().find_map(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 && parts[0].starts_with(name) {
+                        if let Some(pos) = parts[0].rfind('.') {
+                            if &parts[0][..pos] == name {
+                                return Some(parts[1].to_string());
+                            }
+                        }
+                    }
+                    None
+                });
+                (true, candidate)
+            }
+            _ => (false, Some(full_version.clone())),
+        };
+
+        // Get dependencies via rpm -qR
+        if let Ok(deps_output) = self.run_rpm(&["-qR", name]) {
+            for dep in deps_output.lines() {
+                let dep = dep.trim();
+                if dep.is_empty() {
+                    continue;
+                }
+                let dep_name = dep
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if dep_name.starts_with("rpmlib") || dep_name.starts_with("rtld") {
+                    continue;
+                }
+                dependencies.push(dep_name);
+            }
+        }
+
+        Ok(Some(Package {
+            name: name.to_string(),
+            version: full_version,
+            status: PackageStatus::Installed,
+            upgradable,
+            latest_version,
+            description,
+            dependencies,
+            reverse_dependencies: Vec::new(),
+            install_date,
+            size_installed,
+        }))
+    }
+}
+
+impl PackageManagerBackend for YumBackend {
+    fn list_packages(&self, filter: Option<&str>) -> Result<Vec<Package>> {
+        let args = match filter {
+            Some(f) => vec!["-qa", f],
+            None => vec!["-qa"],
+        };
+
+        let output = self.run_rpm(&args)?;
+        let mut packages = self.parse_rpm_package_list(&output);
+
+        if let Some(f) = filter {
+            packages.retain(|p| p.name.contains(f));
+        }
+
+        Ok(packages)
+    }
+
+    fn get_package(&self, name: &str) -> Result<Option<Package>> {
+        // Validate package name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") || name.contains(' ') {
+            return Err(anyhow::anyhow!("Invalid package name: {}", name));
+        }
+
+        // Check if package is installed using rpm -q
+        let query_result = self.run_rpm(&["-q", name]);
+
+        if query_result.is_err() {
+            // Package not installed, check if available via yum
+            let search_output = Command::new("yum")
+                .args(["info", "-q", name])
+                .output();
+
+            if let Ok(output) = search_output {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let mut version = String::new();
+                    let mut release = String::new();
+                    let mut description = String::new();
+
+                    for line in stdout.lines() {
+                        if line.starts_with("Version") {
+                            version = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        } else if line.starts_with("Release") {
+                            release = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        } else if line.starts_with("Description") {
+                            let rest = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                            if !rest.is_empty() {
+                                description = rest;
+                            }
+                        }
+                    }
+
+                    let full_version = if release.is_empty() {
+                        version
+                    } else {
+                        format!("{}-{}", version, release)
+                    };
+
+                    return Ok(Some(Package {
+                        name: name.to_string(),
+                        version: full_version,
+                        status: PackageStatus::Available,
+                        upgradable: false,
+                        latest_version: None,
+                        description,
+                        dependencies: Vec::new(),
+                        reverse_dependencies: Vec::new(),
+                        install_date: None,
+                        size_installed: None,
+                    }));
+                }
+            }
+            return Ok(None);
+        }
+
+        // Package is installed, get detailed info
+        let info_output = self.run_rpm(&["-qi", name])?;
+        self.parse_rpm_info(&info_output, name)
+    }
+
+    fn install_packages(&self, packages: &[PackageSpec], options: &InstallOptions) -> Result<()> {
+        let mut args: Vec<String> = vec!["install".to_string(), "-y".to_string()];
+
+        if options.no_recommends {
+            // yum uses --setopt for weak deps (older syntax)
+            args.push("--setopt=install_weak_deps=0".to_string());
+        }
+
+        // yum doesn't have --allowerasing, skip force option
+
+        for pkg in packages {
+            let pkg_arg = if let Some(version) = &pkg.version {
+                format!("{}-{}", pkg.name, version)
+            } else {
+                pkg.name.clone()
+            };
+            args.push(pkg_arg);
+        }
+
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.run_yum(&args_ref)?;
+        info!(
+            "Installed packages: {:?}",
+            packages.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    fn update_package(&self, name: &str) -> Result<()> {
+        self.run_yum(&["update", "-y", name])?;
+        info!("Updated package: {}", name);
+        Ok(())
+    }
+
+    fn remove_package(&self, name: &str, purge: bool) -> Result<()> {
+        // yum doesn't distinguish between remove and purge
+        let _ = purge;
+        self.run_yum(&["remove", "-y", name])?;
+        info!("Removed package: {} (purge={})", name, purge);
+        Ok(())
+    }
+
+    fn list_patches(&self) -> Result<Vec<Patch>> {
+        // yum check-update returns exit code 100 when updates are available
+        let output = Command::new("yum")
+            .args(["check-update", "-q"])
+            .output()
+            .context("Failed to execute yum check-update")?;
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        if exit_code != 100 && exit_code != 0 {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("yum check-update failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut patches = Vec::new();
+
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let full_name = parts[0];
+                let name = if let Some(pos) = full_name.rfind('.') {
+                    full_name[..pos].to_string()
+                } else {
+                    full_name.to_string()
+                };
+                let available_version = parts[1].to_string();
+                let repo = parts[2].to_string();
+
+                let current_version = self
+                    .run_rpm(&["-q", "--qf", "%{VERSION}-%{RELEASE}", &name])
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+
+                let severity =
+                    if name.contains("kernel") || name.contains("ssl") || name.contains("security")
+                    {
+                        "critical".to_string()
+                    } else if name.contains("lib") {
+                        "high".to_string()
+                    } else {
+                        "medium".to_string()
+                    };
+
+                patches.push(Patch {
+                    name,
+                    current_version,
+                    available_version,
+                    severity,
+                    description: format!("Package update available from {}", repo),
+                    cve_ids: Vec::new(),
+                    requires_reboot: false,
+                });
+            }
+        }
+
+        Ok(patches)
+    }
+
+    fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
+        match packages {
+            Some(pkgs) => {
+                let mut args: Vec<&str> = vec!["update", "-y"];
+                for pkg in pkgs {
+                    args.push(pkg);
+                }
+                self.run_yum(&args)?;
+                info!("Applied patches for packages: {:?}", packages);
+            }
+            None => {
+                self.run_yum(&["update", "-y"])?;
+                info!("Applied all available patches");
+            }
+        }
+        Ok(())
+    }
+
+    fn get_system_info(&self) -> Result<SystemInfo> {
+        let hostname = Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let os_info = std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .map(|content| {
+                let mut os = "Linux".to_string();
+                let mut version = "unknown".to_string();
+
+                for line in content.lines() {
+                    if line.starts_with("PRETTY_NAME=") {
+                        os = line
+                            .trim_start_matches("PRETTY_NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("NAME=") {
+                        os = line
+                            .trim_start_matches("NAME=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION=") {
+                        version = line
+                            .trim_start_matches("VERSION=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    } else if line.starts_with("VERSION_ID=") {
+                        version = line
+                            .trim_start_matches("VERSION_ID=")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                    }
+                }
+
+                (os, version)
+            })
+            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
+
+        let kernel = Command::new("uname")
+            .arg("-r")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let architecture = Command::new("uname")
+            .arg("-m")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists();
+
+        Ok(SystemInfo {
+            hostname,
+            os: os_info.0,
+            os_version: os_info.1,
+            kernel,
+            architecture,
+            last_update_check: None,
+            last_update_apply: None,
+            pending_reboot,
+        })
+    }
+
+    fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
+        if delay_seconds > 0 {
+            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
+            info!(
+                "Scheduling system reboot in {} minutes (requested {} seconds)",
+                delay_minutes, delay_seconds
+            );
+            Command::new("shutdown")
+                .args(["-r", &format!("+{}", delay_minutes)])
+                .status()
+                .context("Failed to schedule delayed reboot")?;
+            info!("System reboot scheduled in {} minutes", delay_minutes);
+        } else {
+            info!("Initiating immediate system reboot");
+            Command::new("systemctl")
+                .arg("reboot")
+                .status()
+                .context("Failed to execute reboot command")?;
+            info!("System reboot initiated");
+        }
+
+        Ok(())
+    }
+
+    fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
+        // Validate service name to prevent shell injection
+        if name.is_empty() || name.contains('/') || name.contains("..") {
+            return Err(anyhow::anyhow!("Invalid service name: {}", name));
+        }
+
+        // CentOS 7 uses systemd for service management
+        get_systemd_service_status(name)
+    }
+}
+
+impl Default for YumBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Package manager factory
 pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
     // Detect package manager and return appropriate backend
     if std::path::Path::new("/usr/bin/apt").exists() {
         Ok(Box::new(AptBackend::new()))
     } else if std::path::Path::new("/usr/bin/dnf").exists() {
-        // TODO: Implement DnfBackend for RHEL/CentOS/Fedora
-        Err(anyhow::anyhow!("DNF backend not yet implemented"))
+        Ok(Box::new(DnfBackend::new()))
+    } else if std::path::Path::new("/usr/bin/yum").exists() {
+        Ok(Box::new(YumBackend::new()))
     } else if std::path::Path::new("/usr/bin/apk").exists()
         || std::path::Path::new("/sbin/apk").exists()
     {
@@ -1258,5 +2345,88 @@ mod tests {
         assert_eq!(packages[0].version, "5.2.21-r0");
         assert_eq!(packages[1].name, "openssl");
         assert_eq!(packages[1].version, "3.1.4-r0");
+    }
+
+    // DNF backend tests
+
+    #[test]
+    fn test_dnf_backend_creation() {
+        let _backend = DnfBackend::new();
+        // Test passes if backend creation doesn't panic
+    }
+
+    #[test]
+    fn test_dnf_parse_rpm_name_version_simple() {
+        let backend = DnfBackend::new();
+        let (name, version) = backend.parse_rpm_name_version("bash-5.2.21-1.fc43");
+        assert_eq!(name, "bash");
+        assert_eq!(version, "5.2.21-1.fc43");
+    }
+
+    #[test]
+    fn test_dnf_parse_rpm_name_version_hyphenated() {
+        let backend = DnfBackend::new();
+        // Package names with hyphens like perl-Net-SSLeay
+        let (name, version) = backend.parse_rpm_name_version("perl-Net-SSLeay-1.94-1.fc43");
+        assert_eq!(name, "perl-Net-SSLeay");
+        assert_eq!(version, "1.94-1.fc43");
+    }
+
+    #[test]
+    fn test_dnf_parse_rpm_name_version_no_version() {
+        let backend = DnfBackend::new();
+        let (name, version) = backend.parse_rpm_name_version("nohyphen");
+        assert_eq!(name, "nohyphen");
+        assert_eq!(version, "");
+    }
+
+    #[test]
+    fn test_dnf_parse_rpm_package_list() {
+        let backend = DnfBackend::new();
+        let output = "bash-5.2.21-1.fc43.x86_64\nopenssl-3.1.4-1.fc43.x86_64\ncurl-8.6.0-1.fc43.noarch";
+        let packages = backend.parse_rpm_package_list(output);
+        assert_eq!(packages.len(), 3);
+        assert_eq!(packages[0].name, "bash");
+        assert_eq!(packages[0].version, "5.2.21-1.fc43");
+        assert_eq!(packages[1].name, "openssl");
+        assert_eq!(packages[1].version, "3.1.4-1.fc43");
+        assert_eq!(packages[2].name, "curl");
+        assert_eq!(packages[2].version, "8.6.0-1.fc43");
+    }
+
+    // YUM backend tests
+
+    #[test]
+    fn test_yum_backend_creation() {
+        let _backend = YumBackend::new();
+        // Test passes if backend creation doesn't panic
+    }
+
+    #[test]
+    fn test_yum_parse_rpm_name_version_simple() {
+        let backend = YumBackend::new();
+        let (name, version) = backend.parse_rpm_name_version("bash-4.2.46-34.el7");
+        assert_eq!(name, "bash");
+        assert_eq!(version, "4.2.46-34.el7");
+    }
+
+    #[test]
+    fn test_yum_parse_rpm_name_version_hyphenated() {
+        let backend = YumBackend::new();
+        let (name, version) = backend.parse_rpm_name_version("perl-Net-SSLeay-1.94-1.el7");
+        assert_eq!(name, "perl-Net-SSLeay");
+        assert_eq!(version, "1.94-1.el7");
+    }
+
+    #[test]
+    fn test_yum_parse_rpm_package_list() {
+        let backend = YumBackend::new();
+        let output = "bash-4.2.46-34.el7.x86_64\nopenssl-1.0.2k-25.el7.x86_64";
+        let packages = backend.parse_rpm_package_list(output);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name, "bash");
+        assert_eq!(packages[0].version, "4.2.46-34.el7");
+        assert_eq!(packages[1].name, "openssl");
+        assert_eq!(packages[1].version, "1.0.2k-25.el7");
     }
 }
