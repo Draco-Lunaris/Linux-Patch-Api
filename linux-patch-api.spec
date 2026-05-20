@@ -10,14 +10,15 @@ Source0:        linux-patch-api-%{version}.tar.gz
 BuildArch:      x86_64
 
 # Build requirements
-# NOTE: Building in CI container where deps are pre-installed via apt-get
-# Uncomment these for native RPM-based build environments:
-BuildRequires:  cargo >= 1.75
-BuildRequires:  rust >= 1.75
-BuildRequires:  gcc
-BuildRequires:  openssl-devel
-BuildRequires:  systemd-devel
-BuildRequires:  pkgconfig(systemd)
+# NOTE: CI uses rustup to install cargo/rust, so they are NOT available as RPM packages.
+# Only uncomment BuildRequires for native RPM build environments where cargo/rust
+# are installed via dnf/yum package manager.
+# BuildRequires:  cargo >= 1.75
+# BuildRequires:  rust >= 1.75
+# BuildRequires:  gcc
+# BuildRequires:  openssl-devel
+# BuildRequires:  systemd-devel
+# BuildRequires:  pkgconfig(systemd)
 
 # Runtime requirements
 Requires:       systemd
@@ -161,8 +162,8 @@ fi
 
 # Changelog
 %changelog
-* Mon May 19 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
-- Fix RPM packaging: add BuildRequires, runtime deps, match Debian install behavior
+* Tue May 19 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
+- Fix RPM packaging: runtime deps, match Debian install behavior, comment BuildRequires for CI
 - Remove system user creation (service runs as root per systemd unit)
 - Fix ownership to root:root matching Debian package
 - Add openssl-libs and ca-certificates runtime dependencies
