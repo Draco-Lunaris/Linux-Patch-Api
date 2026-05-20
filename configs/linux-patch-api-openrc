@@ -17,10 +17,10 @@ depend() {
 
 # Create required directories before starting
 start_pre() {
-    checkpath --directory --owner linux-patch-api:linux-patch-api --mode 0755 \
+    checkpath --directory --owner root:root --mode 0755 \
         /run/linux-patch-api \
-        /var/log/linux-patch-api \
-        /var/lib/linux-patch-api \
+        /var/log/linux_patch_api \
+        /var/lib/linux_patch_api \
         /etc/linux_patch_api/certs
     
     # Ensure config files exist
