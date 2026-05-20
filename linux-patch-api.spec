@@ -10,19 +10,21 @@ Source0:        linux-patch-api-%{version}.tar.gz
 BuildArch:      x86_64
 
 # Build requirements
-# NOTE: Building in Debian container (node:18) - apt packages don't register in RPM db
-# Build tools ARE available (installed via apt-get in ci.yml), just won't validate
-# BuildRequires:  cargo >= 1.75
-# BuildRequires:  rust >= 1.75
-# BuildRequires:  systemd-rpm-macros  # Handling systemd manually
-# BuildRequires:  pkgconfig(systemd)
-# BuildRequires:  gcc
+# NOTE: Building in CI container where deps are pre-installed via apt-get
+# Uncomment these for native RPM-based build environments:
+BuildRequires:  cargo >= 1.75
+BuildRequires:  rust >= 1.75
+BuildRequires:  gcc
+BuildRequires:  openssl-devel
+BuildRequires:  systemd-devel
+BuildRequires:  pkgconfig(systemd)
 
 # Runtime requirements
 Requires:       systemd
 Requires:       libsystemd
+Requires:       openssl-libs
+Requires:       ca-certificates
 
-# Description
 %description
 Linux Patch API provides a secure, mTLS-authenticated REST API for
 remote package management operations including:
@@ -69,28 +71,16 @@ cp configs/config.yaml.example %{buildroot}/etc/linux_patch_api/config.yaml.exam
 cp configs/whitelist.yaml.example %{buildroot}/etc/linux_patch_api/whitelist.yaml.example
 chmod 644 %{buildroot}/etc/linux_patch_api/*.example
 
-# Pre-installation script
+# Pre-installation script - create directories (matches Debian preinst)
 %pre
-# Create system group
-getent group linux-patch-api > /dev/null || groupadd --system linux-patch-api
-
-# Create system user
-getent passwd linux-patch-api > /dev/null || useradd --system \
-    --gid linux-patch-api \
-    --home-dir /var/lib/linux_patch_api \
-    --no-create-home \
-    --shell /usr/sbin/nologin \
-    --comment "Linux Patch API Service" \
-    linux-patch-api
-
 # Create required directories
 mkdir -p /etc/linux_patch_api/certs
 mkdir -p /var/lib/linux_patch_api
 mkdir -p /var/log/linux_patch_api
 
-# Set proper ownership
-chown -R linux-patch-api:linux-patch-api /var/lib/linux_patch_api
-chown -R linux-patch-api:linux-patch-api /var/log/linux_patch_api
+# Set proper ownership (service runs as root)
+chown -R root:root /var/lib/linux_patch_api
+chown -R root:root /var/log/linux_patch_api
 
 # Set secure permissions
 chmod 750 /etc/linux_patch_api
@@ -98,19 +88,19 @@ chmod 750 /etc/linux_patch_api/certs
 chmod 755 /var/lib/linux_patch_api
 chmod 755 /var/log/linux_patch_api
 
-# Post-installation script
+# Post-installation script - copy configs, enable service (matches Debian postinst)
 %post
 # Copy example configs if they don't exist
 if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
     cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
     chmod 640 /etc/linux_patch_api/config.yaml
-    chown linux-patch-api:linux-patch-api /etc/linux_patch_api/config.yaml
+    chown root:root /etc/linux_patch_api/config.yaml
 fi
 
 if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
     cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
     chmod 640 /etc/linux_patch_api/whitelist.yaml
-    chown linux-patch-api:linux-patch-api /etc/linux_patch_api/whitelist.yaml
+    chown root:root /etc/linux_patch_api/whitelist.yaml
 fi
 
 # Reload systemd daemon
@@ -171,6 +161,12 @@ fi
 
 # Changelog
 %changelog
+* Mon May 19 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
+- Fix RPM packaging: add BuildRequires, runtime deps, match Debian install behavior
+- Remove system user creation (service runs as root per systemd unit)
+- Fix ownership to root:root matching Debian package
+- Add openssl-libs and ca-certificates runtime dependencies
+
 * Mon May 18 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
 - Fix FQDN resolution: prioritize hostname -f over /etc/hostname
 - Fix display_name blank: add hostname field to enrollment request

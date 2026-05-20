@@ -22,7 +22,7 @@ else
     echo "Skipping cargo build (SKIP_CARGO_BUILD is set)"
 fi
 
-# Create package directory
+# Create package directory structure
 PKGDIR=$(pwd)/arch-package
 rm -rf "$PKGDIR"
 mkdir -p "$PKGDIR"/usr/bin
@@ -42,8 +42,11 @@ cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml.example
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml.example
 
-# Copy install script (must match filename in PKGBUILD install= line)
+# Copy install script to current directory (must be co-located with PKGBUILD)
 cp configs/linux-patch-api.install linux-patch-api.install
+
+# Get version from Cargo.toml
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 
 # Create PKGBUILD with quoted heredoc to prevent $pkgdir expansion
 # $pkgdir must be literal for makepkg to expand at runtime
@@ -58,13 +61,15 @@ arch=('x86_64')
 license=('MIT')
 depends=('systemd')
 install=linux-patch-api.install
+source=()
 backup=(
     'etc/linux_patch_api/config.yaml'
     'etc/linux_patch_api/whitelist.yaml'
 )
 
 package() {
-    cp -r /home/builduser/repo/arch-package/* "$pkgdir"/
+    # Use $startdir because arch-package is co-located with PKGBUILD, not in sources
+    cp -r "$startdir"/arch-package/* "$pkgdir"/
 
     # Ensure directories exist with proper structure
     mkdir -p "$pkgdir"/etc/linux_patch_api/certs
@@ -73,18 +78,12 @@ package() {
 }
 EOF
 
-# Replace version placeholder with actual version from Cargo.toml
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+# Replace version placeholder with actual version
 sed -i "s/VERSION_PLACEHOLDER/$VERSION/" PKGBUILD
 
 echo "PKGBUILD version: $VERSION"
 
-# Create .SRCINFO
-echo "Creating .SRCINFO..."
-
 # Build package
-echo "Building Arch package..."
-
 # For CI environments where we may run as root
 if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for makepkg..."
@@ -95,12 +94,22 @@ if [ "$(id -u)" = "0" ]; then
     cp -r . /home/builduser/repo/
     chown -R builduser:builduser /home/builduser/repo/
     
+    # Create source tarball for makepkg
+    # makepkg expects sources to be in $srcdir after extraction
+    # We create a tarball of arch-package so %autosetup or prepare can extract it
+    cd /home/builduser/repo
+    
     su - builduser -c "cd /home/builduser/repo && makepkg --printsrcinfo > .SRCINFO"
     su - builduser -c "cd /home/builduser/repo && makepkg -f --noconfirm"
     
     # Copy package to releases
+    mkdir -p /home/builduser/repo/releases
+    cp /home/builduser/repo/*.pkg.tar.zst /home/builduser/repo/releases/ 2>/dev/null || true
+    cd -
+    
+    # Copy releases back to original directory
     mkdir -p releases
-    cp /home/builduser/repo/*.pkg.tar.zst releases/
+    cp /home/builduser/repo/releases/*.pkg.tar.zst releases/ 2>/dev/null || true
 else
     makepkg --printsrcinfo > .SRCINFO
     makepkg -f --noconfirm

@@ -44,8 +44,11 @@ else
     echo "Skipping cargo build (SKIP_CARGO_BUILD is set)"
 fi
 
-# Create package directory in /home/builduser (accessible by builduser)
-PKGDIR=/home/builduser/apk-package
+# Get version from Cargo.toml
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+
+# Create package directory structure
+PKGDIR=$(pwd)/apk-package
 rm -rf "$PKGDIR"
 mkdir -p "$PKGDIR"/usr/bin
 mkdir -p "$PKGDIR"/etc/linux_patch_api/certs
@@ -65,20 +68,22 @@ chmod 755 "$PKGDIR"/etc/init.d/linux-patch-api
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml.example
 cp configs/whitelist.yaml.example "$PKGDIR"/etc/linux_patch_api/whitelist.yaml.example
 
-# Copy install script for APKBUILD
-mkdir -p /home/builduser/repo
-cp configs/linux-patch-api.apk-install /home/builduser/repo/linux-patch-api.apk-install
+# Prepare workspace for abuild
+WORKSPACE_DIR=/home/builduser/repo
+mkdir -p "$WORKSPACE_DIR"
 
-# Use /home/builduser as workspace for APKBUILD
-WORKSPACE_DIR=/home/builduser
+# Copy install script to workspace (must be co-located with APKBUILD)
+cp configs/linux-patch-api.apk-install "$WORKSPACE_DIR"/linux-patch-api.apk-install
 
-# Get version from Cargo.toml
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+# Copy package directory to workspace
+cp -r "$PKGDIR" "$WORKSPACE_DIR"/apk-package
 
-# Create APKBUILD
-# Note: install= must use literal package name, not $pkgname (unquoted heredoc expands variables)
+# Copy entire repo to workspace for source references
+cp -r . "$WORKSPACE_DIR"/src/
+
+# Create APKBUILD in workspace directory (co-located with install script)
 echo "Creating APKBUILD..."
-cat > APKBUILD << EOF
+cat > "$WORKSPACE_DIR"/APKBUILD << EOF
 pkgname=linux-patch-api
 pkgver=${VERSION}
 pkgrel=1
@@ -99,14 +104,12 @@ package() {
     install -d "\$pkgdir"/var/lib/linux_patch_api
     install -d "\$pkgdir"/var/log/linux_patch_api
 
-    cp -r ${WORKSPACE_DIR}/apk-package/usr/bin/* "\$pkgdir"/usr/bin/
-    cp -r ${WORKSPACE_DIR}/apk-package/etc/linux_patch_api/* "\$pkgdir"/etc/linux_patch_api/
-    cp -r ${WORKSPACE_DIR}/apk-package/etc/init.d/* "\$pkgdir"/etc/init.d/
+    install -Dm755 "\$startdir"/apk-package/usr/bin/linux-patch-api "\$pkgdir"/usr/bin/linux-patch-api
+    install -Dm755 "\$startdir"/apk-package/etc/init.d/linux-patch-api "\$pkgdir"/etc/init.d/linux-patch-api
+    install -Dm644 "\$startdir"/apk-package/etc/linux_patch_api/config.yaml.example "\$pkgdir"/etc/linux_patch_api/config.yaml.example
+    install -Dm644 "\$startdir"/apk-package/etc/linux_patch_api/whitelist.yaml.example "\$pkgdir"/etc/linux_patch_api/whitelist.yaml.example
 }
 EOF
-
-# Generate checksums for APKBUILD sources
-echo "Generating checksums..."
 
 # Build APK package
 echo "Building APK package..."
@@ -117,10 +120,8 @@ if [ "$(id -u)" = "0" ]; then
     adduser -D -s /bin/sh builduser 2>/dev/null || true
     addgroup builduser abuild 2>/dev/null || usermod -aG abuild builduser
     
-    # Copy repo contents to builduser home (accessible directory)
-    cp -r . /home/builduser/repo/
-    chown -R builduser:builduser /home/builduser/repo/
-    chown -R builduser:builduser /home/builduser/apk-package/
+    # Set ownership of workspace
+    chown -R builduser:builduser "$WORKSPACE_DIR"
     
     # Set up builduser home directory for abuild
     mkdir -p /home/builduser/.abuild
@@ -136,31 +137,24 @@ if [ "$(id -u)" = "0" ]; then
     echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
     chown builduser:builduser /home/builduser/.abuild/abuild.conf
     
-    # Copy APKBUILD and checksums to builduser home for abuild
-    cp APKBUILD /home/builduser/
-    cp .checksums /home/builduser/ 2>/dev/null || true
-    
     # Install public key BEFORE abuild (fixes UNTRUSTED signature)
     cp /home/builduser/.abuild/*.rsa.pub /etc/apk/keys/ 2>/dev/null || true
     
-    # Run abuild as builduser in /home/builduser where APKBUILD exists
+    # Run abuild as builduser in workspace directory
     # Use || true because index update may fail but APK is still created
-    su - builduser -c "cd /home/builduser && abuild checksum && abuild -d -F" || true
+    su - builduser -c "cd $WORKSPACE_DIR && abuild checksum && abuild -d -F" || true
     
     # Copy APK from builduser packages to releases
     mkdir -p releases
     cp /home/builduser/packages/x86_64/*.apk releases/ 2>/dev/null || cp /home/builduser/packages/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
 else
+    cd "$WORKSPACE_DIR"
     abuild checksum
     abuild -F -r
+    cd -
+    mkdir -p releases
     cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || true
 fi
-
-# Copy to releases directory (fallback for non-root builds)
-echo ""
-echo "Copying package to releases/..."
-mkdir -p releases
-cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || find ~/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
 
 echo ""
 echo "=== Build Complete ==="
