@@ -84,6 +84,24 @@
 **Rule:** E2E tests must assert status=completed for core operations. A failed package install is a 100% total failure of the API's core function.
 **Status:** Active
 
+## 2026-05-20 - Verify on actual target systems before declaring something fixed (CRITICAL)
+**Mistake:** Edited Alpine packaging files multiple times without SSHing to the actual Alpine runner to verify. Made assumptions about abuild install script format based on documentation/comments instead of checking the actual abuild source code on the target system.
+**Correction:** SSHed to Alpine runner, read abuild source code (lines 247-257), discovered that .apk-install is NOT a valid suffix. abuild expects SEPARATE files: pkgname.pre-install, .post-install, .pre-deinstall, .post-deinstall. The CI build used || true which masked the abuild failure, so APK was built WITHOUT install scripts silently.
+**Rule:** ALWAYS verify fixes on actual target systems before pushing. SSH to the runner, inspect the built artifact, test the install. Never assume a file edit is correct without runtime verification. Read the tool's source code when documentation is unclear.
+**Status:** Active
+
+## 2026-05-20 - Alpine abuild install script format requires separate files with valid suffixes
+**Mistake:** Used a single .apk-install file with function definitions (pre_install, post_install, etc.) for Alpine packaging. This is NOT a valid abuild format.
+**Correction:** Created 4 separate files: linux-patch-api.pre-install, .post-install, .pre-deinstall, .post-deinstall as standalone shell scripts. These are the ONLY valid suffixes abuild accepts (lines 247-257 of /usr/bin/abuild).
+**Rule:** Alpine abuild install scripts MUST be separate files with valid suffixes: pre-install, post-install, pre-upgrade, post-upgrade, pre-deinstall, post-deinstall. Do NOT use function definitions in a single file. Do NOT invent custom suffixes like .apk-install.
+**Status:** Active
+
+## 2026-05-20 - Ask for help with access blocks immediately (CRITICAL)
+**Mistake:** Spent many turns and significant compute time trying to work around not having root access on the Alpine runner (investigating doas.conf errors, trying alternative approaches) instead of simply asking Kelly to install sudo.
+**Correction:** Kelly installed sudo in seconds. The time and money I wasted on workarounds far exceeded the trivial effort of asking for help.
+**Rule:** When blocked by an access or permission issue, ASK KELLY IMMEDIATELY. Do not spend time on workarounds. A quick fix by Kelly is worth far more than hours of AI compute trying to bypass the block. My processing time costs real money.
+**Status:** Active
+
 ## 2026-05-03 - Systemd sandbox whack-a-mole pattern
 **Mistake:** Fixed systemd sandbox restrictions one at a time (ProtectSystem → NoNewPrivileges → RestrictSUIDSGID → CapabilityBoundingSet) instead of analyzing all restrictions at once.
 **Correction:** Removed ALL restrictive sandbox settings at once after understanding that package management requires full system access.
