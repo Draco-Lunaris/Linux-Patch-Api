@@ -13,7 +13,7 @@ TAG_NAME="${1:?Usage: upload-release.sh <tag_name> <file_path>}"
 FILE_PATH="${2}"
 
 GITEA_API="${GITEA_API:-https://gitea-lxc.moon-dragon.us/api/v1}"
-REPO="echo/linux_patch_api"
+REPO="git-echo/linux_patch_api"
 
 if [ -z "$GITEA_TOKEN" ]; then
     echo "Error: GITEA_TOKEN environment variable not set"
