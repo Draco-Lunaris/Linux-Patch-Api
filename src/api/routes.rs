@@ -6,6 +6,7 @@ use actix_web::{web, HttpResponse};
 use tracing::info;
 
 use crate::jobs::manager::JobManager;
+use crate::packages::cache::PackageCacheState;
 
 use super::handlers::{jobs, packages, patches, system, websocket};
 
@@ -21,10 +22,11 @@ pub fn configure_api_routes(
     cfg: &mut web::ServiceConfig,
     job_manager: web::Data<JobManager>,
     backend: web::Data<Box<dyn crate::packages::PackageManagerBackend>>,
+    cache_state: web::Data<PackageCacheState>,
 ) {
     info!("Configuring API v1 routes");
 
-    cfg.app_data(job_manager).app_data(backend).service(
+    cfg.app_data(job_manager).app_data(backend).app_data(cache_state).service(
         web::scope("/api/v1")
             // VULN-005: Default handler for unsupported methods returns 405 instead of 404
             .default_service(web::route().to(method_not_allowed))
@@ -42,6 +44,7 @@ pub fn configure_api_routes(
 }
 
 /// Health check route (outside API scope for load balancer checks)
+/// Note: backend and cache_state are injected via app_data registered in main.rs
 pub fn configure_health_route(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(system::health_check));
 }

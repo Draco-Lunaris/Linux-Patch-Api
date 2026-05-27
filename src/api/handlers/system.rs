@@ -42,9 +42,11 @@ pub struct SystemInfoData {
 /// Health check response data
 #[derive(Debug, Serialize)]
 pub struct HealthData {
-    pub status: String,
+    pub status: String,           // "healthy" or "degraded"
     pub uptime_seconds: u64,
     pub version: String,
+    pub last_cache_update: Option<String>,  // RFC3339 timestamp
+    pub cache_status: String,     // "fresh", "stale", "unknown", "failed"
 }
 
 /// Service status response data
@@ -108,7 +110,11 @@ pub async fn get_system_info(
 }
 
 /// Health check endpoint
-pub async fn health_check(_req: HttpRequest) -> impl Responder {
+pub async fn health_check(
+    backend: web::Data<Box<dyn PackageManagerBackend>>,
+    cache_state: web::Data<crate::packages::cache::PackageCacheState>,
+    _req: HttpRequest,
+) -> impl Responder {
     let _request_id = Uuid::new_v4().to_string();
     let _timestamp = Utc::now().to_rfc3339();
 
@@ -126,10 +132,29 @@ pub async fn health_check(_req: HttpRequest) -> impl Responder {
 
     let version = env!("CARGO_PKG_VERSION").to_string();
 
+    // Check cache status and refresh if stale
+    let cache_status_val = cache_state.status();
+    let (status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
+        match backend.refresh_package_cache(&cache_state) {
+            Ok(_) => {
+                let updated = cache_state.status();
+                ("healthy".to_string(), "fresh".to_string(), updated.last_update.map(|dt| dt.to_rfc3339()))
+            }
+            Err(e) => {
+                error!("Health check cache refresh failed: {}", e);
+                ("degraded".to_string(), "failed".to_string(), cache_status_val.last_update.map(|dt| dt.to_rfc3339()))
+            }
+        }
+    } else {
+        ("healthy".to_string(), "fresh".to_string(), cache_status_val.last_update.map(|dt| dt.to_rfc3339()))
+    };
+
     let response = ApiResponse::success(HealthData {
-        status: "healthy".to_string(),
+        status,
         uptime_seconds,
         version,
+        last_cache_update,
+        cache_status: cache_status_str,
     });
 
     HttpResponse::Ok().json(response)
@@ -317,6 +342,8 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
             .route("/services/{name}", web::get().to(get_service_status)),
     )
     .route("/health", web::get().to(health_check));
+    // Note: health_check receives backend and cache_state via app_data injection
+    // They are registered in routes.rs and main.rs as web::Data
 }
 
 #[cfg(test)]
@@ -345,9 +372,13 @@ mod tests {
             status: "healthy".to_string(),
             uptime_seconds: 12345,
             version: "0.1.0".to_string(),
+            last_cache_update: Some("2026-05-27T14:00:00+00:00".to_string()),
+            cache_status: "fresh".to_string(),
         };
         let json = serde_json::to_string(&health).unwrap();
         assert!(json.contains("healthy"));
         assert!(json.contains("12345"));
+        assert!(json.contains("fresh"));
+        assert!(json.contains("last_cache_update"));
     }
 }

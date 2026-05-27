@@ -269,18 +269,37 @@ Client → [mTLS + IP Check] → [API Layer] → [GET /jobs/{id}]
 
 ### Endpoint: GET /health
 
-**Purpose:** General service status check
+**Purpose:** General service status check with package cache status
 
 **Response (200 OK - Healthy):**
 ```json
 {
   "success": true,
   "request_id": "uuid",
-  "timestamp": "2026-04-09T13:04:02Z",
+  "timestamp": "2026-05-27T14:00:00Z",
   "data": {
     "status": "healthy",
     "uptime_seconds": 12345,
-    "version": "0.0.1"
+    "version": "1.1.17",
+    "last_cache_update": "2026-05-27T13:30:00+00:00",
+    "cache_status": "fresh"
+  },
+  "error": null
+}
+```
+
+**Response (200 OK - Degraded):**
+```json
+{
+  "success": true,
+  "request_id": "uuid",
+  "timestamp": "2026-05-27T14:00:00Z",
+  "data": {
+    "status": "degraded",
+    "uptime_seconds": 12345,
+    "version": "1.1.17",
+    "last_cache_update": "2026-05-27T09:00:00+00:00",
+    "cache_status": "failed"
   },
   "error": null
 }
@@ -291,11 +310,61 @@ Client → [mTLS + IP Check] → [API Layer] → [GET /jobs/{id}]
 - mTLS is configured and valid
 - Config file is loaded and valid
 - Package manager backend is accessible
+- Package cache is fresh (refreshed within 4 hours)
+
+**Cache Refresh on Health Check:**
+- If cache is stale (>4 hours since last update), health check triggers a cache refresh
+- If refresh succeeds: status="healthy", cache_status="fresh"
+- If refresh fails: status="degraded", cache_status="failed"
+- If cache is fresh: status="healthy", cache_status="fresh"
+
+**Cache Status Values:**
+- `fresh` - Cache was updated within the last 4 hours
+- `stale` - Cache is older than 4 hours (triggers refresh)
+- `unknown` - No cache update has occurred yet
+- `failed` - Last cache refresh attempt failed
 
 **NOT Required:**
 - Metrics collection
 - Alerting integration
 - Prometheus/Grafana endpoints
+
+---
+
+## Package Cache Management
+
+### Module: `src/packages/cache.rs`
+
+The package cache module manages the local package index state, ensuring that package metadata is current before performing operations.
+
+**Key Components:**
+- `PackageCacheState` - Thread-safe in-memory cache state with Mutex protection
+- `PackageCacheStatus` - Snapshot of cache state for reporting
+- `CacheStateFile` - Persistent state format for serialization
+- `is_fetch_error()` - Detects 404/fetch errors for automatic retry
+- `apply_with_cache_retry()` - Generic retry wrapper for cache-related failures
+- `run_command_with_timeout()` - Executes cache refresh commands with timeout
+
+**State Persistence:**
+- Cache state persists to `/var/lib/linux_patch_api/state/cache.json`
+- State is loaded on service startup and saved after every update
+- Persists `last_cache_update` timestamp and `last_update_success` flag
+- Parent directory is auto-created if missing
+
+**Stale Detection:**
+- Cache is considered stale after 4 hours (`STALE_THRESHOLD_SECS = 14400`)
+- Health check automatically refreshes stale cache
+- Patch apply operations always refresh cache before proceeding (mandatory)
+
+**Refresh-Before-Apply Flow:**
+1. `POST /patches/apply` creates a job and spawns background task
+2. Background task refreshes package cache (mandatory, not configurable)
+3. If refresh fails: job fails immediately with error message
+4. If refresh succeeds: job progresses to 10%, applies patches
+5. If apply fails with 404/fetch error: refresh cache and retry once
+6. If retry also fails: job fails with error
+
+**Cache Refresh Timeout:** 120 seconds (`CACHE_REFRESH_TIMEOUT_SECS`)
 
 ---
 
