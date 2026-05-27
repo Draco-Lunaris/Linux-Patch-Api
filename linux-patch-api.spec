@@ -163,6 +163,14 @@ fi
 
 # Changelog
 %changelog
+* Tue May 27 2026 Echo <echo@moon-dragon.us> - 1.1.17-1
+- Add mandatory package cache refresh before patch_apply
+- Add health check cache refresh when stale (>4h)
+- Add cache status fields to health response
+- Add 404/fetch error retry with cache refresh
+- Add degraded health status on cache failure
+- New src/packages/cache.rs module
+
 * Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.16-1
 - Add Pacman package manager backend for Arch Linux
 - Fix: Pacman backend not yet implemented error on Arch systems
