@@ -42,11 +42,11 @@ pub struct SystemInfoData {
 /// Health check response data
 #[derive(Debug, Serialize)]
 pub struct HealthData {
-    pub status: String,           // "healthy" or "degraded"
+    pub status: String, // "healthy" or "degraded"
     pub uptime_seconds: u64,
     pub version: String,
-    pub last_cache_update: Option<String>,  // RFC3339 timestamp
-    pub cache_status: String,     // "fresh", "stale", "unknown", "failed"
+    pub last_cache_update: Option<String>, // RFC3339 timestamp
+    pub cache_status: String,              // "fresh", "stale", "unknown", "failed"
 }
 
 /// Service status response data
@@ -138,15 +138,27 @@ pub async fn health_check(
         match backend.refresh_package_cache(&cache_state) {
             Ok(_) => {
                 let updated = cache_state.status();
-                ("healthy".to_string(), "fresh".to_string(), updated.last_update.map(|dt| dt.to_rfc3339()))
+                (
+                    "healthy".to_string(),
+                    "fresh".to_string(),
+                    updated.last_update.map(|dt| dt.to_rfc3339()),
+                )
             }
             Err(e) => {
                 error!("Health check cache refresh failed: {}", e);
-                ("degraded".to_string(), "failed".to_string(), cache_status_val.last_update.map(|dt| dt.to_rfc3339()))
+                (
+                    "degraded".to_string(),
+                    "failed".to_string(),
+                    cache_status_val.last_update.map(|dt| dt.to_rfc3339()),
+                )
             }
         }
     } else {
-        ("healthy".to_string(), "fresh".to_string(), cache_status_val.last_update.map(|dt| dt.to_rfc3339()))
+        (
+            "healthy".to_string(),
+            "fresh".to_string(),
+            cache_status_val.last_update.map(|dt| dt.to_rfc3339()),
+        )
     };
 
     let response = ApiResponse::success(HealthData {

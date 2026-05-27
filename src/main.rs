@@ -166,7 +166,12 @@ async fn main() -> Result<()> {
 
         // Configure API routes
         app = app.configure(|cfg| {
-            configure_api_routes(cfg, job_manager_data.clone(), backend_data.clone(), cache_state.clone());
+            configure_api_routes(
+                cfg,
+                job_manager_data.clone(),
+                backend_data.clone(),
+                cache_state.clone(),
+            );
         });
 
         // Configure health route (outside API scope)

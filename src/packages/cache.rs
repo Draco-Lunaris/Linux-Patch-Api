@@ -21,7 +21,7 @@ const CACHE_REFRESH_TIMEOUT_SECS: u64 = 120;
 /// Persistent cache state (written to cache.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheStateFile {
-    pub last_cache_update: Option<String>,  // RFC3339
+    pub last_cache_update: Option<String>, // RFC3339
     pub last_update_success: bool,
 }
 
@@ -42,6 +42,12 @@ struct CacheStateInner {
     last_update: Option<DateTime<Utc>>,
     last_update_success: bool,
     last_update_error: Option<String>,
+}
+
+impl Default for PackageCacheState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PackageCacheState {
@@ -83,8 +89,7 @@ impl PackageCacheState {
             Some(t) => {
                 let threshold = Duration::from_secs(STALE_THRESHOLD_SECS);
                 Utc::now() - t
-                    > chrono::Duration::from_std(threshold)
-                        .unwrap_or(chrono::TimeDelta::MAX)
+                    > chrono::Duration::from_std(threshold).unwrap_or(chrono::TimeDelta::MAX)
             }
         }
     }
@@ -151,12 +156,9 @@ pub fn is_fetch_error(error: &anyhow::Error) -> bool {
 
 /// Execute a patch apply with automatic cache refresh retry on 404/fetch errors.
 /// Hardcoded 1 retry after cache refresh.
-pub fn apply_with_cache_retry<F>(
-    refresh_fn: F,
-    apply_fn: impl Fn() -> Result<()>,
-) -> Result<()>
+pub fn apply_with_cache_retry<F>(mut refresh_fn: F, apply_fn: impl Fn() -> Result<()>) -> Result<()>
 where
-    F: Fn() -> Result<()>,
+    F: FnMut() -> Result<()>,
 {
     match apply_fn() {
         Ok(()) => Ok(()),
@@ -226,7 +228,7 @@ mod tests {
         let status = state.status();
         // Fresh state should have no last_update (unless state file exists)
         // Just verify it doesn't panic
-        assert!(status.last_update_success == false || status.last_update.is_some());
+        assert!(!status.last_update_success || status.last_update.is_some());
     }
 
     #[test]
@@ -259,19 +261,14 @@ mod tests {
 
     #[test]
     fn test_apply_with_cache_retry_success() {
-        let result = apply_with_cache_retry(
-            || Ok(()),
-            || Ok(()),
-        );
+        let result = apply_with_cache_retry(|| Ok(()), || Ok(()));
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_apply_with_cache_retry_non_fetch_error() {
-        let result: Result<()> = apply_with_cache_retry(
-            || Ok(()),
-            || Err(anyhow::anyhow!("Permission denied")),
-        );
+        let result: Result<()> =
+            apply_with_cache_retry(|| Ok(()), || Err(anyhow::anyhow!("Permission denied")));
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(!is_fetch_error(&err));

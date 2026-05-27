@@ -126,7 +126,12 @@ pub async fn apply_patches(
 
                 // MANDATORY: Refresh package cache before applying patches
                 let _ = job_manager_clone
-                    .update_job(&job_id_clone, JobStatus::Running, Some(0), Some("Refreshing package index...".to_string()))
+                    .update_job(
+                        &job_id_clone,
+                        JobStatus::Running,
+                        Some(0),
+                        Some("Refreshing package index...".to_string()),
+                    )
                     .await;
                 let _ = job_manager_clone
                     .add_job_log(&job_id_clone, "Refreshing package cache...".to_string())
@@ -135,10 +140,18 @@ pub async fn apply_patches(
                 match backend_clone.refresh_package_cache(&cache_state_clone) {
                     Ok(_) => {
                         let _ = job_manager_clone
-                            .add_job_log(&job_id_clone, "Package cache refreshed successfully".to_string())
+                            .add_job_log(
+                                &job_id_clone,
+                                "Package cache refreshed successfully".to_string(),
+                            )
                             .await;
                         let _ = job_manager_clone
-                            .update_job(&job_id_clone, JobStatus::Running, Some(10), Some("Cache refreshed, applying patches...".to_string()))
+                            .update_job(
+                                &job_id_clone,
+                                JobStatus::Running,
+                                Some(10),
+                                Some("Cache refreshed, applying patches...".to_string()),
+                            )
                             .await;
                     }
                     Err(e) => {
@@ -194,17 +207,25 @@ pub async fn apply_patches(
                         // 404/fetch error: refresh cache and retry once
                         info!(job_id = %job_id_clone, "Patch apply failed with fetch error, refreshing cache and retrying");
                         let _ = job_manager_clone
-                            .add_job_log(&job_id_clone, "Fetch error detected, refreshing cache and retrying...".to_string())
+                            .add_job_log(
+                                &job_id_clone,
+                                "Fetch error detected, refreshing cache and retrying..."
+                                    .to_string(),
+                            )
                             .await;
 
                         match backend_clone.refresh_package_cache(&cache_state_clone) {
                             Ok(_) => {
                                 let _ = job_manager_clone
-                                    .add_job_log(&job_id_clone, "Cache refreshed, retrying patch apply...".to_string())
+                                    .add_job_log(
+                                        &job_id_clone,
+                                        "Cache refreshed, retrying patch apply...".to_string(),
+                                    )
                                     .await;
                             }
                             Err(refresh_err) => {
-                                let err_msg = format!("Cache refresh on retry failed: {}", refresh_err);
+                                let err_msg =
+                                    format!("Cache refresh on retry failed: {}", refresh_err);
                                 let _ = job_manager_clone.fail_job(&job_id_clone, err_msg).await;
                                 error!(job_id = %job_id_clone, error = %refresh_err, "Cache refresh on retry failed");
                                 return;
@@ -228,29 +249,40 @@ pub async fn apply_patches(
                                             ),
                                         )
                                         .await;
-                                    match backend_clone.reboot_system(request.reboot_delay_seconds) {
+                                    match backend_clone.reboot_system(request.reboot_delay_seconds)
+                                    {
                                         Ok(_) => {
                                             let _ = job_manager_clone
-                                                .add_job_log(&job_id_clone, "Reboot command executed".to_string())
+                                                .add_job_log(
+                                                    &job_id_clone,
+                                                    "Reboot command executed".to_string(),
+                                                )
                                                 .await;
                                         }
                                         Err(e) => {
                                             let _ = job_manager_clone
-                                                .add_job_log(&job_id_clone, format!("Reboot failed: {}", e))
+                                                .add_job_log(
+                                                    &job_id_clone,
+                                                    format!("Reboot failed: {}", e),
+                                                )
                                                 .await;
                                         }
                                     }
                                 }
                             }
                             Err(retry_err) => {
-                                let _ = job_manager_clone.fail_job(&job_id_clone, retry_err.to_string()).await;
+                                let _ = job_manager_clone
+                                    .fail_job(&job_id_clone, retry_err.to_string())
+                                    .await;
                                 error!(job_id = %job_id_clone, error = %retry_err, "Patch application failed after retry");
                             }
                         }
                     }
                     Err(e) => {
                         // Non-fetch error: fail immediately
-                        let _ = job_manager_clone.fail_job(&job_id_clone, e.to_string()).await;
+                        let _ = job_manager_clone
+                            .fail_job(&job_id_clone, e.to_string())
+                            .await;
                         error!(job_id = %job_id_clone, error = %e, "Patch application failed");
                     }
                 }
