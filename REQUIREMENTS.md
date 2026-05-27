@@ -50,6 +50,16 @@
 - Log configuration changes (whitelist updates, cert renewals)
 - Log system changes made by the API
 
+### FR-007: Package Cache Refresh
+
+- The agent MUST refresh the local package index before every patch_apply operation
+- The agent MUST refresh the local package index when the health check detects stale cache (>4 hours)
+- The agent SHOULD automatically retry patch_apply once after cache refresh on 404/fetch errors
+- The agent SHOULD track and report last_cache_update timestamp in health check responses
+- Cache state persists to /var/lib/linux_patch_api/state/cache.json across service restarts
+- Cache refresh before apply is mandatory and not configurable
+- Cache refresh timeout is 120 seconds
+
 ---
 ## Non-Functional Requirements
 

@@ -4,7 +4,10 @@
 //! Supports apt/dpkg (Debian/Ubuntu), apk (Alpine Linux), dnf (Fedora/RHEL), yum (CentOS 7),
 //! and pacman (Arch Linux) with pluggable backend architecture.
 
+pub mod cache;
+
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tracing::info;
@@ -90,6 +93,12 @@ pub trait PackageManagerBackend: Send + Sync {
     fn get_system_info(&self) -> Result<SystemInfo>;
     fn reboot_system(&self, delay_seconds: u64) -> Result<()>;
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>>;
+
+    /// Refresh the local package index (apt-get update, dnf check-update, etc.)
+    fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()>;
+
+    /// Get the last cache update timestamp
+    fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>>;
 }
 
 /// Package specification for installation
@@ -515,6 +524,26 @@ impl PackageManagerBackend for AptBackend {
                 "No supported init system detected (systemd or OpenRC required)"
             ))
         }
+    }
+
+    fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
+        info!("Refreshing APT package cache");
+        match cache::run_command_with_timeout("apt-get", &["update"]) {
+            Ok(_) => {
+                cache_state.update_success();
+                info!("APT package cache refreshed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                let err_msg = format!("APT cache refresh failed: {}", e);
+                cache_state.update_failure(err_msg.clone());
+                Err(anyhow::anyhow!("{}", err_msg))
+            }
+        }
+    }
+
+    fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
+        cache_state.status().last_update
     }
 }
 
@@ -1165,6 +1194,26 @@ impl PackageManagerBackend for ApkBackend {
         // Alpine uses OpenRC for service management
         get_openrc_service_status(name)
     }
+
+    fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
+        info!("Refreshing APK package cache");
+        match cache::run_command_with_timeout("apk", &["update"]) {
+            Ok(_) => {
+                cache_state.update_success();
+                info!("APK package cache refreshed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                let err_msg = format!("APK cache refresh failed: {}", e);
+                cache_state.update_failure(err_msg.clone());
+                Err(anyhow::anyhow!("{}", err_msg))
+            }
+        }
+    }
+
+    fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
+        cache_state.status().last_update
+    }
 }
 
 impl Default for ApkBackend {
@@ -1717,6 +1766,27 @@ impl PackageManagerBackend for DnfBackend {
         // Fedora/RHEL use systemd for service management
         get_systemd_service_status(name)
     }
+
+    fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
+        info!("Refreshing DNF package cache");
+        match cache::run_command_with_timeout("dnf", &["check-update", "--refresh"]) {
+            Ok(_) => {
+                cache_state.update_success();
+                info!("DNF package cache refreshed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                // dnf check-update returns exit code 100 when updates available (not an error)
+                let err_msg = format!("DNF cache refresh failed: {}", e);
+                cache_state.update_failure(err_msg.clone());
+                Err(anyhow::anyhow!("{}", err_msg))
+            }
+        }
+    }
+
+    fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
+        cache_state.status().last_update
+    }
 }
 
 impl Default for DnfBackend {
@@ -2239,6 +2309,26 @@ impl PackageManagerBackend for YumBackend {
         // CentOS 7 uses systemd for service management
         get_systemd_service_status(name)
     }
+
+    fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
+        info!("Refreshing YUM package cache");
+        match cache::run_command_with_timeout("yum", &["makecache"]) {
+            Ok(_) => {
+                cache_state.update_success();
+                info!("YUM package cache refreshed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                let err_msg = format!("YUM cache refresh failed: {}", e);
+                cache_state.update_failure(err_msg.clone());
+                Err(anyhow::anyhow!("{}", err_msg))
+            }
+        }
+    }
+
+    fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
+        cache_state.status().last_update
+    }
 }
 
 impl Default for YumBackend {
@@ -2663,6 +2753,26 @@ impl PackageManagerBackend for PacmanBackend {
 
         // Arch Linux uses systemd for service management
         get_systemd_service_status(name)
+    }
+
+    fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
+        info!("Refreshing Pacman package cache");
+        match cache::run_command_with_timeout("pacman", &["-Sy"]) {
+            Ok(_) => {
+                cache_state.update_success();
+                info!("Pacman package cache refreshed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                let err_msg = format!("Pacman cache refresh failed: {}", e);
+                cache_state.update_failure(err_msg.clone());
+                Err(anyhow::anyhow!("{}", err_msg))
+            }
+        }
+    }
+
+    fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
+        cache_state.status().last_update
     }
 }
 

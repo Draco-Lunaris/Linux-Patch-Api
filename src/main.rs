@@ -24,6 +24,7 @@ use tracing::{error, info, warn};
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager};
 use linux_patch_api::enroll;
+use linux_patch_api::packages::cache::PackageCacheState;
 use linux_patch_api::packages::create_backend;
 use linux_patch_api::{init_logging, AppConfig, JobManager};
 
@@ -146,6 +147,10 @@ async fn main() -> Result<()> {
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
 
+    // Initialize package cache state
+    let cache_state = web::Data::new(PackageCacheState::new());
+    info!("Package cache state initialized");
+
     // Configure bind address
     let bind_address = format!("{}:{}", config.server.bind, config.server.port);
     info!(bind = %bind_address, "Starting HTTP server");
@@ -156,14 +161,21 @@ async fn main() -> Result<()> {
         let mut app = App::new()
             .wrap(Logger::default())
             .app_data(job_manager_data.clone())
-            .app_data(backend_data.clone());
+            .app_data(backend_data.clone())
+            .app_data(cache_state.clone());
 
         // Configure API routes
         app = app.configure(|cfg| {
-            configure_api_routes(cfg, job_manager_data.clone(), backend_data.clone());
+            configure_api_routes(
+                cfg,
+                job_manager_data.clone(),
+                backend_data.clone(),
+                cache_state.clone(),
+            );
         });
 
         // Configure health route (outside API scope)
+        // cache_state and backend are available via app_data registered above
         app = app.configure(configure_health_route);
 
         app
