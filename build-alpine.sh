@@ -11,8 +11,6 @@ echo ""
 # Clean stale packages from previous builds
 rm -f releases/linux-patch-api-*.apk 2>/dev/null || true
 rm -f /home/builduser/packages/home/x86_64/linux-patch-api-*.apk 2>/dev/null || true
-# Ensure abuild output directory exists
-mkdir -p /home/builduser/packages/home/x86_64/
 
 # Source cargo environment (for rustup-installed toolchain in CI)
 if [ -f "$HOME/.cargo/env" ]; then
