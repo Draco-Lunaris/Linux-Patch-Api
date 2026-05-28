@@ -321,10 +321,6 @@ jobs:
           apk add --no-cache alpine-sdk rust cargo openssl openssl-dev elogind-dev musl-dev abuild gcc
       - name: Build release binary
         run: cargo build --release --target x86_64-unknown-linux-musl
-      - name: Clean stale Alpine packages
-        run: |
-          rm -f releases/linux-patch-api-*.apk 2>/dev/null || true
-          rm -f /home/builduser/packages/home/x86_64/linux-patch-api-*.apk 2>/dev/null || true
       - name: Build Alpine package
         run: |
           chmod +x build-alpine.sh
