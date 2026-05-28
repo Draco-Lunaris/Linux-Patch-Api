@@ -147,8 +147,9 @@ if [ "$(id -u)" = "0" ]; then
     su - builduser -c "cd $WORKSPACE_DIR && abuild checksum && abuild -d"
     
     # Copy APK from builduser packages to releases
+    # Note: abuild outputs to /home/builduser/packages/builduser/x86_64/ not /home/builduser/packages/home/x86_64/
     mkdir -p releases
-    cp /home/builduser/packages/home/x86_64/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
+    cp /home/builduser/packages/builduser/x86_64/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
 else
     cd "$WORKSPACE_DIR"
     abuild checksum
