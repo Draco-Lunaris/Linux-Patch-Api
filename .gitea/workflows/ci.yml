@@ -185,6 +185,12 @@ jobs:
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           FILE=$(ls ../linux-patch-api_*.deb 2>/dev/null | head -1)
+          # Rename deb to include u2404 in filename to distinguish from u2204 build
+          if [ -n "$FILE" ]; then
+            U2404_FILE="$(echo "$FILE" | sed 's/_amd64/_u2404_amd64/')"
+            mv "$FILE" "$U2404_FILE"
+            FILE="$U2404_FILE"
+          fi
           chmod +x scripts/upload-release.sh
           ./scripts/upload-release.sh "$TAG_NAME" "$FILE"
 
@@ -318,19 +324,23 @@ jobs:
       - name: Clean stale Alpine packages
         run: |
           rm -f releases/linux-patch-api-*.apk 2>/dev/null || true
+          rm -rf /home/builduser/packages/ 2>/dev/null || true
       - name: Build Alpine package
         run: |
           chmod +x build-alpine.sh
           SKIP_CARGO_BUILD=1 ./build-alpine.sh
-      - name: Upload to Gitea Release
-        if: github.ref_type == 'tag'
-        env:
-          GITEA_TOKEN: ${{ secrets.GITEATOKEN }}
+      - name: Verify Alpine package
         run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          FILE=$(ls releases/*.apk 2>/dev/null | head -1)
-          chmod +x scripts/upload-release.sh
-          ./scripts/upload-release.sh "$TAG_NAME" "$FILE"
+          EXPECTED_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
+          FILE=$(ls releases/linux-patch-api-*.apk 2>/dev/null | head -1)
+          if [ -z "$FILE" ]; then
+            echo "ERROR: No Alpine package found!"
+            exit 1
+          fi
+          echo "Expected version: $EXPECTED_VERSION"
+          echo "Package file: $FILE"
+          # Verify filename contains expected version
+          if ! echo "$FILE" | grep -q "$EXPECTED_VERSION
 
   build-arch:
     name: Build Arch Package
