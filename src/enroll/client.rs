@@ -272,6 +272,14 @@ impl EnrollmentClient {
 
                 Ok(enrollment_response)
             }
+            409 => {
+                // Host already exists - log warning and return special response
+                // The caller should skip to polling phase with existing token
+                tracing::warn!(
+                    "Host already registered with manager (HTTP 409) — will attempt to resume polling"
+                );
+                Err(anyhow!("ENROLLMENT_CONFLICT: Host already exists"))
+            }
             429 => {
                 Err(anyhow!(
                     "Rate limited (HTTP 429) — enrollment requests limited to 1/minute per IP. Retry after 60 seconds."

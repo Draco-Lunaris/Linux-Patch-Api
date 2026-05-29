@@ -1,50 +1,39 @@
-# Issue #2 Implementation Todo
+# Auto-Enrollment Implementation Plan
 
-**Spec:** tasks/issue-2-package-cache-refresh.md
-**Version:** 1.1.17
-**Status:** Complete - PR #3 Open
+## Overview
+Implement auto-enrollment workflow so the agent self-heals when certs are missing or invalid, instead of crash-looping.
 
----
+## Spec Updates
+- [x] Update SPEC.md: Self-Enrollment section, CLI arguments, startup behavior, cert validation, exit codes
+- [x] Update DEPLOYMENT_GUIDE.md: Auto-enrollment deployment method, manual enrollment, config options
 
-## Implementation Checklist
+## Code Changes
+- [x] src/config/loader.rs: Cert validation (CertStatus enum, validate_certs function)
+- [x] src/config/loader.rs: EnrollmentConfig.manager_url changed to Option<String>
+- [x] src/config/loader.rs: cert_renewal_threshold_days and polling_token fields added
+- [x] src/config/loader.rs: save_polling_token() and clear_polling_token() methods
+- [x] src/main.rs: Auto-enrollment path when certs invalid + URL configured
+- [x] src/main.rs: --enroll exits after completion (no fall-through to server startup)
+- [x] src/main.rs: --renew-certs flag for manual cert renewal
+- [x] src/main.rs: SO_REUSEADDR on TcpListener::bind (socket2 crate)
+- [x] src/main.rs: Move "Listening on" log after actual bind
+- [x] src/main.rs: Exit code strategy (0=clean, 1=error, 2=enrollment in progress)
+- [x] src/enroll/client.rs: HTTP 409 (Conflict) handling for host already exists
+- [x] src/enroll/mod.rs: Polling token resume from persisted config
+- [x] src/enroll/mod.rs: Handle ENROLLMENT_CONFLICT gracefully
+- [x] configs/linux-patch-api.service: RestartSec=10s, StartLimitBurst=5, StartLimitIntervalSec=300
+- [x] debian/postinst: Check for certs and enrollment URL, print guidance
 
-- [x] 1. Create `src/packages/cache.rs` - Core cache types, stale detection, state persistence, 404 retry logic
-- [x] 2. Add `mod cache;` to `src/packages/mod.rs`
-- [x] 3. Implement `refresh_package_cache()` on AptBackend
-- [x] 4. Implement `refresh_package_cache()` on DnfBackend
-- [x] 5. Implement `refresh_package_cache()` on YumBackend
-- [x] 6. Implement `refresh_package_cache()` on ApkBackend
-- [x] 7. Implement `refresh_package_cache()` on PacmanBackend
-- [x] 8. Implement `last_cache_update()` on all backends (shared state)
-- [x] 9. Add `refresh_package_cache` and `last_cache_update` to PackageManagerBackend trait
-- [x] 10. Enhance health check in `src/api/handlers/system.rs` - add cache status, trigger refresh
-- [x] 11. Update HealthData struct with `last_cache_update` and `cache_status` fields
-- [x] 12. Add pre-apply cache refresh in `src/api/handlers/patches.rs`
-- [x] 13. Bump version in `Cargo.toml` to 1.1.17
-- [x] 14. Update `ARCHITECTURE.md` with cache refresh flow
-- [x] 15. Update `REQUIREMENTS.md` with FR-007
-- [x] 16. Implement state file persistence (cache.json read/write)
-- [x] 17. Write unit tests for cache module
-- [x] 18. Build and verify compilation
-- [x] 19. Commit and push to fix/package-cache-refresh branch
-- [x] 20. Create PR and reference Issue #2
+## Build & Test
+- [x] cargo check passes
+- [x] cargo test passes (107 unit + 7 e2e + 11 integration)
 
-## Review
-
-**PR:** https://gitea-lxc.moon-dragon.us/git-echo/linux_patch_api/pulls/3
-**Branch:** fix/package-cache-refresh
-**Commit:** cf3d597
-**Files Changed:** 12 files, 944 insertions, 15 deletions
-
-### Issue Resolution
-
-All 4 requirements from Issue #2 addressed:
-1. ✅ Pre-Upgrade Cache Refresh (MUST) - Mandatory cache refresh before every patch_apply
-2. ✅ Regular Interval Cache Refresh (MUST) - Cache refresh triggered on health check when stale (>4h)
-3. ✅ 404/Fetch Error Handling (SHOULD) - Auto-retry with cache refresh on fetch errors (1 retry)
-4. ✅ Stale Cache Detection (SHOULD) - Tracks last_cache_update, reports in health response
-
-### Known Issue
-- SSH key `git_echo_id_ed25519` was rejected by Gitea on port 2222 - pushed via HTTPS + API token instead
-- Root cause: Key fingerprint SHA256:W1BK9fCA53/or7iJkONbFSf3KJ6+oiAggPgisZNPhsc not registered in git-echo Gitea account
-- Needs investigation: SSH key may need re-registration in Gitea
+## Remaining
+- [ ] Build release package
+- [ ] Test auto-enrollment on a clean host
+- [ ] Test --enroll exits without starting server
+- [ ] Test --renew-certs flag
+- [ ] Test cert validation (missing, corrupt, expired, key mismatch, untrusted)
+- [ ] Test SO_REUSEADDR (restart after crash)
+- [ ] Test systemd exit code behavior
+- [ ] Deploy to linux-patch-manager-dev for integration testing

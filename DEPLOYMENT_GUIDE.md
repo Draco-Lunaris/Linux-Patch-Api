@@ -448,15 +448,37 @@ shred -u /tmp/client001.key.pem
 
 ## Self-Enrollment Deployment
 
-Self-enrollment allows a new host to automatically request and receive mTLS certificates from the `linux_patch_manager` without manual PKI distribution. The daemon extracts its machine identity, registers with the manager, polls for admin approval, and provisions certificates before starting the mTLS server.
+Self-enrollment allows a new host to automatically request and receive mTLS certificates from the `linux_patch_manager` without manual PKI distribution. The daemon supports two enrollment modes:
+
+1. **Auto-enrollment (recommended):** When `enrollment.manager_url` is configured in `config.yaml`, the daemon automatically enrolls on startup when certificates are missing or invalid. After provisioning, it continues to normal mTLS server startup.
+
+2. **Manual enrollment:** Run `linux-patch-api --enroll <manager_url>` explicitly. The process provisions certificates and **exits** — it does NOT start the server. Start the service separately after enrollment completes.
 
 ### How It Works
 
 The enrollment workflow operates in three phases:
 
 1. **Registration:** Extracts `/etc/machine-id`, FQDN, IP address, and OS details. Submits an unauthenticated `POST /api/v1/enroll` request to the manager. Receives a temporary `polling_token`.
-2. **Polling & Approval:** Enters a polling loop querying `GET /api/v1/enroll/status/{token}` (default: every 60 seconds, up to 1440 attempts = 24 hours). Aborts on HTTP 403/404 (denied/purged).
-3. **Provisioning:** On HTTP 200, downloads the PKI bundle (`ca.crt`, `server.crt`, `server.key`), writes certificates to configured mTLS paths, appends manager IP to whitelist, and transitions to standard mTLS listening mode.
+2. **Polling & Approval:** Enters a polling loop querying `GET /api/v1/enroll/status/{token}` (default: every 60 seconds, up to 1440 attempts = 24 hours). Aborts on HTTP 403/404 (denied/purged). The polling token is persisted to `config.yaml` for resume after service restart.
+3. **Provisioning:** On HTTP 200, downloads the PKI bundle (`ca.crt`, `server.crt`, `server.key`), writes certificates to configured mTLS paths, appends manager IP to whitelist. For auto-enrollment, transitions to standard mTLS listening mode. For `--enroll`, exits with code 0.
+
+### Certificate Validation
+
+On startup, the daemon validates all configured TLS certificates before attempting to bind the listening port:
+
+1. **Existence:** All three cert files must exist at configured paths
+2. **Parse:** Each file must be valid PEM (X.509 for certs, PKCS#8/PKCS#1 for keys)
+3. **Expiry:** Certs must not be expired. Certs expiring within `cert_renewal_threshold_days` (default 7) trigger a warning
+4. **Key match:** Server cert public key must correspond to server key private key
+5. **CA trust:** Server cert must be signed by the CA cert
+
+Validation results determine startup behavior:
+
+| Result | Action |
+|--------|--------|
+| Valid | Start normally with mTLS |
+| ExpiringSoon | Log warning, start normally, schedule re-enrollment |
+| Missing/Corrupt/Expired/KeyMismatch/Untrusted | Auto-enroll if `enrollment.manager_url` configured, otherwise exit with guidance |
 
 ### Prerequisites
 
@@ -480,62 +502,53 @@ nslookup manager.example.com
 curl -ks https://manager.example.com/api/v1/health
 ```
 
-### Step-by-Step Enrollment Procedure
+### Deployment Method 1: Auto-Enrollment (Recommended)
 
-#### Step 1: Install linux-patch-api Package
+The simplest deployment. Just install the package, configure the manager URL, and start the service. The daemon handles the rest.
+
+#### Step 1: Install Package
 
 ```bash
 # Debian/Ubuntu
-dpkg -i linux-patch-api_1.0.0-1_amd64.deb
+dpkg -i linux-patch-api_1.2.0-1_amd64.deb
 
 # RHEL/CentOS/Fedora
-rpm -ivh linux-patch-api-1.0.0-1.x86_64.rpm
+rpm -ivh linux-patch-api-1.2.0-1.x86_64.rpm
 ```
 
-#### Step 2: Run Enrollment Command
+#### Step 2: Configure Enrollment URL
 
 ```bash
-# Basic enrollment with manager URL
-sudo linux-patch-api --enroll https://manager.example.com
+# Edit the config to add manager URL
+cat >> /etc/linux_patch_api/config.yaml <<EOF
 
-# With verbose logging for troubleshooting
-sudo linux-patch-api --enroll https://manager.example.com --verbose
+enrollment:
+  manager_url: "https://linux-patch-manager-dev.moon-dragon.us"
+  polling_interval_seconds: 60
+  max_poll_attempts: 1440
+  cert_renewal_threshold_days: 7
+EOF
 ```
 
-The enrollment process will:
-- Extract machine identity from `/etc/machine-id` and system properties
-- Submit registration request to manager
-- Enter polling loop (logs progress every 60 seconds)
-- Await admin approval on the manager side
-- Download and install certificates automatically
-- Update IP whitelist with manager address
-- Start mTLS server upon successful provisioning
-
-#### Step 3: Monitor Enrollment Progress
+#### Step 3: Start Service
 
 ```bash
-# View enrollment logs in real-time
+# Enable and start
+systemctl enable linux-patch-api
+systemctl start linux-patch-api
+
+# Watch auto-enrollment progress
 journalctl -u linux-patch-api -f
-
-# Or if running manually:
-sudo linux-patch-api --enroll https://manager.example.com --verbose
 ```
 
-**Expected log progression:**
-```
-INFO Enrollment mode activated - manager_url=https://manager.example.com
-INFO Phase 1: Submitting registration request
-INFO Registration submitted - polling_token=abc123...
-INFO Phase 2: Polling for approval (interval=60s, max_attempts=1440)
-INFO Poll attempt 1/1440 - status=pending
-... (admin approves on manager side) ...
-INFO Phase 3: Provisioning certificates
-INFO ca.pem written to /etc/linux_patch_api/certs/ca.pem
-INFO server.pem written to /etc/linux_patch_api/certs/server.pem
-INFO server.key written to /etc/linux_patch_api/certs/server.key
-INFO Manager IP added to whitelist
-INFO Enrollment complete - proceeding to server startup
-```
+The daemon will:
+1. Validate certificates → find them missing
+2. Read `enrollment.manager_url` → begin auto-enrollment
+3. Register with manager, poll for approval
+4. Provision certificates after admin approval
+5. Continue to normal mTLS server startup
+
+**No manual `--enroll` command needed.** The service self-heals on restart if certificates are missing or invalid.
 
 #### Step 4: Admin Approval (Manager Side)
 
@@ -561,6 +574,61 @@ curl --cacert /etc/linux_patch_api/certs/ca.pem \
      https://localhost:12443/health
 ```
 
+### Deployment Method 2: Manual Enrollment
+
+For environments where auto-enrollment is not desired, or for initial setup before the service is enabled.
+
+#### Step 1: Install Package
+
+```bash
+# Debian/Ubuntu
+dpkg -i linux-patch-api_1.2.0-1_amd64.deb
+
+# RHEL/CentOS/Fedora
+rpm -ivh linux-patch-api-1.2.0-1.x86_64.rpm
+```
+
+#### Step 2: Run Enrollment Command
+
+```bash
+# Basic enrollment with manager URL
+sudo linux-patch-api --enroll https://linux-patch-manager-dev.moon-dragon.us
+
+# With verbose logging for troubleshooting
+sudo linux-patch-api --enroll https://linux-patch-manager-dev.moon-dragon.us --verbose
+```
+
+**Important:** The `--enroll` command provisions certificates and **exits**. It does NOT start the server. This prevents port conflicts with the systemd service.
+
+The enrollment process will:
+- Extract machine identity from `/etc/machine-id` and system properties
+- Submit registration request to manager
+- Enter polling loop (logs progress every 60 seconds)
+- Await admin approval on the manager side
+- Download and install certificates automatically
+- Update IP whitelist with manager address
+- Print: "Enrollment complete. Start service: systemctl start linux-patch-api"
+- Exit with code 0
+
+#### Step 3: Start Service
+
+```bash
+systemctl enable linux-patch-api
+systemctl start linux-patch-api
+systemctl status linux-patch-api
+```
+
+### Certificate Renewal
+
+Certificates can be renewed manually or automatically:
+
+```bash
+# Manual renewal
+sudo linux-patch-api --renew-certs
+
+# Auto-renewal: certs expiring within cert_renewal_threshold_days trigger re-enrollment on startup
+```
+
 ### Configuration Options
 
 Enrollment behavior can be tuned via the `enrollment` section in `/etc/linux_patch_api/config.yaml`:
@@ -568,16 +636,22 @@ Enrollment behavior can be tuned via the `enrollment` section in `/etc/linux_pat
 ```yaml
 # Enrollment Configuration
 enrollment:
+  manager_url: "https://linux-patch-manager-dev.moon-dragon.us"
   polling_interval_seconds: 60    # Time between approval polls (default: 60)
   max_poll_attempts: 1440         # Maximum poll attempts (default: 1440 = 24 hours)
+  polling_token: ""               # Auto-populated during enrollment (do not edit)
+  cert_renewal_threshold_days: 7  # Days before expiry to trigger re-enrollment
 ```
 
 **Parameter Reference:**
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `manager_url` | (none) | Manager URL for auto-enrollment. Required for auto-enrollment on startup. |
 | `polling_interval_seconds` | 60 | Seconds between approval status polls. Minimum: 10 |
 | `max_poll_attempts` | 1440 | Maximum polling attempts before timeout. Effective timeout = interval × attempts |
+| `polling_token` | (empty) | Auto-populated during enrollment for resume after restart. Do not edit manually. |
+| `cert_renewal_threshold_days` | 7 | Days before cert expiry to trigger automatic re-enrollment |
 
 **Effective Timeout Calculation:**
 - Default: 60s × 1440 = 86,400 seconds (24 hours)

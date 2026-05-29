@@ -1,6 +1,6 @@
 [package]
 name = "linux-patch-api"
-version = "1.1.17"
+version = "1.2.0"
 edition = "2021"
 authors = ["Echo <echo@moon-dragon.us>"]
 description = "Secure remote package management API for Linux systems"
@@ -48,6 +48,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Time/Date
 chrono = { version = "0.4", features = ["serde"] }
+time = "0.3"
 
 # Error handling
 thiserror = "1"
@@ -75,6 +76,9 @@ pidlock = "0.2"
 
 # URL parsing
 url = "2"
+
+# Socket options (SO_REUSEADDR)
+socket2 = { version = "0.5", features = ["all"] }
 
 # File locking for concurrent-safe whitelist modifications
 fs2 = "0.4"

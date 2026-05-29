@@ -3,7 +3,7 @@
 ## Project Overview
 **Title:** Linux_Patch_API  
 **Description:** API service for secure remote management of patching processes and software add/removal  
-**Version:** 0.0.1  
+**Version:** 1.2.0  
 **Status:** Draft  
 
 ## Scope
@@ -142,23 +142,82 @@
 ## Certificate Management
 
 - **CA Type:** Internal self-hosted Certificate Authority
-- **Distribution:** Manual certificate distribution OR automated Self-Enrollment
-  - Self-Enrollment provides automatic PKI provisioning after admin approval on linux_patch_manager
+- **Distribution:** Automated Self-Enrollment (preferred) OR manual certificate distribution
+  - Auto-Enrollment: daemon automatically enrolls on startup when certs are missing/invalid and `enrollment.manager_url` is configured
+  - Manual Enrollment: `linux-patch-api --enroll <url>` for explicit enrollment (exits after completion, does not start server)
   - Eliminates manual certificate copy/permission management for new hosts
 - **Scope:** Limited distribution (small number of authorized clients)
 - **Validity Period:** 1 year standard expiration
 - **Client Identity:** Unique certificate per client (no shared certs)
-- **Rotation:** Manual renewal process before expiration
+- **Rotation:** Automatic re-enrollment when certs are expiring within threshold, or manual via `--renew-certs`
+
+## Certificate Validation
+
+On startup, the daemon validates all configured TLS certificates before attempting to bind the listening port. Validation checks (in order):
+
+1. **Existence**: All three cert files (`ca_cert`, `server_cert`, `server_key`) must exist at configured paths
+2. **Parse**: Each file must be valid PEM — CA and server cert must parse as X.509, server key must parse as PKCS#8 or PKCS#1
+3. **Expiry**: CA cert and server cert must not be expired (`not_after > now`). Certs expiring within `cert_renewal_threshold_days` (default 7) trigger a warning and auto-re-enrollment
+4. **Key match**: Server cert's public key must correspond to server key's private key
+5. **CA trust**: Server cert must be signed by the CA cert (or chain validates to CA)
+
+Validation results determine startup behavior:
+
+| Result | Action |
+|--------|--------|
+| Valid | Start normally with mTLS |
+| ExpiringSoon | Log warning, start normally, schedule background re-enrollment |
+| Missing/Corrupt/Expired/KeyMismatch/Untrusted | Trigger auto-enrollment if `enrollment.manager_url` configured, otherwise exit with guidance |
 
 ## Self-Enrollment Workflow
 
-The `linux_patch_api` daemon supports an automated self-enrollment workflow to securely request identity from the `linux_patch_manager` without manual PKI distribution.
+The `linux_patch_api` daemon supports automated self-enrollment to securely request identity from the `linux_patch_manager` without manual PKI distribution. Enrollment can be triggered automatically on startup or manually via CLI.
 
-### CLI Invocation
+### Auto-Enrollment on Startup
+
+When cert validation fails AND `enrollment.manager_url` is configured in config.yaml, the daemon automatically enters enrollment mode:
+
+1. Log: "Certs [status]. Auto-enrolling with <url>"
+2. Skip cert validation (`skip_tls_validation=true`)
+3. Register with manager (POST /api/v1/enroll)
+   - If host already exists: log warning, skip to step 5 (polling for re-provisioning)
+   - If new registration: receive polling token
+4. Poll for approval (GET /api/v1/enroll/status/{token})
+   - Persist `polling_token` to config.yaml for resume after restart
+   - Retry with exponential backoff on network errors
+5. When approved: provision certs (ca.pem, server.pem, server.key)
+6. Re-validate certs (should now be Valid)
+7. Continue to normal mTLS server startup
+
+If enrollment fails (network error, manager unreachable):
+- Log: "Auto-enrollment failed: [error]. Retrying on next restart."
+- Exit code 1 (triggers systemd restart with backoff)
+
+If no enrollment URL is configured and certs are invalid:
+- Log clear error with guidance (add URL, run --enroll, or place certs manually)
+- Exit code 0 (don't trigger restart loop)
+
+### Polling Token Resume
+
+If the service restarts during enrollment polling:
+1. Read `polling_token` from config.yaml (persisted during enrollment)
+2. If token exists and `enrollment.manager_url` is configured:
+   a. Resume polling from where left off
+   b. Don't re-register (host already has a pending request)
+3. On successful provisioning:
+   a. Clear `polling_token` from config.yaml
+   b. Continue to normal server startup
+
+### CLI Enrollment (`--enroll`)
+
 ```
 linux-patch-api --enroll https://<manager_url>
 ```
-The enrollment flow runs before mTLS server startup. On success, the daemon proceeds to normal server initialization with the newly provisioned certificates.
+
+The enrollment flow runs and **exits after completion** — it does NOT start the server. This prevents port conflicts with the systemd service.
+
+- On success: prints "Enrollment complete. Start service: systemctl start linux-patch-api" and exits with code 0
+- On failure: exits with code 1 (triggers systemd restart if configured)
 
 ### Security Model
 - Initial connection uses TLS with verification disabled (`danger_accept_invalid_certs`)
@@ -196,7 +255,7 @@ The enrollment flow runs before mTLS server startup. On success, the daemon proc
 - **Backup Strategy:** Existing certificate files renamed to `.bak` before overwrite
 - **Target Paths:** Configured via TLS settings or defaults (`/etc/linux_patch_api/certs/{ca,server,server.key}.pem`)
 - **Whitelist Auto-Append:** Manager IP resolved (hostname → DNS or direct IP) and appended to `/etc/linux_patch_api/whitelist.yaml`
-- **Completion:** Daemon transitions to standard mTLS listening mode without requiring service restart
+- **Completion:** For auto-enrollment: daemon transitions to standard mTLS listening mode without requiring service restart. For `--enroll`: daemon exits with code 0.
 
 ## Audit Logging
 
@@ -215,6 +274,8 @@ The enrollment flow runs before mTLS server startup. On success, the daemon proc
   - Whitelist auto-append during enrollment (manager IP added)
   - Enrollment timeout or denial with reason
   - Signal interruption (SIGINT/SIGTERM) during polling
+  - Auto-enrollment triggered (cert status and reason)
+  - Certificate validation results on startup
 
 - **Log Storage:**
   - Primary: Distribution-appropriate logging
@@ -257,12 +318,9 @@ The enrollment flow runs before mTLS server startup. On success, the daemon proc
   - **mTLS:** CA cert path, server cert path, server key path
   - **Logging:** log level, log retention, remote syslog server (optional)
   - **Security:** job timeout, max concurrent jobs, rate limiting
+  - **Enrollment:** manager_url, polling_interval_seconds, max_poll_attempts, polling_token (auto-populated), cert_renewal_threshold_days
 
 - **Hard-Coded Paths (not configurable):**
-  - Whitelist file: `/etc/linux_patch_api/whitelist.yaml`
-  - Data directory: `/var/lib/linux_patch_api/`
-  - Job storage: `/var/lib/linux_patch_api/jobs/`
-- Hard-Coded Paths (not configurable):
   - Whitelist file: `/etc/linux_patch_api/whitelist.yaml`
   - Data directory: `/var/lib/linux_patch_api/`
   - Job storage: `/var/lib/linux_patch_api/jobs/`
@@ -286,15 +344,25 @@ The enrollment flow runs before mTLS server startup. On success, the daemon proc
 |------|-------------|
 | `--config <PATH>` or `-c` | Path to configuration file (default: `/etc/linux_patch_api/config.yaml`) |
 | `--verbose` or `-v` | Enable verbose (DEBUG-level) logging |
-| `--enroll <MANAGER_URL>` | Run self-enrollment flow with manager at URL, then start mTLS server |
+| `--enroll <MANAGER_URL>` | Run self-enrollment flow with manager at URL, then EXIT (does not start server) |
+| `--renew-certs` | Validate existing certs and re-enroll if expiring within threshold or invalid |
 | `--version` or `-V` | Print version information and exit |
 | `--help` or `-h` | Display help information and exit |
 
 ### Enrollment Mode Behavior
-- When `--enroll` is specified, the daemon executes the self-enrollment flow before starting the mTLS server
-- On enrollment success: proceeds to normal server startup with provisioned certificates
-- On enrollment failure: exits immediately with error code (no server started)
-- TLS verification disabled on initial manager connection (manager approval workflow provides security)
+
+- **`--enroll <URL>`**: Executes enrollment flow, provisions certs, then **exits with code 0**. Does NOT start server or bind port. Print guidance message on completion.
+- **Auto-enrollment (startup)**: Triggered when cert validation fails and `enrollment.manager_url` is configured. After provisioning, continues to normal server startup.
+- **`--renew-certs`**: Validates existing certs. If expiring within threshold or invalid, re-enrolls using `enrollment.manager_url` from config. Exits with code 0 after completion.
+- TLS verification is disabled on initial manager connection (manager approval workflow provides security)
+
+### Exit Codes
+
+| Code | Meaning | systemd Behavior |
+|------|---------|------------------|
+| 0 | Clean exit: no certs and no enrollment URL configured, or --enroll/--renew-certs success | No restart |
+| 1 | Error: config error, enrollment network failure, cert validation error | Restart with backoff |
+| 2 | Certs invalid, auto-enrollment in progress (will retry) | Restart with backoff |
 
 - **Phase 1 Acceptance Criteria:**
   - All endpoints functional with mTLS authentication

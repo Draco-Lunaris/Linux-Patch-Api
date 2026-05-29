@@ -9,7 +9,9 @@ Type=simple
 NotifyAccess=all
 ExecStart=/usr/bin/linux-patch-api --config /etc/linux_patch_api/config.yaml
 Restart=on-failure
-RestartSec=5s
+RestartSec=10s
+StartLimitBurst=5
+StartLimitIntervalSec=300
 TimeoutStopSec=30s
 
 # Process management

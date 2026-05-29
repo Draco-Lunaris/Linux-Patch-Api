@@ -1,2 +1,15 @@
 /target
 /releases/
+
+# Build artifacts
+debian/tmp/
+debian/linux-patch-api/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/linux-patch-api.debhelper.log
+debian/linux-patch-api.postrm.debhelper
+debian/linux-patch-api.substvars
+*.deb
+*.buildinfo
+*.changes

@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "linux-patch-api"
-version = "1.1.17"
+version = "1.2.0"
 dependencies = [
  "actix",
  "actix-rt",
@@ -1942,10 +1942,12 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serial_test",
+ "socket2 0.5.10",
  "sysinfo",
  "systemd",
  "tempfile",
  "thiserror 1.0.69",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-test",

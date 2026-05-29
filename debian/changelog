@@ -1,190 +1,22 @@
+linux-patch-api (1.2.0) unstable; urgency=medium
+
+  * Add auto-enrollment on startup when certs are missing/invalid
+  * Add cert validation (existence, parse, expiry, key match, CA trust)
+  * Add --renew-certs CLI flag for manual cert renewal
+  * Fix --enroll to exit after completion (no port conflict)
+  * Add SO_REUSEADDR to prevent Address already in use errors
+  * Add polling token persistence for enrollment resume after restart
+  * Add exit code strategy (0=clean, 1=error, 2=enrollment in progress)
+  * Increase RestartSec to 10s and add StartLimitBurst=5
+  * Add cert and enrollment URL check in postinst
+  * Fix misleading "Listening on" log before actual bind
+
+ -- Echo <echo@moon-dragon.us>  Thu, 29 May 2026 10:20:00 -0500
+
 linux-patch-api (1.1.17) unstable; urgency=medium
 
   * Add mandatory package cache refresh before patch_apply
   * Add health check cache refresh when stale (>4h)
   * Add cache status fields to health response
-  * Add 404/fetch error retry with cache refresh
-  * Add degraded health status on cache failure
-  * New src/packages/cache.rs module
 
- -- Echo <echo@moon-dragon.us>  Tue, 27 May 2026 15:30:00 -0500
-
-linux-patch-api (1.1.16) unstable; urgency=medium
-
-  * Add Pacman package manager backend for Arch Linux
-  * Fix: Pacman backend not yet implemented error on Arch systems
-  * Support pacman -Q for package listing, pacman -Qi for package details
-  * Support pacman -Qu for patch/update detection
-  * Fix Arch CI: add stale package cleanup and version verification
-
- -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 17:11:00 -0500
-
-linux-patch-api (1.1.15) unstable; urgency=medium
-
-  * Add DNF package manager backend for Fedora/RHEL/CentOS 8+
-  * Add YUM package manager backend for RHEL/CentOS 7
-  * Fix: DNF backend not yet implemented error on Fedora systems
-  * Support rpm -qa for package listing, rpm -qi for package details
-  * Support dnf check-update (exit code 100) for patch detection
-  * Support yum check-update (exit code 100) for patch detection
-
- -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 15:41:00 -0500
-
-linux-patch-api (1.1.14) unstable; urgency=medium
-
-  * Fix RPM packaging: pre-build binary before tarball (like Alpine/Arch pattern)
-  * Fix rpmbuild can't find cargo in PATH - binary now included in source tarball
-  * Fix config file ownership: add %defattr(-,root,root,-) in %files section
-  * Fix Requires: libsystemd -> systemd-libs for Fedora compatibility
-  * Remove Requires: systemd (not needed, may not exist in containers)
-  * Add stale RPM cleanup and version verification to build-rpm.sh
-  * Support SKIP_CARGO_BUILD=1 like Alpine/Arch builds
-
- -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 14:44:00 -0500
-
-linux-patch-api (1.1.13) unstable; urgency=medium
-
-  * Fix APK backend detection for Alpine (/sbin/apk not /usr/bin/apk)
-
- -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 13:55:00 -0500
-
-linux-patch-api (1.1.12) unstable; urgency=medium
-
-  * Add APK (Alpine Linux) package manager backend
-  * Add machine-id generation to Alpine pre-install script
-  * Fix OpenRC init script ownership (root:root)
-
- -- Echo <echo@moon-dragon.us>  Tue, 20 May 2026 12:25:00 -0500
-
-linux-patch-api (1.1.10-1) unstable; urgency=low
-
-  * Fix Alpine install scripts: use separate files with valid abuild suffixes
-  * Root cause: .apk-install is not a valid abuild suffix (abuild silently fails)
-  * Correct format: pkgname.pre-install, .post-install, .pre-deinstall, .post-deinstall
-  * Verified on actual Alpine runner: install script suffixes now pass abuild validation
-
- -- Echo <echo@moon-dragon.us>  Wed, 20 May 2026 07:43:00 -0500
-
-linux-patch-api (1.1.9-1) unstable; urgency=low
-
-  * Fix non-Ubuntu packages: align Arch, RPM, Alpine with Debian baseline
-  * Remove system user creation (service runs as root)
-  * Fix ownership to root:root across all platforms
-  * Fix Alpine: co-locate install script with APKBUILD
-  * Fix Arch: correct $startdir path in PKGBUILD
-  * Fix RPM: add runtime deps, comment BuildRequires for CI
-  * Add comprehensive installation docs for all platforms
-
- -- Echo <echo@moon-dragon.us>  Tue, 19 May 2026 21:54:00 -0500
-
-linux-patch-api (1.1.8-1) unstable; urgency=low
-
-  * Fix FQDN resolution: prioritize hostname -f over /etc/hostname for full domain
-  * Fix display_name blank: add hostname field to enrollment request
-  * Fix Arch package: add install scripts, user creation, directory creation
-  * Fix Alpine package: add install scripts, user creation, missing config.yaml
-  * Fix RPM package: dynamic version, config handling, tarball exclusions
-
- -- Echo <echo@moon-dragon.us>  Mon, 18 May 2026 19:34:00 -0500
-
-linux-patch-api (1.1.7-1) unstable; urgency=low
-
-  * Fix CI pipeline: add cargo clean and remove old .deb artifacts before packaging
-  * Bump version to 1.1.7 to ensure clean build with correct binary
-
- -- Echo <echo@moon-dragon.us>  Mon, 18 May 2026 12:20:00 -0500
-
-linux-patch-api (1.1.6-1) unstable; urgency=low
-
-  * Fix rustls CryptoProvider initialization panic on server startup
-  * Add explicit CryptoProvider::install_default() for aws-lc-rs
-
- -- Echo <echo@moon-dragon.us>  Mon, 18 May 2026 08:45:00 -0500
-
-linux-patch-api (1.1.5-1) unstable; urgency=low
-
-  * Fix enrollment IP detection: filter Docker bridge subnets (172.16.0.0/12)
-  * Fix enrollment IP detection: filter link-local addresses (169.254.0.0/16)
-  * Add report_interface and report_ip config options for explicit IP override
-  * Add route-based IP selection using kernel routing table
-  * Fix package versioning to derive from Cargo.toml
-
- -- Echo <echo@moon-dragon.us>  Sun, 18 May 2026 02:00:00 -0500
-
-linux-patch-api (0.3.12-1) unstable; urgency=low
-
-  * Fix socket activation detection to use resolved service name
-  * Queries like "sshd" now correctly resolve to "ssh.socket" for socket activation
-
- -- Echo <echo@moon-dragon.us>  Tue, 06 May 2026 20:42:00 -0500
-
-linux-patch-api (0.3.10-1) unstable; urgency=low
-
-  * Fix socket activation detection for service status healthy logic
-  * When service is inactive but enabled, check if .socket unit is active
-
- -- Echo <echo@moon-dragon.us>  Mon, 05 May 2026 13:10:00 -0500
-
-linux-patch-api (0.3.9-1) unstable; urgency=low
-
-  * Fix socket activation detection for service status healthy logic
-  * When service is inactive but enabled, check if .socket unit is active
-  * Mark service healthy if socket is listening (e.g., ssh.socket for ssh.service)
-
- -- Echo <echo@moon-dragon.us>  Mon, 05 May 2026 11:25:00 -0500
-
-linux-patch-api (0.3.8-1) unstable; urgency=low
-
-  * Add GET /api/v1/system/services/{name} endpoint for service health checks
-  * Add ServiceStatus struct with systemd and OpenRC support
-  * Add get_service_status() to PackageManagerBackend trait
-  * Implement systemd service status via systemctl
-  * Implement OpenRC service status via rc-service
-  * Add E2E test for service status endpoint
-
- -- Echo <echo@moon-dragon.us>  Mon, 04 May 2026 23:44:00 -0500
-
-linux-patch-api (0.3.5-1) unstable; urgency=low
-
-  * Remove CapabilityBoundingSet and AmbientCapabilities - apt needs full root capabilities
-  * Remove ProtectSystem=strict, NoNewPrivileges, RestrictSUIDSGID - block core functionality
-  * Remove ReadWritePaths - unnecessary without ProtectSystem=strict
-  * Fix E2E test: properly FAIL on status=failed package operations
-  * Fix E2E test: require status=completed for install/update/remove lifecycle
-  * Update service file Type=notify -> Type=simple
-  * Add DEBIAN_FRONTEND=noninteractive environment variable
-
- -- Echo <echo@moon-dragon.us>  Sat, 03 May 2026 03:15:00 -0500
-
-linux-patch-api (0.3.4-1) unstable; urgency=low
-
-  * Fix CI workflow: prevent recursive tag triggers (v* -> v*.*.*)
-  * Fix CI workflow: upload u2204 deb to same release (no -u2204 suffix)
-  * Remove sudo from apt commands (service runs as root)
-  * Remove NoNewPrivileges and RestrictSUIDSGID from service file
-  * Update service file Type=notify -> Type=simple
-  * Add DEBIAN_FRONTEND=noninteractive environment variable
-
- -- Echo <echo@moon-dragon.us>  Fri, 02 May 2026 22:00:00 -0500
-
-linux-patch-api (0.3.3-1) unstable; urgency=low
-
-  * Fix dpkg packaging: remove linux-patch-api user creation
-  * Change ownership to root:root in preinst/postinst scripts
-  * Bump version to 0.3.3
-
- -- Echo <echo@moon-dragon.us>  Fri, 02 May 2026 21:45:00 -0500
-
-linux-patch-api (0.3.2-1) unstable; urgency=low
-
-  * Remove sudo from apt commands in source code
-  * Remove NoNewPrivileges=true from service file
-  * Remove RestrictSUIDSGID=true from service file
-  * Add DEBIAN_FRONTEND=noninteractive to service file
-  * Fix TLS 1.3 enforcement in mtls.rs
-  * Add client_disconnect_timeout to main.rs
-  * Optimize RwLock usage in jobs/manager.rs
-  * Bump version to 0.3.2
-
- -- Echo <echo@moon-dragon.us>  Fri, 02 May 2026 21:30:00 -0500
-
+ -- Echo <echo@moon-dragon.us>  Thu, 22 May 2026 12:00:00 -0500
