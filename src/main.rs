@@ -150,7 +150,9 @@ async fn main() -> Result<()> {
 
         match enroll::run_enrollment(&manager_url, &mut config, &args.config).await {
             Ok(()) => {
-                info!("Certificate renewal complete. Start service: systemctl start linux-patch-api");
+                info!(
+                    "Certificate renewal complete. Start service: systemctl start linux-patch-api"
+                );
                 std::process::exit(ExitCode::Clean as i32);
             }
             Err(e) => {
@@ -208,7 +210,8 @@ async fn main() -> Result<()> {
                             status,
                             manager_url
                         );
-                        match enroll::run_enrollment(&manager_url, &mut config, &args.config).await {
+                        match enroll::run_enrollment(&manager_url, &mut config, &args.config).await
+                        {
                             Ok(()) => {
                                 info!("Auto-enrollment complete - continuing to server startup");
                                 // Re-load config to pick up any changes from enrollment
@@ -374,9 +377,9 @@ async fn main() -> Result<()> {
                     .set_reuse_address(true)
                     .map_err(|e| anyhow::anyhow!("Failed to set SO_REUSEADDR: {}", e))?;
 
-                let bind_addr: std::net::SocketAddr = bind_address
-                    .parse()
-                    .map_err(|e| anyhow::anyhow!("Invalid bind address '{}': {}", bind_address, e))?;
+                let bind_addr: std::net::SocketAddr = bind_address.parse().map_err(|e| {
+                    anyhow::anyhow!("Invalid bind address '{}': {}", bind_address, e)
+                })?;
 
                 socket
                     .bind(&socket2::SockAddr::from(bind_addr))

@@ -175,18 +175,11 @@ pub enum CertStatus {
     /// All certificates are valid and not expiring soon.
     Valid,
     /// Certificates are valid but expiring within the threshold.
-    ExpiringSoon {
-        not_after: OffsetDateTime,
-    },
+    ExpiringSoon { not_after: OffsetDateTime },
     /// One or more certificate files are missing.
-    Missing {
-        paths: Vec<PathBuf>,
-    },
+    Missing { paths: Vec<PathBuf> },
     /// A certificate file exists but cannot be parsed as valid PEM.
-    Corrupt {
-        path: PathBuf,
-        error: String,
-    },
+    Corrupt { path: PathBuf, error: String },
     /// A certificate has expired (not_after is in the past).
     Expired {
         path: PathBuf,
@@ -312,9 +305,7 @@ pub fn validate_certs(config: &AppConfig) -> Result<CertStatus> {
     let threshold = time::Duration::days(i64::from(threshold_days));
 
     // Check CA cert expiry
-    let ca_der = ca_certs
-        .first()
-        .expect("ca_certs verified non-empty above");
+    let ca_der = ca_certs.first().expect("ca_certs verified non-empty above");
     match x509_parser::parse_x509_certificate(ca_der.as_ref()) {
         Ok((_, ca_cert)) => {
             let ca_not_after = ca_cert.validity().not_after.to_datetime();
@@ -337,24 +328,25 @@ pub fn validate_certs(config: &AppConfig) -> Result<CertStatus> {
     let server_der = server_certs
         .first()
         .expect("server_certs verified non-empty above");
-    let server_not_after: OffsetDateTime = match x509_parser::parse_x509_certificate(server_der.as_ref()) {
-        Ok((_, cert)) => {
-            let not_after = cert.validity().not_after.to_datetime();
-            if not_after < now {
-                return Ok(CertStatus::Expired {
-                    path: cert_path.clone(),
-                    not_after,
-                });
+    let server_not_after: OffsetDateTime =
+        match x509_parser::parse_x509_certificate(server_der.as_ref()) {
+            Ok((_, cert)) => {
+                let not_after = cert.validity().not_after.to_datetime();
+                if not_after < now {
+                    return Ok(CertStatus::Expired {
+                        path: cert_path.clone(),
+                        not_after,
+                    });
+                }
+                not_after
             }
-            not_after
-        }
-        Err(e) => {
-            return Ok(CertStatus::Corrupt {
-                path: cert_path,
-                error: format!("Failed to parse server certificate DER: {}", e),
-            })
-        }
-    };
+            Err(e) => {
+                return Ok(CertStatus::Corrupt {
+                    path: cert_path,
+                    error: format!("Failed to parse server certificate DER: {}", e),
+                })
+            }
+        };
 
     // Check if expiring soon
     let expires_soon = server_not_after < now + threshold;
@@ -613,7 +605,10 @@ cert_renewal_threshold_days: 14
         assert!(config.effective_manager_url().is_none());
 
         config.manager_url = Some("https://manager.example.com".to_string());
-        assert_eq!(config.effective_manager_url(), Some("https://manager.example.com"));
+        assert_eq!(
+            config.effective_manager_url(),
+            Some("https://manager.example.com")
+        );
 
         config.manager_url = Some("".to_string());
         assert!(config.effective_manager_url().is_none());
