@@ -111,6 +111,8 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
     runs-on: [self-hosted, linux, ubuntu-24.04]
     steps:
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
@@ -135,6 +137,8 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
     runs-on: [self-hosted, linux, ubuntu-22.04]
     steps:
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
@@ -159,6 +163,8 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
     runs-on: [self-hosted, linux, debian-13]
     steps:
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
@@ -183,6 +189,8 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
     runs-on: [self-hosted, linux, fedora]
     steps:
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
@@ -203,6 +211,8 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
     runs-on: [self-hosted, linux, almalinux-10]
     steps:
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
@@ -223,6 +233,8 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
     runs-on: [self-hosted, linux, arch]
     steps:
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo pacman -Syu --noconfirm systemd openssl pkg-config gcc
