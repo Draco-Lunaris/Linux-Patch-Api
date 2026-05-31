@@ -71,27 +71,40 @@ cp "${PROJECT_ROOT}/configs/linux-patch-api.service" "${BUILD_DIR}/lib/systemd/s
 cp "${PROJECT_ROOT}/configs/config.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/config.yaml"
 cp "${PROJECT_ROOT}/configs/whitelist.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/whitelist.yaml"
 
-# DEBIAN control files
-# Extract only the binary package paragraph from debian/control
-# (dpkg-deb --build expects a single paragraph starting with Package:)
-awk '/^Package:/{found=1} found{print}' "${PROJECT_ROOT}/debian/control" > "${BUILD_DIR}/DEBIAN/control"
-cp "${PROJECT_ROOT}/debian/postinst" "${BUILD_DIR}/DEBIAN/postinst"
-cp "${PROJECT_ROOT}/debian/prerm" "${BUILD_DIR}/DEBIAN/prerm"
-cp "${PROJECT_ROOT}/debian/postrm" "${BUILD_DIR}/DEBIAN/postrm"
-chmod 755 "${BUILD_DIR}/DEBIAN/postinst" "${BUILD_DIR}/DEBIAN/prerm" "${BUILD_DIR}/DEBIAN/postrm"
-
-# Update Version in control file to match
-sed -i "s/^Version: .*/Version: ${VERSION}-${RELEASE}/" "${BUILD_DIR}/DEBIAN/control"
-
-# Calculate installed size (in KB)
+# Calculate installed size BEFORE generating control file
 INSTALLED_SIZE=$(du -sk "${BUILD_DIR}" | cut -f1)
-sed -i "s/^Installed-Size: .*/Installed-Size: ${INSTALLED_SIZE}/" "${BUILD_DIR}/DEBIAN/control"
 
-# Add conffiles
+# Generate DEBIAN/control from scratch for dpkg-deb --build
+# (debian/control uses dpkg-buildpackage substitution variables like
+#  ${shlibs:Depends} that dpkg-deb cannot resolve)
+cat > "${BUILD_DIR}/DEBIAN/control" <<EOF
+Package: linux-patch-api
+Version: ${VERSION}-${RELEASE}
+Architecture: amd64
+Maintainer: Echo <echo@moon-dragon.us>
+Installed-Size: ${INSTALLED_SIZE}
+Depends: systemd, libsystemd0
+Section: admin
+Priority: optional
+Homepage: https://github.com/Draco-Lunaris/Linux-Patch-Api
+Description: Secure remote package management API for Linux systems
+ Linux Patch API provides a secure, mTLS-authenticated REST API for
+ remote package management operations including package installation
+ and removal, security patch application, system health monitoring,
+ and job queue management with WebSocket status streaming.
+EOF
+
+# Conffiles
 cat > "${BUILD_DIR}/DEBIAN/conffiles" << 'EOF'
 /etc/linux_patch_api/config.yaml
 /etc/linux_patch_api/whitelist.yaml
 EOF
+
+# Maintainer scripts
+cp "${PROJECT_ROOT}/debian/postinst" "${BUILD_DIR}/DEBIAN/postinst"
+cp "${PROJECT_ROOT}/debian/prerm" "${BUILD_DIR}/DEBIAN/prerm"
+cp "${PROJECT_ROOT}/debian/postrm" "${BUILD_DIR}/DEBIAN/postrm"
+chmod 755 "${BUILD_DIR}/DEBIAN/postinst" "${BUILD_DIR}/DEBIAN/prerm" "${BUILD_DIR}/DEBIAN/postrm"
 
 info "Package structure assembled (${INSTALLED_SIZE} KB)."
 
