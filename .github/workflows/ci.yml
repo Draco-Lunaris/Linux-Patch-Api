@@ -244,6 +244,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: alpine:latest
+      env:
+        HOME: /root
     steps:
       - name: Install prerequisites for actions/checkout
         run: apk add --no-cache bash git curl tar
@@ -258,8 +260,6 @@ jobs:
         run: rustup target add x86_64-unknown-linux-musl
       - name: Build release binary (musl target)
         run: cargo build --release --target x86_64-unknown-linux-musl
-      - name: Generate abuild signing keys
-        run: abuild-keygen -a -n
       - name: Build Alpine package
         run: |
           chmod +x build-alpine.sh

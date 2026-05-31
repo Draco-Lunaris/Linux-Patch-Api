@@ -22,10 +22,22 @@ fi
 # Generate abuild signing keys
 echo "Generating abuild signing keys..."
 apk add --no-cache abuild
+
+# Force HOME to /root for consistent key generation location
+export HOME=/root
+mkdir -p "$HOME/.abuild"
 abuild-keygen -a -n 2>&1 | tee /tmp/keygen.log
-KEYFILE=$(ls /root/.abuild/*.rsa 2>/dev/null | head -1)
+
+# Find the generated key using find (ls fails on dash-prefixed filenames)
+KEYFILE=$(find "$HOME/.abuild" -name "*.rsa" ! -name "*.pub" -type f 2>/dev/null | head -1)
 if [ -z "$KEYFILE" ]; then
-    KEYFILE=$(ls /root/.abuild/-*.rsa 2>/dev/null | head -1)
+    # Fallback: check other common locations where keys might end up
+    KEYFILE=$(find /github/home/.abuild -name "*.rsa" ! -name "*.pub" -type f 2>/dev/null | head -1)
+fi
+if [ -z "$KEYFILE" ]; then
+    echo "ERROR: No abuild signing key found!"
+    echo "Searched: $HOME/.abuild, /github/home/.abuild"
+    exit 1
 fi
 echo "Found key: $KEYFILE"
 echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /etc/abuild.conf
@@ -117,6 +129,10 @@ EOF
 # Build APK package
 echo "Building APK package..."
 
+# Determine the directory where abuild keys were generated
+KEY_DIR=$(dirname "$KEYFILE" 2>/dev/null || echo "$HOME/.abuild")
+echo "Key directory: $KEY_DIR"
+
 # For CI environments where we may run as root or as a build user
 if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for abuild..."
@@ -127,17 +143,18 @@ if [ "$(id -u)" = "0" ]; then
     chown -R builduser:builduser "$WORKSPACE_DIR"
     
     # Set up builduser home directory for abuild
+    # Copy keys from wherever abuild-keygen put them (KEY_DIR)
     mkdir -p /home/builduser/.abuild
-    cp /root/.abuild/* /home/builduser/.abuild/ 2>/dev/null || true
+    cp "$KEY_DIR"/* /home/builduser/.abuild/ 2>/dev/null || true
     chown -R builduser:builduser /home/builduser/.abuild
     
-    KEYFILE=$(ls /home/builduser/.abuild/*.rsa 2>/dev/null | head -1)
-    if [ -z "$KEYFILE" ]; then
-        KEYFILE=$(ls /home/builduser/.abuild/-*.rsa 2>/dev/null | head -1)
+    BUILDUSER_KEYFILE=$(ls /home/builduser/.abuild/*.rsa 2>/dev/null | head -1)
+    if [ -z "$BUILDUSER_KEYFILE" ]; then
+        BUILDUSER_KEYFILE=$(ls /home/builduser/.abuild/-*.rsa 2>/dev/null | head -1)
     fi
     
-    echo "Key file: $KEYFILE"
-    echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /home/builduser/.abuild/abuild.conf
+    echo "Builduser key file: $BUILDUSER_KEYFILE"
+    echo "PACKAGER_PRIVKEY=\"$BUILDUSER_KEYFILE\"" > /home/builduser/.abuild/abuild.conf
     chown builduser:builduser /home/builduser/.abuild/abuild.conf
     
     # Install public key BEFORE abuild (fixes UNTRUSTED signature)
