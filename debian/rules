@@ -8,7 +8,7 @@ export DEB_CARGO_BUILD_FLAGS=--release
 	dh $@
 
 override_dh_auto_build:
-	. "$$HOME/.cargo/env" && cargo build --release --target x86_64-unknown-linux-gnu
+	cargo build --release --target x86_64-unknown-linux-gnu
 
 override_dh_auto_install:
 	dh_auto_install
