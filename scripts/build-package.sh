@@ -72,7 +72,9 @@ cp "${PROJECT_ROOT}/configs/config.yaml.example" "${BUILD_DIR}/etc/linux_patch_a
 cp "${PROJECT_ROOT}/configs/whitelist.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/whitelist.yaml"
 
 # DEBIAN control files
-cp "${PROJECT_ROOT}/debian/control" "${BUILD_DIR}/DEBIAN/control"
+# Extract only the binary package paragraph from debian/control
+# (dpkg-deb --build expects a single paragraph starting with Package:)
+awk '/^Package:/{found=1} found{print}' "${PROJECT_ROOT}/debian/control" > "${BUILD_DIR}/DEBIAN/control"
 cp "${PROJECT_ROOT}/debian/postinst" "${BUILD_DIR}/DEBIAN/postinst"
 cp "${PROJECT_ROOT}/debian/prerm" "${BUILD_DIR}/DEBIAN/prerm"
 cp "${PROJECT_ROOT}/debian/postrm" "${BUILD_DIR}/DEBIAN/postrm"
@@ -80,9 +82,6 @@ chmod 755 "${BUILD_DIR}/DEBIAN/postinst" "${BUILD_DIR}/DEBIAN/prerm" "${BUILD_DI
 
 # Update Version in control file to match
 sed -i "s/^Version: .*/Version: ${VERSION}-${RELEASE}/" "${BUILD_DIR}/DEBIAN/control"
-
-# Remove Build-Depends line (not needed for dpkg-deb --build)
-sed -i '/^Build-Depends:/d' "${BUILD_DIR}/DEBIAN/control"
 
 # Calculate installed size (in KB)
 INSTALLED_SIZE=$(du -sk "${BUILD_DIR}" | cut -f1)
