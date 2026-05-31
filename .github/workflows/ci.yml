@@ -10,6 +10,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
   fmt:
     name: Rust Format
@@ -79,7 +82,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev dpkg-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev dpkg-dev debhelper
       - name: Build .deb package
         run: |
           . "$HOME/.cargo/env"
