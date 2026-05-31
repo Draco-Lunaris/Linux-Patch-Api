@@ -9,11 +9,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
 
 jobs:
+  # ── Quality Gates (GitHub-hosted, all triggers) ──────────────────────────
+
   fmt:
     name: Rust Format
     runs-on: ubuntu-latest
@@ -71,22 +75,18 @@ jobs:
       - run: cargo test --test enrollment_test
       - run: cargo test --test enrollment_e2e
 
-  build-deb:
-    name: Build & Release
-    needs: [fmt, clippy, test, enrollment-tests]
+  # ── Release Preparation (tag push only) ───────────────────────────────────
+
+  prepare-release:
+    name: Prepare Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsystemd-dev pkg-config libssl-dev
-      - name: Build .deb package
-        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
       - name: Generate release notes
-        if: startsWith(github.ref, 'refs/tags/v')
         id: release_notes
         run: |
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
@@ -98,9 +98,153 @@ jobs:
           echo "notes<<EOF" >> $GITHUB_OUTPUT
           echo "$NOTES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-      - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.release_notes.outputs.notes }}
-          files: linux-patch-api_*.deb
+
+  # ── Build Jobs (tag push only, self-hosted runners) ───────────────────────
+
+  build-deb-u2404:
+    name: Build .deb (Ubuntu 24.04)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: [self-hosted, linux, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build .deb package
+        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - name: Rename package with distro suffix
+        run: |
+          FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
+          if [ -n "$FILE" ]; then
+            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2404_amd64/')"
+          fi
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: linux-patch-api_*_u2404_amd64.deb
+
+  build-deb-u2204:
+    name: Build .deb (Ubuntu 22.04)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: [self-hosted, linux, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build .deb package
+        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - name: Rename package with distro suffix
+        run: |
+          FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
+          if [ -n "$FILE" ]; then
+            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2204_amd64/')"
+          fi
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: linux-patch-api_*_u2204_amd64.deb
+
+  build-deb-debian13:
+    name: Build .deb (Debian 13)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: [self-hosted, linux, debian-13]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build .deb package
+        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - name: Rename package with distro suffix
+        run: |
+          FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
+          if [ -n "$FILE" ]; then
+            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_debian13_amd64/')"
+          fi
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: linux-patch-api_*_debian13_amd64.deb
+
+  build-rpm-fedora:
+    name: Build .rpm (Fedora)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: [self-hosted, linux, fedora]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build release binary
+        run: cargo build --release
+      - name: Build RPM package
+        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 ./build-rpm.sh
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/linux-patch-api-*.rpm
+
+  build-rpm-almalinux:
+    name: Build .rpm (AlmaLinux 10)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: [self-hosted, linux, almalinux-10]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build release binary
+        run: cargo build --release
+      - name: Build RPM package
+        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 ./build-rpm.sh
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/linux-patch-api-*.rpm
+
+  build-arch:
+    name: Build .pkg.tar.zst (Arch Linux)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: [self-hosted, linux, arch]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build release binary
+        run: cargo build --release
+      - name: Build Arch package
+        run: chmod +x build-arch.sh && SKIP_CARGO_BUILD=1 ./build-arch.sh
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/*.pkg.tar.zst
+
+  build-alpine:
+    name: Build .apk (Alpine)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - name: Install prerequisites for actions/checkout
+        run: apk add --no-cache bash git curl tar
+      - uses: actions/checkout@v4
+      - name: Install Alpine build dependencies
+        run: apk add --no-cache gcc musl-dev openssl-dev openssl elogind-dev alpine-sdk rust cargo abuild
+      - name: Build release binary (musl target)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Build Alpine package
+        run: |
+          chmod +x build-alpine.sh
+          SKIP_CARGO_BUILD=1 ./build-alpine.sh
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/linux-patch-api-*.apk
