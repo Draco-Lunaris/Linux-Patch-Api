@@ -191,7 +191,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
-        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 ./build-rpm.sh
+        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -211,7 +211,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release
       - name: Build RPM package
-        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 ./build-rpm.sh
+        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -258,6 +258,8 @@ jobs:
         run: rustup target add x86_64-unknown-linux-musl
       - name: Build release binary (musl target)
         run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Generate abuild signing keys
+        run: abuild-keygen -a -n
       - name: Build Alpine package
         run: |
           chmod +x build-alpine.sh
