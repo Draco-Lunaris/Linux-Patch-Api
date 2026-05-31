@@ -13,3 +13,6 @@ debian/linux-patch-api.substvars
 *.deb
 *.buildinfo
 *.changes
+
+# Agent Zero project data
+.a0proj/
