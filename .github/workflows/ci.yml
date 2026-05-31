@@ -82,11 +82,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev dpkg-dev debhelper
+        run: sudo apt-get update && sudo apt-get install -y libsystemd-dev pkg-config libssl-dev
       - name: Build .deb package
-        run: |
-          . "$HOME/.cargo/env"
-          sudo env "PATH=$PATH" dpkg-buildpackage -us -uc -b -d
+        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
       - name: Generate release notes
         if: startsWith(github.ref, 'refs/tags/v')
         id: release_notes
@@ -105,4 +103,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.release_notes.outputs.notes }}
-          files: ../linux-patch-api_*.deb
+          files: linux-patch-api_*.deb
