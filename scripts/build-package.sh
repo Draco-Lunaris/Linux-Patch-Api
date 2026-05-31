@@ -67,9 +67,13 @@ chmod 755 "${BUILD_DIR}/usr/bin/linux-patch-api"
 # Systemd service
 cp "${PROJECT_ROOT}/configs/linux-patch-api.service" "${BUILD_DIR}/lib/systemd/system/"
 
-# Configuration files
+# Configuration files (live configs for admin editing)
 cp "${PROJECT_ROOT}/configs/config.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/config.yaml"
 cp "${PROJECT_ROOT}/configs/whitelist.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/whitelist.yaml"
+
+# Example config files (referenced by postinst for first-run setup)
+cp "${PROJECT_ROOT}/configs/config.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/config.yaml.example"
+cp "${PROJECT_ROOT}/configs/whitelist.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/whitelist.yaml.example"
 
 # Calculate installed size BEFORE generating control file
 INSTALLED_SIZE=$(du -sk "${BUILD_DIR}" | cut -f1)
