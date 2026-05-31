@@ -112,6 +112,8 @@ jobs:
     runs-on: [self-hosted, linux, ubuntu-24.04]
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
@@ -134,6 +136,8 @@ jobs:
     runs-on: [self-hosted, linux, ubuntu-22.04]
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
@@ -156,6 +160,8 @@ jobs:
     runs-on: [self-hosted, linux, debian-13]
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
@@ -178,6 +184,8 @@ jobs:
     runs-on: [self-hosted, linux, fedora]
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build release binary
@@ -196,6 +204,8 @@ jobs:
     runs-on: [self-hosted, linux, almalinux-10]
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build release binary
@@ -214,6 +224,8 @@ jobs:
     runs-on: [self-hosted, linux, arch]
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo pacman -Syu --noconfirm systemd openssl pkg-config gcc
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build release binary
@@ -237,7 +249,13 @@ jobs:
         run: apk add --no-cache bash git curl tar
       - uses: actions/checkout@v4
       - name: Install Alpine build dependencies
-        run: apk add --no-cache gcc musl-dev openssl-dev openssl elogind-dev alpine-sdk rust cargo abuild
+        run: apk add --no-cache gcc musl-dev openssl-dev openssl elogind-dev alpine-sdk abuild
+      - name: Install Rust via rustup
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
       - name: Build release binary (musl target)
         run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Build Alpine package
