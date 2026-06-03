@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0  
 **Status:** Production Ready  
-**License:** Internal Use Only  
+**License:** [Apache 2.0](LICENSE)  
 
 Secure REST API for remote package and patch management on Linux systems.
 
@@ -691,7 +691,9 @@ linux-patch-api --check-config
 
 ## License
 
-Internal Use Only - Not for external distribution
+This project is licensed under the [Apache License 2.0](LICENSE).
+
+Copyright 2025-2026 Draco Lunaris
 
 **Version:** 1.0.0  
 **Release Date:** 2026-07-17
