@@ -401,9 +401,15 @@ mod tests {
         let initial = shared.load();
         assert_eq!(initial.status, CrlStatus::Missing);
 
-        let mut new_state = CrlState::default();
-        new_state.status = CrlStatus::Valid;
-        new_state.revoked_serials.insert("abc".to_string());
+        let new_state = CrlState {
+            status: CrlStatus::Valid,
+            revoked_serials: {
+                let mut set = HashSet::new();
+                set.insert("abc".to_string());
+                set
+            },
+            ..Default::default()
+        };
         shared.store(Arc::new(new_state));
 
         let updated = shared.load();
