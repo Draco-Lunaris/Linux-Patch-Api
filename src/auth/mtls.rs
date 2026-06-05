@@ -2,6 +2,7 @@
 //!
 //! Provides mutual TLS authentication middleware for Actix-web.
 //! Non-mTLS connections are silently dropped (no response).
+//! Supports CRL-aware client certificate verification when CRL is available.
 
 use actix_web::{
     dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
@@ -11,14 +12,21 @@ use actix_web::{
 use chrono::{DateTime, Duration, Utc};
 use futures_util::future::LocalBoxFuture;
 use rustls::{
+    client::danger::HandshakeSignatureValid,
     crypto::aws_lc_rs,
-    server::{ServerConfig, WebPkiClientVerifier},
+    pki_types::{CertificateDer, UnixTime},
+    server::{
+        danger::{ClientCertVerified, ClientCertVerifier},
+        ServerConfig, WebPkiClientVerifier,
+    },
     version::TLS13,
-    RootCertStore,
+    DigitallySignedStruct, DistinguishedName, Error as RustlsError, RootCertStore, SignatureScheme,
 };
 use rustls_pemfile::{certs, private_key};
 use std::{fs::File, io::BufReader, sync::Arc};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+use super::crl::{cert_serial_hex, SharedCrlState};
 
 /// Check for duplicate critical headers (VULN-006)
 /// Returns true if duplicate headers are detected
@@ -43,6 +51,107 @@ fn has_duplicate_critical_headers(req: &ServiceRequest) -> bool {
         }
     }
     false
+}
+
+/// CRL-aware client certificate verifier.
+///
+/// Wraps WebPkiClientVerifier for chain validation, then checks the
+/// end-entity certificate serial against the in-memory CRL index.
+/// If CRL is unavailable (Missing/Degraded), falls back to WebPKI-only.
+#[derive(Debug)]
+struct CrlAwareVerifier {
+    inner: Arc<dyn ClientCertVerifier>,
+    crl_state: SharedCrlState,
+}
+
+impl CrlAwareVerifier {
+    fn new(inner: Arc<dyn ClientCertVerifier>, crl_state: SharedCrlState) -> Self {
+        Self { inner, crl_state }
+    }
+}
+
+impl ClientCertVerifier for CrlAwareVerifier {
+    fn offer_client_auth(&self) -> bool {
+        self.inner.offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.inner.client_auth_mandatory()
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, RustlsError> {
+        // 1. Delegate chain validation to WebPKI
+        self.inner
+            .verify_client_cert(end_entity, intermediates, now)?;
+
+        // 2. Check CRL revocation status
+        let crl = self.crl_state.load();
+        match crl.status {
+            super::crl::CrlStatus::Valid | super::crl::CrlStatus::Expired => {
+                // CRL is available -- check serial
+                if let Some(serial_hex) = cert_serial_hex(end_entity.as_ref()) {
+                    if crl.is_revoked(&serial_hex) {
+                        warn!(
+                            serial = %serial_hex,
+                            "Client certificate is revoked per CRL -- rejecting connection"
+                        );
+                        return Err(RustlsError::InvalidCertificate(
+                            rustls::CertificateError::Revoked,
+                        ));
+                    }
+                }
+                Ok(ClientCertVerified::assertion())
+            }
+            super::crl::CrlStatus::Missing | super::crl::CrlStatus::Degraded => {
+                // No CRL available -- fall back to WebPKI-only (already passed above)
+                warn!(
+                    status = %crl.status,
+                    "CRL not available -- allowing connection with WebPKI-only verification"
+                );
+                Ok(ClientCertVerified::assertion())
+            }
+            super::crl::CrlStatus::Invalid => {
+                // Invalid CRL signature -- fail-closed
+                error!(
+                    "CRL signature is invalid -- refusing all client certificates (fail-closed)"
+                );
+                Err(RustlsError::InvalidCertificate(
+                    rustls::CertificateError::Revoked,
+                ))
+            }
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
 }
 
 /// mTLS Configuration
@@ -71,11 +180,29 @@ impl MtlsMiddleware {
         })
     }
 
-    /// Build rustls server configuration with client certificate verification
-    pub fn build_rustls_config(&self) -> Result<Arc<ServerConfig>, MtlsError> {
-        let client_verifier = WebPkiClientVerifier::builder(self.cert_store.clone())
+    /// Build rustls server configuration with client certificate verification.
+    ///
+    /// When `crl_state` is provided and the CRL is available, wraps the
+    /// WebPkiClientVerifier with CrlAwareVerifier for revocation checking.
+    /// When CRL is missing/degraded, falls back to WebPKI-only verification.
+    pub fn build_rustls_config(
+        &self,
+        crl_state: Option<SharedCrlState>,
+    ) -> Result<Arc<ServerConfig>, MtlsError> {
+        let webpki_verifier = WebPkiClientVerifier::builder(self.cert_store.clone())
             .build()
             .map_err(|e| MtlsError::ClientVerifierError(e.to_string()))?;
+
+        let client_verifier: Arc<dyn ClientCertVerifier> = match crl_state {
+            Some(state) => {
+                info!("CRL-aware client verification enabled");
+                Arc::new(CrlAwareVerifier::new(webpki_verifier, state))
+            }
+            None => {
+                info!("No CRL state provided -- using WebPKI-only client verification");
+                webpki_verifier
+            }
+        };
 
         let server_cert = load_certs(&self.config.server_cert_path)?;
         let server_key = load_private_key(&self.config.server_key_path)?;

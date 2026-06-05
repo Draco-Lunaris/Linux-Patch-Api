@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::packages::ApiResponse;
+use crate::auth::crl::{CrlStatus, SharedCrlState};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
 use crate::packages::PackageManagerBackend;
 
@@ -47,6 +48,8 @@ pub struct HealthData {
     pub version: String,
     pub last_cache_update: Option<String>, // RFC3339 timestamp
     pub cache_status: String,              // "fresh", "stale", "unknown", "failed"
+    pub crl_status: Option<String>,        // "valid", "expired", "missing", "invalid", "degraded"
+    pub crl_age_seconds: Option<u64>,      // age of on-disk CRL file
 }
 
 /// Service status response data
@@ -113,6 +116,7 @@ pub async fn get_system_info(
 pub async fn health_check(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
+    crl_state: web::Data<SharedCrlState>,
     _req: HttpRequest,
 ) -> impl Responder {
     let _request_id = Uuid::new_v4().to_string();
@@ -134,7 +138,7 @@ pub async fn health_check(
 
     // Check cache status and refresh if stale
     let cache_status_val = cache_state.status();
-    let (status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
+    let (mut status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
         match backend.refresh_package_cache(&cache_state) {
             Ok(_) => {
                 let updated = cache_state.status();
@@ -161,12 +165,31 @@ pub async fn health_check(
         )
     };
 
+    // CRL status from shared state
+    let crl = crl_state.load();
+    let crl_status_str = match crl.status {
+        CrlStatus::Valid
+        | CrlStatus::Expired
+        | CrlStatus::Missing
+        | CrlStatus::Invalid
+        | CrlStatus::Degraded => {
+            // Downgrade overall health if CRL is invalid
+            if crl.status == CrlStatus::Invalid {
+                status = "degraded".to_string();
+            }
+            crl.status.to_string()
+        }
+    };
+    let crl_age = crl.crl_age_seconds();
+
     let response = ApiResponse::success(HealthData {
         status,
         uptime_seconds,
         version,
         last_cache_update,
         cache_status: cache_status_str,
+        crl_status: Some(crl_status_str),
+        crl_age_seconds: crl_age,
     });
 
     HttpResponse::Ok().json(response)
@@ -386,6 +409,8 @@ mod tests {
             version: "0.1.0".to_string(),
             last_cache_update: Some("2026-05-27T14:00:00+00:00".to_string()),
             cache_status: "fresh".to_string(),
+            crl_status: Some("valid".to_string()),
+            crl_age_seconds: Some(3600),
         };
         let json = serde_json::to_string(&health).unwrap();
         assert!(json.contains("healthy"));

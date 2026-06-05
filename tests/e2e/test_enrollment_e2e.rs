@@ -78,6 +78,7 @@ fn build_tls_config(cert_dir: &std::path::Path) -> TlsConfig {
             .to_string_lossy()
             .to_string(),
         min_tls_version: "1.3".to_string(),
+        crl_path: String::new(), // No CRL in E2E tests
     }
 }
 

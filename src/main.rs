@@ -27,6 +27,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
+use linux_patch_api::auth::crl::{self, CrlStatus};
 use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager};
 use linux_patch_api::config::loader::{validate_certs, CertStatus};
 use linux_patch_api::enroll;
@@ -297,6 +298,10 @@ async fn main() -> Result<()> {
     let cache_state = web::Data::new(PackageCacheState::new());
     info!("Package cache state initialized");
 
+    // Initialize shared CRL state (available even when TLS is off for health reporting)
+    let shared_crl_state = crl::new_shared_state();
+    let crl_state_data = web::Data::new(shared_crl_state.clone());
+
     // Configure bind address
     let bind_address = format!("{}:{}", config.server.bind, config.server.port);
 
@@ -306,7 +311,8 @@ async fn main() -> Result<()> {
             .wrap(Logger::default())
             .app_data(job_manager_data.clone())
             .app_data(backend_data.clone())
-            .app_data(cache_state.clone());
+            .app_data(cache_state.clone())
+            .app_data(crl_state_data.clone());
 
         // Configure API routes
         app = app.configure(|cfg| {
@@ -345,6 +351,7 @@ async fn main() -> Result<()> {
             server_cert = %tls_config.server_cert,
             server_key = %tls_config.server_key,
             min_tls_version = %tls_config.min_tls_version,
+            crl_path = %tls_config.crl_path,
             "Initializing mTLS authentication with TLS binding"
         );
 
@@ -355,11 +362,50 @@ async fn main() -> Result<()> {
             min_tls_version: tls_config.min_tls_version.clone(),
         };
 
+        // Load CRL from disk into the shared CRL state
+        let crl_path = std::path::PathBuf::from(&tls_config.crl_path);
+        let ca_cert_der = std::fs::read(&tls_config.ca_cert).unwrap_or_default();
+
+        // Load initial CRL from disk (missing is OK -- degraded mode)
+        let initial_crl = crl::load_crl(&crl_path, &ca_cert_der);
+        match initial_crl.status {
+            CrlStatus::Invalid => {
+                error!("CRL signature is invalid -- refusing to start (fail-closed)");
+                std::process::exit(ExitCode::Error as i32);
+            }
+            CrlStatus::Valid | CrlStatus::Expired => {
+                info!(
+                    status = %initial_crl.status,
+                    revoked = initial_crl.revoked_serials.len(),
+                    "CRL loaded from disk"
+                );
+                shared_crl_state.store(std::sync::Arc::new(initial_crl));
+            }
+            CrlStatus::Missing => {
+                info!("No CRL on disk -- starting in WebPKI-only mode");
+            }
+            CrlStatus::Degraded => {
+                warn!("CRL load failed -- starting in degraded (WebPKI-only) mode");
+            }
+        }
+
+        // Spawn CRL refresh background task if manager URL is configured
+        if let Some(manager_url) = config.enrollment_manager_url() {
+            crl::spawn_crl_refresh_task(
+                manager_url.to_string(),
+                crl_path,
+                ca_cert_der,
+                shared_crl_state.clone(),
+            );
+        } else {
+            info!("No manager URL configured -- CRL auto-refresh disabled");
+        }
+
         match MtlsMiddleware::new(mtls_config.clone()) {
             Ok(middleware) => {
-                // Build rustls server configuration
+                // Build rustls server configuration with CRL-aware verifier
                 let rustls_config = middleware
-                    .build_rustls_config()
+                    .build_rustls_config(Some(shared_crl_state.clone()))
                     .map_err(|e| anyhow::anyhow!("Failed to build rustls config: {}", e))?;
 
                 info!("mTLS middleware and rustls config initialized successfully");
