@@ -6,9 +6,11 @@
 //! - Silent drop for non-compliant connections
 //! - Comprehensive audit logging
 
+pub mod crl;
 pub mod mtls;
 pub mod whitelist;
 
+pub use crl::{new_shared_state, CrlState, CrlStatus, SharedCrlState};
 pub use mtls::{ClientCertInfo, MtlsConfig, MtlsError, MtlsMiddleware};
 pub use whitelist::{WhitelistConfig, WhitelistEntry, WhitelistManager, WhitelistMiddleware};
 

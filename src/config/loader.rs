@@ -35,6 +35,14 @@ pub struct TlsConfig {
     pub server_key: String,
     #[serde(default = "default_tls_version")]
     pub min_tls_version: String,
+    /// Path to persist the CRL fetched from the manager.
+    /// Defaults to /etc/linux_patch_api/certs/crl.pem
+    #[serde(default = "default_crl_path")]
+    pub crl_path: String,
+}
+
+fn default_crl_path() -> String {
+    "/etc/linux_patch_api/certs/crl.pem".to_string()
 }
 
 fn default_true() -> bool {
