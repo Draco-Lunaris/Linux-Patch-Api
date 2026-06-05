@@ -494,4 +494,167 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("expired"));
     }
+
+    // -----------------------------------------------------------------------
+    // CrlAwareVerifier unit tests
+    // -----------------------------------------------------------------------
+
+    /// Test that CrlAwareVerifier can be constructed with a WebPKI verifier
+    /// and a SharedCrlState. This verifies the wiring is correct.
+    #[test]
+    fn crl_aware_verifier_construction() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use super::super::crl::{new_shared_state, CrlState, CrlStatus};
+        use std::collections::HashSet;
+
+        // Build a simple CA cert + key for the root store.
+        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.not_before = time::OffsetDateTime::now_utc();
+        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, "Test CA for Verifier");
+        ca_params.distinguished_name = dn;
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        // Build root cert store with the CA.
+        let mut root_store = RootCertStore::empty();
+        root_store.add(ca_cert.der().to_owned()).unwrap();
+
+        // Build WebPKI verifier — build() returns Arc<WebPkiClientVerifier>
+        // which coerces to Arc<dyn ClientCertVerifier>.
+        let webpki_verifier: Arc<dyn ClientCertVerifier> =
+            WebPkiClientVerifier::builder(root_store.into())
+                .build()
+                .unwrap();
+
+        // Build CRL state in Valid status.
+        let crl_state = new_shared_state();
+        let valid_state = CrlState {
+            status: CrlStatus::Valid,
+            revoked_serials: HashSet::new(),
+            crl_mtime: None,
+            loaded_at: std::time::SystemTime::now(),
+        };
+        crl_state.store(Arc::new(valid_state));
+
+        // Construct CrlAwareVerifier — should succeed.
+        let _verifier = CrlAwareVerifier::new(webpki_verifier, crl_state);
+        // If we reach here without panic, construction succeeded.
+    }
+
+    /// Test that CrlAwareVerifier with Missing CRL state can be constructed.
+    /// Missing CRL means the verifier falls back to WebPKI-only.
+    #[test]
+    fn crl_aware_verifier_with_missing_crl() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use super::super::crl::new_shared_state;
+
+        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.not_before = time::OffsetDateTime::now_utc();
+        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, "Test CA for Verifier");
+        ca_params.distinguished_name = dn;
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let mut root_store = RootCertStore::empty();
+        root_store.add(ca_cert.der().to_owned()).unwrap();
+
+        let webpki_verifier: Arc<dyn ClientCertVerifier> =
+            WebPkiClientVerifier::builder(root_store.into())
+                .build()
+                .unwrap();
+
+        // Default state is Missing.
+        let crl_state = new_shared_state();
+        let _verifier = CrlAwareVerifier::new(webpki_verifier, crl_state);
+    }
+
+    /// Test that CrlAwareVerifier with Invalid CRL state can be constructed.
+    /// Invalid CRL means the verifier should reject ALL client certificates.
+    #[test]
+    fn crl_aware_verifier_with_invalid_crl() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use super::super::crl::{new_shared_state, CrlState, CrlStatus};
+        use std::collections::HashSet;
+
+        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.not_before = time::OffsetDateTime::now_utc();
+        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, "Test CA for Verifier");
+        ca_params.distinguished_name = dn;
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let mut root_store = RootCertStore::empty();
+        root_store.add(ca_cert.der().to_owned()).unwrap();
+
+        let webpki_verifier: Arc<dyn ClientCertVerifier> =
+            WebPkiClientVerifier::builder(root_store.into())
+                .build()
+                .unwrap();
+
+        let crl_state = new_shared_state();
+        let invalid_state = CrlState {
+            status: CrlStatus::Invalid,
+            revoked_serials: HashSet::new(),
+            crl_mtime: None,
+            loaded_at: std::time::SystemTime::now(),
+        };
+        crl_state.store(Arc::new(invalid_state));
+
+        let _verifier = CrlAwareVerifier::new(webpki_verifier, crl_state);
+    }
+
+    /// Test that CrlAwareVerifier with a revoked serial in Valid CRL state
+    /// can be constructed. The actual verification logic is tested through
+    /// integration tests since it requires a full TLS handshake.
+    #[test]
+    fn crl_aware_verifier_with_revoked_serial() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use super::super::crl::{new_shared_state, CrlState, CrlStatus};
+        use std::collections::HashSet;
+
+        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = rcgen::CertificateParams::default();
+        ca_params.not_before = time::OffsetDateTime::now_utc();
+        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let mut dn = rcgen::DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, "Test CA for Verifier");
+        ca_params.distinguished_name = dn;
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let mut root_store = RootCertStore::empty();
+        root_store.add(ca_cert.der().to_owned()).unwrap();
+
+        let webpki_verifier: Arc<dyn ClientCertVerifier> =
+            WebPkiClientVerifier::builder(root_store.into())
+                .build()
+                .unwrap();
+
+        let crl_state = new_shared_state();
+        let mut revoked = HashSet::new();
+        revoked.insert("deadbeef".to_string());
+        let valid_with_revoked = CrlState {
+            status: CrlStatus::Valid,
+            revoked_serials: revoked,
+            crl_mtime: None,
+            loaded_at: std::time::SystemTime::now(),
+        };
+        crl_state.store(Arc::new(valid_with_revoked));
+
+        let _verifier = CrlAwareVerifier::new(webpki_verifier, crl_state);
+        // Construction succeeded — the verifier is ready to reject revoked certs.
+    }
 }
