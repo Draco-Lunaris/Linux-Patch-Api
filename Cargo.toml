@@ -95,6 +95,10 @@ tokio-test = "0.4"
 wiremock = "0.6"
 serial_test = "3"
 tempfile = "3"
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rand = "0.8"
+hex = "0.4"
+time = { version = "0.3", features = ["std"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # Integration tests in subdirectories
