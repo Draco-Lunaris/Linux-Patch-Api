@@ -229,6 +229,19 @@ pub async fn reboot_system(
         }
     }
 
+    // Check job queue capacity
+    if !job_manager.can_accept_job().await {
+        let response = ApiResponse::<()>::error(
+            "QUEUE_FULL",
+            "Job queue is at capacity. Please retry later.",
+            None,
+            true,
+        );
+        return HttpResponse::TooManyRequests()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     // Create async job for reboot
     match job_manager.create_job(JobOperation::Reboot, vec![]).await {
         Ok(job_id) => {

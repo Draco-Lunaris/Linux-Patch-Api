@@ -190,6 +190,19 @@ pub async fn rollback_job(
 
     info!(request_id = %request_id, job_id = %job_id_str, "Initiating job rollback");
 
+    // Check job queue capacity
+    if !job_manager.can_accept_job().await {
+        let response = ApiResponse::<()>::error(
+            "QUEUE_FULL",
+            "Job queue is at capacity. Please retry later.",
+            None,
+            true,
+        );
+        return HttpResponse::TooManyRequests()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     // Parse job ID
     let job_id = match Uuid::parse_str(&job_id_str) {
         Ok(id) => id,
@@ -321,7 +334,7 @@ pub async fn delete_job(
     }
 }
 
-/// Configure routes for job endpoints
+/// Configure all job routes
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/jobs")

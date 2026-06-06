@@ -60,10 +60,56 @@ pub struct JobsConfig {
     pub timeout_minutes: u64,
     #[serde(default = "default_storage_path")]
     pub storage_path: String,
+    #[serde(default = "default_max_queue_depth")]
+    pub max_queue_depth: usize,
 }
 
 fn default_storage_path() -> String {
     "/var/lib/linux_patch_api/jobs".to_string()
+}
+
+fn default_max_queue_depth() -> usize {
+    100
+}
+
+/// Rate limiting configuration
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RateLimitConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_destructive_per_minute")]
+    pub destructive_per_minute: u32,
+    #[serde(default = "default_destructive_burst")]
+    pub destructive_burst: u32,
+    #[serde(default = "default_read_per_minute")]
+    pub read_per_minute: u32,
+    #[serde(default = "default_read_burst")]
+    pub read_burst: u32,
+}
+
+fn default_destructive_per_minute() -> u32 {
+    20
+}
+fn default_destructive_burst() -> u32 {
+    10
+}
+fn default_read_per_minute() -> u32 {
+    120
+}
+fn default_read_burst() -> u32 {
+    30
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            destructive_per_minute: default_destructive_per_minute(),
+            destructive_burst: default_destructive_burst(),
+            read_per_minute: default_read_per_minute(),
+            read_burst: default_read_burst(),
+        }
+    }
 }
 
 /// Logging configuration
@@ -445,6 +491,8 @@ pub struct AppConfig {
     pub package_manager: Option<PackageManagerConfig>,
     #[serde(default)]
     pub enrollment: Option<EnrollmentConfig>,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 }
 
 impl AppConfig {

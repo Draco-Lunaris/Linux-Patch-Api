@@ -8,6 +8,7 @@
 //! - WebSocket endpoint for real-time job status streaming
 
 pub mod handlers;
+pub mod rate_limit;
 pub mod routes;
 
 // Re-export handlers for convenience

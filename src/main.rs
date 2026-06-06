@@ -252,10 +252,15 @@ async fn main() -> Result<()> {
     }
 
     // Initialize job manager
-    let job_manager = JobManager::new(config.jobs.max_concurrent, config.jobs.timeout_minutes)?;
+    let job_manager = JobManager::new(
+        config.jobs.max_concurrent,
+        config.jobs.timeout_minutes,
+        config.jobs.max_queue_depth,
+    )?;
     info!(
         max_jobs = config.jobs.max_concurrent,
         timeout_minutes = config.jobs.timeout_minutes,
+        max_queue_depth = config.jobs.max_queue_depth,
         "Job manager initialized"
     );
 
@@ -311,35 +316,36 @@ async fn main() -> Result<()> {
     // Clone whitelist manager for use inside the HttpServer closure
     let wl = whitelist_manager.clone();
 
+    // Clone rate limit config for use inside the HttpServer closure
+    let rate_limit_config = config.rate_limit.clone();
+
     // Create server builder
     // Security middleware stack (order matters):
     //   1. WhitelistMiddleware   — IP-based access control (deny-by-default)
     //   2. SecurityHeadersMiddleware — VULN-006: reject duplicate critical headers
-    //   3. Logger                 — request logging (after auth decisions)
+    //   3. RateLimitMiddleware   — per-IP rate limiting (read + destructive tiers)
+    //   4. Logger                — request logging (after auth decisions)
     let server_builder = HttpServer::new(move || {
-        let mut app = App::new()
+        App::new()
             .wrap(WhitelistMiddleware::new(wl.clone()))
             .wrap(SecurityHeadersMiddleware::new())
+            .wrap(linux_patch_api::api::rate_limit::RateLimitMiddleware::new(
+                rate_limit_config.clone(),
+            ))
             .wrap(Logger::default())
             .app_data(job_manager_data.clone())
             .app_data(backend_data.clone())
             .app_data(cache_state.clone())
-            .app_data(crl_state_data.clone());
-
-        // Configure API routes
-        app = app.configure(|cfg| {
-            configure_api_routes(
-                cfg,
-                job_manager_data.clone(),
-                backend_data.clone(),
-                cache_state.clone(),
-            );
-        });
-
-        // Configure health route (outside API scope)
-        app = app.configure(configure_health_route);
-
-        app
+            .app_data(crl_state_data.clone())
+            .configure(|cfg| {
+                configure_api_routes(
+                    cfg,
+                    job_manager_data.clone(),
+                    backend_data.clone(),
+                    cache_state.clone(),
+                );
+            })
+            .configure(configure_health_route)
     })
     .workers(4)
     // VULN-004: Configure header size limit to 8KB to prevent DoS via oversized headers

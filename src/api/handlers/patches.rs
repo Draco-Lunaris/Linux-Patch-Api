@@ -105,6 +105,19 @@ pub async fn apply_patches(
         "Applying patches"
     );
 
+    // Check job queue capacity
+    if !job_manager.can_accept_job().await {
+        let response = ApiResponse::<()>::error(
+            "QUEUE_FULL",
+            "Job queue is at capacity. Please retry later.",
+            None,
+            true,
+        );
+        return HttpResponse::TooManyRequests()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     // Create async job
     let package_list = body.packages.clone().unwrap_or_default();
     match job_manager
@@ -321,7 +334,7 @@ pub async fn apply_patches(
     }
 }
 
-/// Configure routes for patch endpoints
+/// Configure all patch routes
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/patches")

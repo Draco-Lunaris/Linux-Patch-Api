@@ -1,6 +1,11 @@
 //! API Routes Configuration
 //!
 //! Aggregates all endpoint routes and configures the Actix-web application.
+//! Rate limiting is applied at the App level in main.rs using actix-governor
+//! with method-based filtering:
+//! - **Read tier** (120 req/min, burst 30): GET methods
+//! - **Destructive tier** (20 req/min, burst 10): POST/PUT/DELETE methods
+//! - **Health exempt**: /health, /api/v1/system/info (health-exempt routes)
 
 use actix_web::{web, HttpResponse};
 use tracing::info;
@@ -17,6 +22,7 @@ async fn method_not_allowed() -> HttpResponse {
         .insert_header(("Allow", "GET, POST, PUT, DELETE"))
         .finish()
 }
+
 /// Configure all API routes for the application
 pub fn configure_api_routes(
     cfg: &mut web::ServiceConfig,
@@ -26,6 +32,10 @@ pub fn configure_api_routes(
 ) {
     info!("Configuring API v1 routes");
 
+    // Health-exempt endpoint: /api/v1/system/info is registered separately
+    // so it can bypass rate limiting applied at the App level
+    cfg.service(web::resource("/api/v1/system/info").route(web::get().to(system::get_system_info)));
+
     cfg.app_data(job_manager)
         .app_data(backend)
         .app_data(cache_state)
@@ -33,15 +43,10 @@ pub fn configure_api_routes(
             web::scope("/api/v1")
                 // VULN-005: Default handler for unsupported methods returns 405 instead of 404
                 .default_service(web::route().to(method_not_allowed))
-                // Package Management Endpoints
                 .configure(packages::configure_routes)
-                // Patch Management Endpoints
                 .configure(patches::configure_routes)
-                // System Management Endpoints
                 .configure(system::configure_routes)
-                // Job Management Endpoints
                 .configure(jobs::configure_routes)
-                // WebSocket Endpoint
                 .configure(websocket::configure_routes),
         );
 }
