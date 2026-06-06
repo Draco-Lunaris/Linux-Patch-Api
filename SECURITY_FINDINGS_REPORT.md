@@ -15,7 +15,7 @@
 | **Total Tests** | 16 |
 | **Passed** | 16 |
 | **Failed** | 0 |
-| **Critical Findings** | 0 (Previously 1 - RESOLVED) |
+| **Critical Findings** | 1 (Issue #12 - Committed Private Keys - RESOLVED) |
 | **High Findings** | 0 (Previously 2 - RESOLVED) |
 | **Medium Findings** | 3 (Unchanged) |
 | **Low Findings** | 4 (Unchanged) |
@@ -147,6 +147,36 @@ CA private key (`ca.key.pem`) has 600 permissions but is stored in same director
 
 **Remediation:**  
 Consider storing CA key on separate, more secure host.
+
+---
+
+### 🔴 CRITICAL: Committed Private Key Material (Issue #12)
+
+**Description:**  
+Private key files (`*.key`, `*.key.pem`) were committed to version control in:
+- `configs/certs/ca.key.pem` — CA private key
+- `configs/certs/server.key.pem` — Server private key
+- `configs/certs/client001.key.pem` — Client private key
+- `tests/e2e/certs/client.key` — E2E test client private key
+
+Committed private keys are a critical security risk: anyone with repository access
+(even read-only) can impersonate the server or clients, decrypt captured TLS traffic,
+or forge certificates signed by the CA.
+
+**Status:** ✅ RESOLVED
+
+**Remediation Applied:**
+1. Removed all private key files from git tracking (`git rm --cached`)
+2. Added `*.key`, `*.key.pem`, `configs/certs/`, and `tests/e2e/certs/*.key` to `.gitignore`
+3. Created `scripts/generate-dev-certs.sh` to generate test certificates at runtime
+4. Updated e2e tests to generate certificates on demand instead of loading from disk
+5. Added `gitleaks` secret scanning to CI pipeline
+6. Git history will be purged with `git filter-repo` after PR merge
+
+**Key Rotation:**  
+These keys were used for development/testing only. No production key rotation is needed.
+All committed keys should be considered compromised and must not be used in any
+production environment.
 
 ---
 

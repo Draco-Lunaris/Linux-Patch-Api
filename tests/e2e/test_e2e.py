@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -36,6 +37,19 @@ CERTS_DIR = Path(__file__).parent / "certs"
 CA_CERT = CERTS_DIR / "ca.crt"
 CLIENT_CERT = CERTS_DIR / "client.crt"
 CLIENT_KEY = CERTS_DIR / "client.key"
+
+
+def ensure_certs() -> None:
+    """Generate e2e test certificates at runtime if they do not exist."""
+    if CLIENT_KEY.exists() and CLIENT_CERT.exists() and CA_CERT.exists():
+        return
+    script = Path(__file__).resolve().parent.parent.parent / "scripts" / "generate-dev-certs.sh"
+    if not script.exists():
+        raise FileNotFoundError(
+            f"Certificate generation script not found: {script}. "
+            "Run ./scripts/generate-dev-certs.sh manually."
+        )
+    subprocess.check_call([str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 TARGETS = {
     "dev": {
@@ -537,14 +551,51 @@ def test_wrong_cert_connection(client: PatchAPIClient) -> str:
     """Verify that connections with wrong cert are rejected.
 
     Per spec: invalid/expired certificates should be silently dropped.
-    Uses project test certs (different CA) which should be rejected.
+    Generates a separate "wrong CA" certificate at runtime to test that
+    certificates signed by an untrusted CA are rejected.
     """
-    project_ca = "/a0/usr/projects/linux_patch_api/configs/certs/ca.pem"
-    project_cert = "/a0/usr/projects/linux_patch_api/configs/certs/client001.pem"
-    project_key = "/a0/usr/projects/linux_patch_api/configs/certs/client001.key.pem"
+    import tempfile
+    wrong_ca_dir = Path(tempfile.mkdtemp(prefix="lpa-wrong-ca-"))
+    try:
+        # Generate a completely separate CA + client cert (wrong CA)
+        wrong_ca_key = wrong_ca_dir / "ca.key"
+        wrong_ca_cert = wrong_ca_dir / "ca.crt"
+        wrong_client_key = wrong_ca_dir / "client.key"
+        wrong_client_csr = wrong_ca_dir / "client.csr"
+        wrong_client_cert = wrong_ca_dir / "client.crt"
 
-    if not Path(project_ca).exists():
-        return "SKIPPED: Project test certs not available"
+        subprocess.run(
+            ["openssl", "genrsa", "-out", str(wrong_ca_key), "2048"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["openssl", "req", "-x509", "-new", "-nodes", "-key", str(wrong_ca_key),
+             "-sha256", "-days", "1", "-out", str(wrong_ca_cert),
+             "-subj", "/CN=Wrong CA/O=Attacker/C=US"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["openssl", "genrsa", "-out", str(wrong_client_key), "2048"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["openssl", "req", "-new", "-key", str(wrong_client_key),
+             "-out", str(wrong_client_csr),
+             "-subj", "/CN=wrong-client/O=Attacker/C=US"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["openssl", "x509", "-req", "-in", str(wrong_client_csr),
+             "-CA", str(wrong_ca_cert), "-CAkey", str(wrong_ca_key),
+             "-CAcreateserial", "-out", str(wrong_client_cert),
+             "-days", "1", "-sha256"],
+            check=True, capture_output=True,
+        )
+
+        project_cert = str(wrong_client_cert)
+        project_key = str(wrong_client_key)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "SKIPPED: Could not generate wrong-CA test certificates"
 
     session = requests.Session()
     session.cert = (project_cert, project_key)
@@ -559,6 +610,8 @@ def test_wrong_cert_connection(client: PatchAPIClient) -> str:
         return "Correctly rejected connection with untrusted client certificate"
     finally:
         session.close()
+        import shutil
+        shutil.rmtree(wrong_ca_dir, ignore_errors=True)
 
 
 def test_job_lifecycle(client: PatchAPIClient) -> str:
@@ -776,7 +829,10 @@ def main():
     )
     args = parser.parse_args()
 
-    # Verify certs exist
+    # Generate certs at runtime if missing (private keys are not committed)
+    ensure_certs()
+
+    # Verify certs exist after generation attempt
     if not CA_CERT.exists():
         print(f"ERROR: CA cert not found: {CA_CERT}")
         sys.exit(1)

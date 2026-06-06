@@ -41,7 +41,7 @@
 | **SPEC.md Reference** | Lines 132-138 |
 | **Requirement** | Internal self-hosted CA for certificate issuance |
 | **Implementation** | OpenSSL CA infrastructure with 4096-bit RSA keys |
-| **Evidence** | `configs/CA_SETUP.md`, `configs/certs/ca.pem`, `configs/certs/ca.key.pem` |
+| **Evidence** | `configs/CA_SETUP.md`, `scripts/generate-dev-certs.sh` (private keys generated at runtime, not committed) |
 | **Test Result** | ✅ PASS - CA properly signs server and client certificates |
 | **Compliance Status** | ✅ COMPLIANT |
 
@@ -52,7 +52,7 @@
 | **SPEC.md Reference** | Line 136 |
 | **Requirement** | Unique certificate per client (no shared certs) |
 | **Implementation** | Per-client certificate generation with unique CN |
-| **Evidence** | `configs/certs/client001.pem`, `SECURITY.md` line 65 |
+| **Evidence** | `scripts/generate-dev-certs.sh` (certificates generated at runtime, not committed) |
 | **Test Result** | ✅ PASS - Each client has distinct certificate |
 | **Compliance Status** | ✅ COMPLIANT |
 
@@ -63,7 +63,7 @@
 | **SPEC.md Reference** | Line 135 |
 | **Requirement** | 1 year standard certificate expiration |
 | **Implementation** | Certificates generated with `-days 365` parameter |
-| **Evidence** | `configs/certs/` certificate files, `openssl x509 -in cert.pem -noout -dates` |
+| **Evidence** | `scripts/generate-dev-certs.sh` (certificates generated at runtime, not committed) |
 | **Test Result** | ✅ PASS - Expired certificates properly rejected (FUZZ_TEST_REPORT.md Test 3.2) |
 | **Compliance Status** | ✅ COMPLIANT |
 
@@ -137,7 +137,7 @@
 | **SPEC.md Reference** | Lines 86-89 |
 | **Requirement** | Private key permissions 600 (owner read/write only) |
 | **Implementation** | File permissions set during certificate deployment |
-| **Evidence** | `configs/certs/*.key.pem` (chmod 600), `DEPLOYMENT_SECURITY_GUIDE.md` Section 1 |
+| **Evidence** | Private keys generated at runtime with `chmod 600` by `scripts/generate-dev-certs.sh`, not committed to repository |
 | **Test Result** | ✅ PASS - Key files properly protected |
 | **Compliance Status** | ✅ COMPLIANT |
 
