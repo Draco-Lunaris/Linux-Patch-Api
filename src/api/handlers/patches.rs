@@ -11,7 +11,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages::PackageManagerBackend;
+use crate::packages::{validate_package_name, PackageManagerBackend};
 
 use super::packages::{ApiResponse, JobResponseData};
 
@@ -87,6 +87,16 @@ pub async fn apply_patches(
     let request_id = Uuid::new_v4().to_string();
     let _timestamp = Utc::now().to_rfc3339();
     let packages_count = body.packages.as_ref().map(|p| p.len()).unwrap_or(0);
+
+    // SECURITY: Validate all package names in the request to prevent argument injection
+    if let Some(ref pkgs) = body.packages {
+        for pkg in pkgs {
+            if let Err(e) = validate_package_name(pkg) {
+                let response = ApiResponse::<()>::error("VALIDATION_ERROR", &e, None, false);
+                return HttpResponse::BadRequest().json(response);
+            }
+        }
+    }
 
     info!(
         request_id = %request_id,

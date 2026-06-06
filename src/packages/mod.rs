@@ -12,6 +12,112 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tracing::info;
 
+/// Maximum allowed length for package names and version strings
+pub const MAX_NAME_LENGTH: usize = 256;
+
+/// Validate a package name against a strict allowlist pattern.
+/// Prevents argument injection by blocking shell metacharacters,
+/// path separators, whitespace, and leading hyphens.
+/// Pattern: ^[a-zA-Z0-9][a-zA-Z0-9+._-]*$
+pub fn validate_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Package name cannot be empty".to_string());
+    }
+    if name.len() > MAX_NAME_LENGTH {
+        return Err(format!(
+            "Package name exceeds maximum length of {} characters",
+            MAX_NAME_LENGTH
+        ));
+    }
+    let bytes = name.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() {
+        return Err(format!(
+            "Package name must start with an alphanumeric character: '{}'",
+            name
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Package name contains invalid characters: '{}'. Only alphanumeric, plus, dot, underscore, and hyphen are allowed",
+            name
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a version string against a strict allowlist pattern.
+/// Allows characters commonly found in package versions (colons for RPM epochs,
+/// tildes for version ordering) while blocking shell metacharacters and path separators.
+/// Pattern: ^[a-zA-Z0-9][a-zA-Z0-9+.:~_-]*$
+pub fn validate_version_string(version: &str) -> Result<(), String> {
+    if version.is_empty() {
+        return Err("Version string cannot be empty".to_string());
+    }
+    if version.len() > MAX_NAME_LENGTH {
+        return Err(format!(
+            "Version string exceeds maximum length of {} characters",
+            MAX_NAME_LENGTH
+        ));
+    }
+    let bytes = version.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() {
+        return Err(format!(
+            "Version string must start with an alphanumeric character: '{}'",
+            version
+        ));
+    }
+    if !version.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || c == '+'
+            || c == '.'
+            || c == '_'
+            || c == '-'
+            || c == ':'
+            || c == '~'
+    }) {
+        return Err(format!(
+            "Version string contains invalid characters: '{}'. Only alphanumeric, plus, dot, underscore, hyphen, colon, and tilde are allowed",
+            version
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a service name against a strict allowlist pattern.
+/// Prevents shell injection and argument injection in systemctl/rc-service commands.
+/// Allows hyphens (common in systemd unit names), dots for unit suffixes, and @ for template instances.
+/// Pattern: ^[a-zA-Z0-9][a-zA-Z0-9_.@+-]*$
+pub fn validate_service_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Service name cannot be empty".to_string());
+    }
+    if name.len() > MAX_NAME_LENGTH {
+        return Err(format!(
+            "Service name exceeds maximum length of {} characters",
+            MAX_NAME_LENGTH
+        ));
+    }
+    let bytes = name.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() {
+        return Err(format!(
+            "Service name must start with an alphanumeric character: '{}'",
+            name
+        ));
+    }
+    if !name.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '@' || c == '+' || c == '-'
+    }) {
+        return Err(format!(
+            "Service name contains invalid characters: '{}'. Only alphanumeric, underscore, dot, at-sign, plus, and hyphen are allowed",
+            name
+        ));
+    }
+    Ok(())
+}
+
 /// Package status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PackageStatus {
@@ -311,9 +417,19 @@ impl PackageManagerBackend for AptBackend {
             args.push("--no-install-recommends".to_string());
         }
 
+        // SECURITY: --force-yes bypasses GPG signature verification and is a security risk.
+        // Only allow when explicitly requested; log a warning.
         if options.force {
+            tracing::warn!(
+                "--force-yes requested: package signature verification will be bypassed"
+            );
             args.push("--force-yes".to_string());
         }
+
+        // SECURITY: Insert -- separator before user-supplied package names to prevent
+        // argument injection. Without this, a package name like "--allow-unauthenticated"
+        // would be interpreted as an apt option rather than a package name.
+        args.push("--".to_string());
 
         for pkg in packages {
             let pkg_arg = if let Some(version) = &pkg.version {
@@ -334,16 +450,18 @@ impl PackageManagerBackend for AptBackend {
     }
 
     fn update_package(&self, name: &str) -> Result<()> {
-        self.run_apt(&["install", "-y", "--only-upgrade", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_apt(&["install", "-y", "--only-upgrade", "--", name])?;
         info!("Updated package: {}", name);
         Ok(())
     }
 
     fn remove_package(&self, name: &str, purge: bool) -> Result<()> {
+        // SECURITY: -- separator prevents argument injection via package name
         let args = if purge {
-            vec!["purge", "-y", name]
+            vec!["purge", "-y", "--", name]
         } else {
-            vec!["remove", "-y", name]
+            vec!["remove", "-y", "--", name]
         };
 
         self.run_apt(&args)?;
@@ -392,7 +510,8 @@ impl PackageManagerBackend for AptBackend {
     fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
         let args = match packages {
             Some(pkgs) => {
-                let mut a = vec!["install", "-y"];
+                // SECURITY: -- separator prevents argument injection via package names
+                let mut a: Vec<&str> = vec!["install", "-y", "--"];
                 for pkg in pkgs {
                     a.push(pkg);
                 }
@@ -506,10 +625,8 @@ impl PackageManagerBackend for AptBackend {
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // Validate service name to prevent shell injection
-        if name.is_empty() || name.contains('/') || name.contains("..") {
-            return Err(anyhow::anyhow!("Invalid service name: {}", name));
-        }
+        // SECURITY: Strict allowlist validation to prevent argument/shell injection
+        validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Determine init system and query accordingly
         let is_systemd = std::path::Path::new("/run/systemd/system").exists();
@@ -549,9 +666,11 @@ impl PackageManagerBackend for AptBackend {
 
 /// Query systemd service status via systemctl
 fn get_systemd_service_status(name: &str) -> Result<Option<ServiceStatus>> {
+    // SECURITY: -- separator prevents argument injection via service name
     let output = Command::new("systemctl")
         .args([
             "show",
+            "--",
             name,
             "--property=Id,Description,ActiveState,SubState,LoadState,UnitFileState,MainPID",
             "--no-pager",
@@ -978,6 +1097,9 @@ impl PackageManagerBackend for ApkBackend {
             args.push("--force".to_string());
         }
 
+        // SECURITY: -- separator prevents argument injection via package names
+        args.push("--".to_string());
+
         for pkg in packages {
             let pkg_arg = if let Some(version) = &pkg.version {
                 format!("{}={}", pkg.name, version)
@@ -997,14 +1119,16 @@ impl PackageManagerBackend for ApkBackend {
     }
 
     fn update_package(&self, name: &str) -> Result<()> {
-        self.run_apk(&["upgrade", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_apk(&["upgrade", "--", name])?;
         info!("Updated package: {}", name);
         Ok(())
     }
 
     fn remove_package(&self, name: &str, _purge: bool) -> Result<()> {
         // APK doesn't have a purge concept - just remove the package
-        self.run_apk(&["del", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_apk(&["del", "--", name])?;
         info!("Removed package: {}", name);
         Ok(())
     }
@@ -1066,7 +1190,8 @@ impl PackageManagerBackend for ApkBackend {
     fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
         match packages {
             Some(pkgs) => {
-                let mut args: Vec<&str> = vec!["upgrade"];
+                // SECURITY: -- separator prevents argument injection via package names
+                let mut args: Vec<&str> = vec!["upgrade", "--"];
                 for pkg in pkgs {
                     args.push(pkg);
                 }
@@ -1186,10 +1311,8 @@ impl PackageManagerBackend for ApkBackend {
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // Validate service name to prevent shell injection
-        if name.is_empty() || name.contains('/') || name.contains("..") {
-            return Err(anyhow::anyhow!("Invalid service name: {}", name));
-        }
+        // SECURITY: Strict allowlist validation to prevent argument/shell injection
+        validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Alpine uses OpenRC for service management
         get_openrc_service_status(name)
@@ -1533,6 +1656,9 @@ impl PackageManagerBackend for DnfBackend {
             args.push("--allowerasing".to_string());
         }
 
+        // SECURITY: -- separator prevents argument injection via package names
+        args.push("--".to_string());
+
         for pkg in packages {
             let pkg_arg = if let Some(version) = &pkg.version {
                 format!("{}-{}", pkg.name, version)
@@ -1552,16 +1678,18 @@ impl PackageManagerBackend for DnfBackend {
     }
 
     fn update_package(&self, name: &str) -> Result<()> {
-        self.run_dnf(&["upgrade", "-y", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_dnf(&["upgrade", "-y", "--", name])?;
         info!("Updated package: {}", name);
         Ok(())
     }
 
     fn remove_package(&self, name: &str, purge: bool) -> Result<()> {
+        // SECURITY: -- separator prevents argument injection via package name
         let args = if purge {
-            vec!["remove", "-y", "--noautoremove", name]
+            vec!["remove", "-y", "--noautoremove", "--", name]
         } else {
-            vec!["remove", "-y", name]
+            vec!["remove", "-y", "--", name]
         };
         self.run_dnf(&args)?;
         info!("Removed package: {} (purge={})", name, purge);
@@ -1641,7 +1769,8 @@ impl PackageManagerBackend for DnfBackend {
     fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
         match packages {
             Some(pkgs) => {
-                let mut args: Vec<&str> = vec!["upgrade", "-y"];
+                // SECURITY: -- separator prevents argument injection via package names
+                let mut args: Vec<&str> = vec!["upgrade", "-y", "--"];
                 for pkg in pkgs {
                     args.push(pkg);
                 }
@@ -1758,10 +1887,8 @@ impl PackageManagerBackend for DnfBackend {
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // Validate service name to prevent shell injection
-        if name.is_empty() || name.contains('/') || name.contains("..") {
-            return Err(anyhow::anyhow!("Invalid service name: {}", name));
-        }
+        // SECURITY: Strict allowlist validation to prevent argument/shell injection
+        validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Fedora/RHEL use systemd for service management
         get_systemd_service_status(name)
@@ -2087,6 +2214,9 @@ impl PackageManagerBackend for YumBackend {
 
         // yum doesn't have --allowerasing, skip force option
 
+        // SECURITY: -- separator prevents argument injection via package names
+        args.push("--".to_string());
+
         for pkg in packages {
             let pkg_arg = if let Some(version) = &pkg.version {
                 format!("{}-{}", pkg.name, version)
@@ -2106,7 +2236,8 @@ impl PackageManagerBackend for YumBackend {
     }
 
     fn update_package(&self, name: &str) -> Result<()> {
-        self.run_yum(&["update", "-y", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_yum(&["update", "-y", "--", name])?;
         info!("Updated package: {}", name);
         Ok(())
     }
@@ -2114,7 +2245,8 @@ impl PackageManagerBackend for YumBackend {
     fn remove_package(&self, name: &str, purge: bool) -> Result<()> {
         // yum doesn't distinguish between remove and purge
         let _ = purge;
-        self.run_yum(&["remove", "-y", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_yum(&["remove", "-y", "--", name])?;
         info!("Removed package: {} (purge={})", name, purge);
         Ok(())
     }
@@ -2185,7 +2317,8 @@ impl PackageManagerBackend for YumBackend {
     fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
         match packages {
             Some(pkgs) => {
-                let mut args: Vec<&str> = vec!["update", "-y"];
+                // SECURITY: -- separator prevents argument injection via package names
+                let mut args: Vec<&str> = vec!["update", "-y", "--"];
                 for pkg in pkgs {
                     args.push(pkg);
                 }
@@ -2301,10 +2434,8 @@ impl PackageManagerBackend for YumBackend {
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // Validate service name to prevent shell injection
-        if name.is_empty() || name.contains('/') || name.contains("..") {
-            return Err(anyhow::anyhow!("Invalid service name: {}", name));
-        }
+        // SECURITY: Strict allowlist validation to prevent argument/shell injection
+        validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // CentOS 7 uses systemd for service management
         get_systemd_service_status(name)
@@ -2557,6 +2688,9 @@ impl PackageManagerBackend for PacmanBackend {
             args.push("'*'".to_string());
         }
 
+        // SECURITY: -- separator prevents argument injection via package names
+        args.push("--".to_string());
+
         for pkg in packages {
             args.push(pkg.name.clone());
         }
@@ -2571,14 +2705,16 @@ impl PackageManagerBackend for PacmanBackend {
     }
 
     fn update_package(&self, name: &str) -> Result<()> {
-        self.run_pacman(&["-S", "--noconfirm", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_pacman(&["-S", "--noconfirm", "--", name])?;
         info!("Updated package: {}", name);
         Ok(())
     }
 
     fn remove_package(&self, name: &str, _purge: bool) -> Result<()> {
         // pacman doesn't have a purge concept - just remove the package
-        self.run_pacman(&["-R", "--noconfirm", name])?;
+        // SECURITY: -- separator prevents argument injection via package name
+        self.run_pacman(&["-R", "--noconfirm", "--", name])?;
         info!("Removed package: {} (purge={})", name, _purge);
         Ok(())
     }
@@ -2629,7 +2765,8 @@ impl PackageManagerBackend for PacmanBackend {
     fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
         match packages {
             Some(pkgs) => {
-                let mut args: Vec<&str> = vec!["-S", "--noconfirm", "--needed"];
+                // SECURITY: -- separator prevents argument injection via package names
+                let mut args: Vec<&str> = vec!["-S", "--noconfirm", "--needed", "--"];
                 for pkg in pkgs {
                     args.push(pkg);
                 }
@@ -2746,10 +2883,8 @@ impl PackageManagerBackend for PacmanBackend {
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // Validate service name to prevent shell injection
-        if name.is_empty() || name.contains('/') || name.contains("..") {
-            return Err(anyhow::anyhow!("Invalid service name: {}", name));
-        }
+        // SECURITY: Strict allowlist validation to prevent argument/shell injection
+        validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Arch Linux uses systemd for service management
         get_systemd_service_status(name)
@@ -2997,5 +3132,161 @@ mod tests {
         assert_eq!(pkg.size_installed, Some("12.50 MiB".to_string()));
         assert_eq!(pkg.dependencies.len(), 3);
         assert!(pkg.dependencies.contains(&"readline".to_string()));
+    }
+
+    // --- Validation function tests (Issue #10: Argument injection RCE prevention) ---
+
+    #[test]
+    fn test_validate_package_name_valid() {
+        assert!(validate_package_name("bash").is_ok());
+        assert!(validate_package_name("libssl1.1").is_ok());
+        assert!(validate_package_name("python3-pip").is_ok());
+        assert!(validate_package_name("g++-11").is_ok());
+        assert!(validate_package_name("nginx-common").is_ok());
+        assert!(validate_package_name("curl").is_ok());
+        assert!(validate_package_name("lib32-glibc").is_ok());
+        assert!(validate_package_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_package_name_empty() {
+        assert!(validate_package_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_too_long() {
+        let long_name = "a".repeat(257);
+        assert!(validate_package_name(&long_name).is_err());
+        // Exactly 256 chars should be fine
+        let max_name = "a".repeat(256);
+        assert!(validate_package_name(&max_name).is_ok());
+    }
+
+    #[test]
+    fn test_validate_package_name_leading_hyphen() {
+        // Leading hyphen could be interpreted as a command-line option
+        assert!(validate_package_name("-evil").is_err());
+        assert!(validate_package_name("--allow-unauthenticated").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_shell_metacharacters() {
+        // Shell metacharacters that could enable injection
+        assert!(validate_package_name("pkg;rm -rf").is_err());
+        assert!(validate_package_name("pkg$(cmd)").is_err());
+        assert!(validate_package_name("pkg`cmd`").is_err());
+        assert!(validate_package_name("pkg|other").is_err());
+        assert!(validate_package_name("pkg&other").is_err());
+        assert!(validate_package_name("pkg>file").is_err());
+        assert!(validate_package_name("pkg<file").is_err());
+        assert!(validate_package_name("pkg'other").is_err());
+        assert!(validate_package_name("pkg\"other").is_err());
+        assert!(validate_package_name("pkg!other").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_path_separators() {
+        assert!(validate_package_name("/usr/bin/evil").is_err());
+        assert!(validate_package_name("..\\..\\evil").is_err());
+        assert!(validate_package_name("../evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_whitespace() {
+        assert!(validate_package_name("pkg name").is_err());
+        assert!(validate_package_name("pkg\tname").is_err());
+        assert!(validate_package_name("pkg\nname").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_leading_digit() {
+        // Digits are valid start characters
+        assert!(validate_package_name("3ddesktop").is_ok());
+        assert!(validate_package_name("0ad").is_ok());
+    }
+
+    #[test]
+    fn test_validate_version_string_valid() {
+        assert!(validate_version_string("1.2.3").is_ok());
+        assert!(validate_version_string("1.2.3-r0").is_ok());
+        assert!(validate_version_string("5.2.21-1.fc43").is_ok());
+        assert!(validate_version_string("2:1.0-1").is_ok()); // RPM epoch
+        assert!(validate_version_string("1.0~beta1").is_ok()); // Debian tilde
+        assert!(validate_version_string("1.0+dfsg-1").is_ok()); // Debian suffix
+    }
+
+    #[test]
+    fn test_validate_version_string_empty() {
+        assert!(validate_version_string("").is_err());
+    }
+
+    #[test]
+    fn test_validate_version_string_leading_hyphen() {
+        assert!(validate_version_string("-1.0").is_err());
+    }
+
+    #[test]
+    fn test_validate_version_string_shell_metacharacters() {
+        assert!(validate_version_string("1.0;cmd").is_err());
+        assert!(validate_version_string("1.0$(cmd)").is_err());
+        assert!(validate_version_string("1.0`cmd`").is_err());
+        assert!(validate_version_string("1.0|cmd").is_err());
+        assert!(validate_version_string("1.0&cmd").is_err());
+        assert!(validate_version_string("1.0 cmd").is_err());
+    }
+
+    #[test]
+    fn test_validate_version_string_path_separators() {
+        assert!(validate_version_string("1.0/evil").is_err());
+        assert!(validate_version_string("1.0\\evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_service_name_valid() {
+        assert!(validate_service_name("sshd").is_ok());
+        assert!(validate_service_name("nginx.service").is_ok());
+        assert!(validate_service_name("ssh@host").is_ok());
+        assert!(validate_service_name("docker").is_ok());
+        assert!(validate_service_name("networkd-dispatcher").is_ok());
+    }
+
+    #[test]
+    fn test_validate_service_name_empty() {
+        assert!(validate_service_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_service_name_leading_hyphen() {
+        assert!(validate_service_name("-evil").is_err());
+        assert!(validate_service_name("--help").is_err());
+    }
+
+    #[test]
+    fn test_validate_service_name_path_separators() {
+        assert!(validate_service_name("/usr/bin/evil").is_err());
+        assert!(validate_service_name("../evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_service_name_shell_metacharacters() {
+        assert!(validate_service_name("svc;rm").is_err());
+        assert!(validate_service_name("svc$(cmd)").is_err());
+        assert!(validate_service_name("svc|other").is_err());
+        assert!(validate_service_name("svc&other").is_err());
+        assert!(validate_service_name("svc name").is_err());
+    }
+
+    #[test]
+    fn test_validate_service_name_with_hyphen() {
+        // Hyphens ARE allowed in service names (common in systemd unit names like networkd-dispatcher)
+        assert!(validate_service_name("networkd-dispatcher").is_ok());
+        // But leading hyphens are NOT allowed (would be interpreted as command flags)
+        assert!(validate_service_name("-evil").is_err());
+    }
+
+    #[test]
+    fn test_validate_service_name_with_plus() {
+        // Plus is allowed in service names
+        assert!(validate_service_name("cups+daemon").is_ok());
     }
 }
