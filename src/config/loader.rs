@@ -33,8 +33,6 @@ pub struct TlsConfig {
     pub ca_cert: String,
     pub server_cert: String,
     pub server_key: String,
-    #[serde(default = "default_tls_version")]
-    pub min_tls_version: String,
     /// Path to persist the CRL fetched from the manager.
     /// Defaults to /etc/linux_patch_api/certs/crl.pem
     #[serde(default = "default_crl_path")]
@@ -47,10 +45,6 @@ fn default_crl_path() -> String {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_tls_version() -> String {
-    "1.3".to_string()
 }
 
 /// Jobs configuration
@@ -500,6 +494,19 @@ impl AppConfig {
     pub fn load(path: &str, skip_tls_validation: bool) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
+
+        // Check for deprecated fields before typed parsing
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            if let Some(tls) = value.get("tls") {
+                if tls.get("min_tls_version").is_some() {
+                    tracing::warn!(
+                        "Config contains deprecated 'tls.min_tls_version' field. \
+                         This field is ignored — TLS 1.3 is the only supported version. \
+                         Remove it from your config to silence this warning."
+                    );
+                }
+            }
+        }
 
         let config: AppConfig = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path))?;

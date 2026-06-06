@@ -368,16 +368,15 @@ async fn main() -> Result<()> {
             ca_cert = %tls_config.ca_cert,
             server_cert = %tls_config.server_cert,
             server_key = %tls_config.server_key,
-            min_tls_version = %tls_config.min_tls_version,
             crl_path = %tls_config.crl_path,
-            "Initializing mTLS authentication with TLS binding"
+            "Initializing mTLS authentication with TLS 1.3 binding"
         );
 
+        // TLS 1.3 is the only supported version — hardcoded in build_rustls_config()
         let mtls_config = mtls::MtlsConfig {
             ca_cert_path: tls_config.ca_cert.clone(),
             server_cert_path: tls_config.server_cert.clone(),
             server_key_path: tls_config.server_key.clone(),
-            min_tls_version: tls_config.min_tls_version.clone(),
         };
 
         // Load CRL from disk into the shared CRL state
