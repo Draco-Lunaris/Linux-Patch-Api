@@ -15,7 +15,6 @@ mod mtls_tests {
             ca_cert_path: "/etc/linux_patch_api/certs/ca.pem".to_string(),
             server_cert_path: "/etc/linux_patch_api/certs/server.pem".to_string(),
             server_key_path: "/etc/linux_patch_api/certs/server.key".to_string(),
-            min_tls_version: "1.3".to_string(),
         };
 
         assert_eq!(config.ca_cert_path, "/etc/linux_patch_api/certs/ca.pem");
@@ -27,7 +26,6 @@ mod mtls_tests {
             config.server_key_path,
             "/etc/linux_patch_api/certs/server.key"
         );
-        assert_eq!(config.min_tls_version, "1.3");
     }
 
     #[test]

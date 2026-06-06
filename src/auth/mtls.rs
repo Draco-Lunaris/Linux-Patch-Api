@@ -143,12 +143,14 @@ impl ClientCertVerifier for CrlAwareVerifier {
 }
 
 /// mTLS Configuration
+///
+/// TLS 1.3 is the only supported protocol version — this is hardcoded
+/// in `build_rustls_config()` and cannot be configured via this struct.
 #[derive(Debug, Clone)]
 pub struct MtlsConfig {
     pub ca_cert_path: String,
     pub server_cert_path: String,
     pub server_key_path: String,
-    pub min_tls_version: String,
 }
 
 /// Build a rustls ServerConfig with client certificate verification.

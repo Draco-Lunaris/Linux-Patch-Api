@@ -8,4 +8,5 @@
 pub mod loader;
 pub use loader::{validate_certs, AppConfig, CertStatus, EnrollmentConfig, RateLimitConfig};
 pub mod validator;
+pub use validator::validate_config_warnings;
 pub mod watcher;

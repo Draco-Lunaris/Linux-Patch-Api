@@ -395,7 +395,7 @@ tls:
   ca_cert: "/etc/linux_patch_api/certs/ca.pem"
   server_cert: "/etc/linux_patch_api/certs/server.pem"
   server_key: "/etc/linux_patch_api/certs/server.key"
-  min_tls_version: "1.3"
+  # TLS 1.3 is the only supported version (hardcoded, not configurable)
 
 # Job Configuration
 jobs:
