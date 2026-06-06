@@ -178,8 +178,10 @@ async fn test_full_enrollment_flow_happy_path() {
     let tls_config = build_tls_config(cert_dir.path());
     provision::provision_pki_bundle(
         &bundle.ca_crt,
+        &bundle.ca_chain,
         &bundle.server_crt,
         &bundle.server_key,
+        &bundle.crl_pem,
         Some(&tls_config),
     )
     .await
@@ -445,8 +447,10 @@ async fn test_certificate_permission_verification() {
     let tls_config = build_tls_config(cert_dir.path());
     provision::provision_pki_bundle(
         &bundle.ca_crt,
+        &bundle.ca_chain,
         &bundle.server_crt,
         &bundle.server_key,
+        &bundle.crl_pem,
         Some(&tls_config),
     )
     .await
