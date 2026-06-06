@@ -165,7 +165,16 @@ pub fn load_crl(crl_path: &Path, ca_cert_der: &[u8]) -> CrlState {
     };
 
     // Verify CRL signature against CA
-    let (_, ca_cert) = match x509_parser::parse_x509_certificate(ca_cert_der) {
+    // Extract DER from PEM if the CA cert is PEM-encoded
+    let ca_der = match extract_pem_cert_der(ca_cert_der) {
+        Some(der) => der,
+        None => {
+            // Not PEM — assume it's already DER
+            ca_cert_der.to_vec()
+        }
+    };
+
+    let (_, ca_cert) = match x509_parser::parse_x509_certificate(&ca_der) {
         Ok(r) => r,
         Err(e) => {
             error!(error = %e, "Failed to parse CA cert for CRL signature verification");
@@ -218,6 +227,29 @@ pub fn load_crl(crl_path: &Path, ca_cert_der: &[u8]) -> CrlState {
         crl_mtime,
         loaded_at: SystemTime::now(),
     }
+}
+
+/// Extract DER bytes from a PEM-encoded certificate.
+/// Looks for `-----BEGIN CERTIFICATE-----` / `-----END CERTIFICATE-----` markers
+/// and base64-decodes the content between them.
+pub fn extract_pem_cert_der(pem_bytes: &[u8]) -> Option<Vec<u8>> {
+    let pem_str = String::from_utf8_lossy(pem_bytes);
+    let begin_marker = "-----BEGIN CERTIFICATE-----";
+    let end_marker = "-----END CERTIFICATE-----";
+
+    let begin_idx = pem_str.find(begin_marker)?;
+    let after_begin = begin_idx + begin_marker.len();
+    let end_idx = pem_str[after_begin..].find(end_marker)?;
+    // Strip all whitespace (including newlines) from the base64 block
+    // before decoding, since PEM format wraps lines at 64 characters.
+    let b64_block: String = pem_str[after_begin..after_begin + end_idx]
+        .split_whitespace()
+        .collect();
+
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(&b64_block)
+        .ok()
 }
 
 /// Extract DER bytes from a PEM-encoded CRL.
@@ -686,6 +718,49 @@ mod tests {
         assert!(
             !invalid_state.is_revoked("aabbccdd"),
             "Invalid CRL should not match any serial"
+        );
+    }
+
+    #[test]
+    fn test_extract_pem_cert_der_invalid() {
+        // Not PEM
+        assert!(extract_pem_cert_der(b"not pem").is_none());
+        // PEM but wrong type (CRL instead of CERTIFICATE)
+        assert!(
+            extract_pem_cert_der(b"-----BEGIN X509 CRL-----\nAA==\n-----END X509 CRL-----")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_pem_cert_der_valid() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (_, ca_cert) = generate_test_ca();
+        let cert_pem = ca_cert.pem();
+
+        // Verify PEM extraction succeeds
+        let der = extract_pem_cert_der(cert_pem.as_bytes());
+        assert!(
+            der.is_some(),
+            "PEM extraction should succeed for valid certificate PEM"
+        );
+
+        // Verify the DER can be parsed as an X.509 certificate
+        let der_bytes = der.unwrap();
+        let parsed = x509_parser::parse_x509_certificate(&der_bytes);
+        assert!(
+            parsed.is_ok(),
+            "DER should parse as a valid X.509 certificate"
+        );
+    }
+
+    #[test]
+    fn test_extract_pem_cert_der_rejects_crl_pem() {
+        // CERTIFICATE extraction should reject CRL PEM
+        let crl_pem = "-----BEGIN X509 CRL-----\nAA==\n-----END X509 CRL-----";
+        assert!(
+            extract_pem_cert_der(crl_pem.as_bytes()).is_none(),
+            "CRL PEM should not extract as CERTIFICATE"
         );
     }
 }
