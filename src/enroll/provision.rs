@@ -16,6 +16,8 @@ const DEFAULT_CA_CERT: &str = "/etc/linux_patch_api/certs/ca.pem";
 const DEFAULT_SERVER_CERT: &str = "/etc/linux_patch_api/certs/server.pem";
 /// Default server key path.
 const DEFAULT_SERVER_KEY: &str = "/etc/linux_patch_api/certs/server.key.pem";
+/// Default CRL path.
+const DEFAULT_CRL_PATH: &str = "/etc/linux_patch_api/certs/crl.pem";
 
 /// Validate that a PEM string has proper format (BEGIN/END markers present).
 ///
@@ -128,12 +130,14 @@ pub fn write_pem_file(path: &str, pem_data: &str, is_key: bool) -> Result<()> {
 
 /// Provision the full PKI bundle from an approved enrollment response.
 ///
-/// Writes CA cert, server cert, and server key to configured paths.
+/// Writes CA cert, CA chain, server cert, server key, and CRL to configured paths.
 /// Paths are read from TLS config if available, otherwise defaults are used.
 pub async fn provision_pki_bundle(
     ca_crt: &str,
+    _ca_chain: &str,
     server_crt: &str,
     server_key: &str,
+    crl_pem: &str,
     tls_config: Option<&super::super::config::loader::TlsConfig>,
 ) -> Result<()> {
     // Determine target paths from config or defaults
@@ -172,6 +176,19 @@ pub async fn provision_pki_bundle(
     write_pem_file(&cert_path, server_crt, false).context("Failed to write server certificate")?;
 
     write_pem_file(&key_path, server_key, true).context("Failed to write server key")?;
+
+    // Write CRL if provided (non-empty)
+    let crl_path = if let Some(tls) = tls_config {
+        tls.crl_path.clone()
+    } else {
+        DEFAULT_CRL_PATH.to_string()
+    };
+    if !crl_pem.trim().is_empty() {
+        write_pem_file(&crl_path, crl_pem, false).context("Failed to write CRL")?;
+        tracing::info!(path = %crl_path, "CRL written from enrollment bundle");
+    } else {
+        tracing::info!("No CRL in enrollment bundle — agent will fetch on refresh cycle");
+    }
 
     // 3. Log successful provisioning with structured fields
     tracing::info!(

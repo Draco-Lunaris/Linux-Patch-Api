@@ -38,8 +38,12 @@ pub enum EnrollmentStatusResponse {
     Pending,
     Approved {
         ca_crt: String,
+        #[serde(default)]
+        ca_chain: String,
         server_crt: String,
         server_key: String,
+        #[serde(default)]
+        crl_pem: String,
     },
     Denied,
     NotFound,
@@ -49,8 +53,10 @@ pub enum EnrollmentStatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PkiBundle {
     pub ca_crt: String,
+    pub ca_chain: String,
     pub server_crt: String,
     pub server_key: String,
+    pub crl_pem: String,
 }
 
 impl From<EnrollmentStatusResponse> for Option<PkiBundle> {
@@ -58,12 +64,16 @@ impl From<EnrollmentStatusResponse> for Option<PkiBundle> {
         match response {
             EnrollmentStatusResponse::Approved {
                 ca_crt,
+                ca_chain,
                 server_crt,
                 server_key,
+                crl_pem,
             } => Some(PkiBundle {
                 ca_crt,
+                ca_chain,
                 server_crt,
                 server_key,
+                crl_pem,
             }),
             _ => None,
         }
@@ -451,8 +461,10 @@ impl EnrollmentClient {
                 }
                 EnrollmentStatusResponse::Approved {
                     ca_crt,
+                    ca_chain,
                     server_crt,
                     server_key,
+                    crl_pem,
                 } => {
                     tracing::info!(
                         elapsed_seconds = start.elapsed().as_secs(),
@@ -461,8 +473,10 @@ impl EnrollmentClient {
                     );
                     return Ok(PkiBundle {
                         ca_crt,
+                        ca_chain,
                         server_crt,
                         server_key,
+                        crl_pem,
                     });
                 }
                 EnrollmentStatusResponse::Denied => {
@@ -566,8 +580,10 @@ mod tests {
     fn approved_to_pki_bundle() {
         let status = EnrollmentStatusResponse::Approved {
             ca_crt: "ca".into(),
+            ca_chain: String::new(),
             server_crt: "crt".into(),
             server_key: "key".into(),
+            crl_pem: String::new(),
         };
         let bundle: Option<PkiBundle> = status.into();
         assert!(bundle.is_some());

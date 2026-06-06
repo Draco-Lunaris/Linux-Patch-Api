@@ -160,8 +160,10 @@ pub async fn run_enrollment(
     // Write certificates to configured paths (or defaults)
     provision::provision_pki_bundle(
         &pki_bundle.ca_crt,
+        &pki_bundle.ca_chain,
         &pki_bundle.server_crt,
         &pki_bundle.server_key,
+        &pki_bundle.crl_pem,
         config.tls_config(),
     )
     .await?;
