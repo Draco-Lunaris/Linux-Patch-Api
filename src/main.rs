@@ -28,7 +28,7 @@ use tracing::{error, info, warn};
 
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::crl::{self, CrlStatus};
-use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager};
+use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager, WhitelistMiddleware};
 use linux_patch_api::config::loader::{validate_certs, CertStatus};
 use linux_patch_api::enroll;
 use linux_patch_api::packages::cache::PackageCacheState;
@@ -282,11 +282,12 @@ async fn main() -> Result<()> {
                 entries = manager.entry_count(),
                 "Whitelist manager initialized"
             );
-            Some(Arc::new(manager))
+            Arc::new(manager)
         }
         Err(e) => {
-            warn!(error = %e, "Failed to load whitelist - continuing with empty whitelist (all denied)");
-            None
+            // Fail-closed: deny all IPs when whitelist cannot be loaded
+            warn!(error = %e, "Failed to load whitelist - using deny-all mode (fail-closed)");
+            Arc::new(WhitelistManager::new_deny_all())
         }
     };
 
@@ -305,9 +306,13 @@ async fn main() -> Result<()> {
     // Configure bind address
     let bind_address = format!("{}:{}", config.server.bind, config.server.port);
 
+    // Clone whitelist manager for use inside the HttpServer closure
+    let wl = whitelist_manager.clone();
+
     // Create server builder
     let server_builder = HttpServer::new(move || {
         let mut app = App::new()
+            .wrap(WhitelistMiddleware::new(wl.clone()))
             .wrap(Logger::default())
             .app_data(job_manager_data.clone())
             .app_data(backend_data.clone())
@@ -338,8 +343,8 @@ async fn main() -> Result<()> {
     .max_connection_rate(1000);
     info!(
         mtls_enabled = config.tls_config().is_some(),
-        whitelist_enabled = whitelist_manager.is_some(),
-        "Security layer status"
+        whitelist_entries = whitelist_manager.entry_count(),
+        "Security layer status (IP whitelist enforced)"
     );
 
     info!("Linux Patch API initialized successfully");

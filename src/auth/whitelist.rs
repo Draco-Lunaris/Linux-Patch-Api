@@ -17,6 +17,12 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+use actix_web::{
+    dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
+    Error,
+};
+use futures_util::future::LocalBoxFuture;
+
 /// Whitelist entry types
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WhitelistEntry {
@@ -282,6 +288,18 @@ impl WhitelistManager {
         }
     }
 
+    /// Create a deny-all whitelist manager (fail-closed fallback).
+    ///
+    /// Used when the whitelist file cannot be loaded — all IPs are denied
+    /// except health endpoints (handled at middleware level).
+    pub fn new_deny_all() -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(HashSet::new())),
+            config_path: String::new(),
+            watcher: None,
+        }
+    }
+
     /// Get the number of entries in the whitelist
     pub fn entry_count(&self) -> usize {
         self.entries.read().unwrap().len()
@@ -426,16 +444,107 @@ pub struct WhitelistMiddleware {
 }
 
 impl WhitelistMiddleware {
-    /// Create a new whitelist middleware
-    pub fn new(manager: WhitelistManager) -> Self {
-        Self {
-            manager: Arc::new(manager),
-        }
+    /// Create a new whitelist middleware from an Arc<WhitelistManager>
+    pub fn new(manager: Arc<WhitelistManager>) -> Self {
+        Self { manager }
     }
 
     /// Get the whitelist manager reference
     pub fn manager(&self) -> Arc<WhitelistManager> {
         self.manager.clone()
+    }
+}
+
+/// Actix-web Transform implementation — wraps WhitelistMiddleware as middleware
+impl<S, B> Transform<S, ServiceRequest> for WhitelistMiddleware
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<B>;
+    type Error = Error;
+    type InitError = ();
+    type Transform = WhitelistMiddlewareService<S>;
+    type Future = futures_util::future::Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        futures_util::future::ok(WhitelistMiddlewareService {
+            service,
+            manager: self.manager.clone(),
+        })
+    }
+}
+
+/// Whitelist middleware service — performs per-request IP checks
+pub struct WhitelistMiddlewareService<S> {
+    service: S,
+    manager: Arc<WhitelistManager>,
+}
+
+/// Health/system endpoint paths exempt from IP whitelist enforcement
+const WHITELIST_EXEMPT_PATHS: &[&str] = &["/health", "/api/v1/system/info"];
+
+impl<S, B> Service<ServiceRequest> for WhitelistMiddlewareService<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<B>;
+    type Error = Error;
+    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    forward_ready!(service);
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        let path = req.path().to_owned();
+
+        // Exempt health and system info endpoints from IP whitelist
+        if WHITELIST_EXEMPT_PATHS.iter().any(|p| path == *p) {
+            debug!(path = %path, "Path exempt from IP whitelist");
+            let fut = self.service.call(req);
+            return Box::pin(fut);
+        }
+
+        // Get peer address — fail-closed if unavailable
+        let peer_addr = req.peer_addr();
+        match peer_addr {
+            Some(addr) => {
+                if self.manager.is_socket_allowed(&addr) {
+                    debug!(
+                        peer_addr = %addr,
+                        path = %path,
+                        "IP whitelist check passed"
+                    );
+                    let fut = self.service.call(req);
+                    Box::pin(fut)
+                } else {
+                    warn!(
+                        peer_addr = %addr,
+                        path = %path,
+                        "IP whitelist denied - connection rejected"
+                    );
+                    Box::pin(async move {
+                        Err(actix_web::error::ErrorForbidden(
+                            "IP address not in whitelist",
+                        ))
+                    })
+                }
+            }
+            None => {
+                // No peer address — fail-closed (deny by default)
+                warn!(
+                    path = %path,
+                    "No peer address available - denying request (fail-closed)"
+                );
+                Box::pin(async move {
+                    Err(actix_web::error::ErrorForbidden(
+                        "IP address not available - denied by policy",
+                    ))
+                })
+            }
+        }
     }
 }
 
@@ -510,5 +619,34 @@ mod tests {
         // Test IP outside subnet
         let ip_outside: Ipv4Addr = "192.168.2.100".parse().unwrap();
         assert!(!manager.is_allowed(&ip_outside));
+    }
+
+    #[test]
+    fn test_new_deny_all_blocks_everything() {
+        let manager = WhitelistManager::new_deny_all();
+        // No IPs should be allowed in deny-all mode
+        let ip: Ipv4Addr = "192.168.1.1".parse().unwrap();
+        assert!(!manager.is_allowed(&ip));
+
+        let ip2: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        assert!(!manager.is_allowed(&ip2));
+
+        // Entry count should be 0
+        assert_eq!(manager.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_is_socket_allowed_ipv6_denied() {
+        let manager = WhitelistManager::new_deny_all();
+        // IPv6 should be denied even with a populated whitelist
+        let socket_v6: SocketAddr = "[::1]:12345".parse().unwrap();
+        assert!(!manager.is_socket_allowed(&socket_v6));
+    }
+
+    #[test]
+    fn test_exempt_paths_constant() {
+        // Verify the exempt paths include health and system info
+        assert!(WHITELIST_EXEMPT_PATHS.contains(&"/health"));
+        assert!(WHITELIST_EXEMPT_PATHS.contains(&"/api/v1/system/info"));
     }
 }
