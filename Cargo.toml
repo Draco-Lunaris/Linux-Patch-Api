@@ -16,6 +16,9 @@ actix-web-actors = "4"
 actix = "0.13"
 actix-tls = { version = "3", features = ["rustls-0_23"] }
 
+# Rate limiting (actix-governor for per-IP rate limiting)
+actix-governor = "0.6"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -117,6 +120,10 @@ path = "tests/e2e/test_enrollment_e2e.rs"
 [[test]]
 name = "auth_test"
 path = "tests/integration/auth_test.rs"
+
+[[test]]
+name = "rate_limit_test"
+path = "tests/unit/rate_limit_test.rs"
 
 [[bench]]
 name = "api_benchmarks"

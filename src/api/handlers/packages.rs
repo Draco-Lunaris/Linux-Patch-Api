@@ -252,6 +252,19 @@ pub async fn install_packages(
 
     info!(request_id = %request_id, packages = ?package_names, "Installing packages");
 
+    // Check job queue capacity
+    if !job_manager.can_accept_job().await {
+        let response = ApiResponse::<()>::error(
+            "QUEUE_FULL",
+            "Job queue is at capacity. Please retry later.",
+            None,
+            true,
+        );
+        return HttpResponse::TooManyRequests()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     // Create async job
     match job_manager
         .create_job(JobOperation::Install, package_names.clone())
@@ -337,6 +350,19 @@ pub async fn update_package(
 
     info!(request_id = %request_id, package = %package_name, "Updating package");
 
+    // Check job queue capacity
+    if !job_manager.can_accept_job().await {
+        let response = ApiResponse::<()>::error(
+            "QUEUE_FULL",
+            "Job queue is at capacity. Please retry later.",
+            None,
+            true,
+        );
+        return HttpResponse::TooManyRequests()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     // Create async job
     match job_manager
         .create_job(JobOperation::Update, vec![package_name.clone()])
@@ -420,6 +446,20 @@ pub async fn remove_package(
     }
 
     info!(request_id = %request_id, package = %package_name, "Removing package");
+
+    // Check job queue capacity
+    if !job_manager.can_accept_job().await {
+        let response = ApiResponse::<()>::error(
+            "QUEUE_FULL",
+            "Job queue is at capacity. Please retry later.",
+            None,
+            true,
+        );
+        return HttpResponse::TooManyRequests()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     match job_manager
         .create_job(JobOperation::Remove, vec![package_name.clone()])
         .await
@@ -484,7 +524,7 @@ pub async fn remove_package(
     }
 }
 
-/// Configure routes for package endpoints
+/// Configure all package routes
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/packages")

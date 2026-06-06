@@ -140,6 +140,7 @@ pub struct JobStatusEvent {
 pub struct JobManager {
     max_concurrent: usize,
     timeout_minutes: u64,
+    max_queue_depth: usize,
     jobs: Arc<RwLock<HashMap<Uuid, Job>>>,
     /// Broadcast sender for job status events
     event_sender: broadcast::Sender<JobStatusEvent>,
@@ -147,11 +148,16 @@ pub struct JobManager {
 
 impl JobManager {
     /// Create a new job manager
-    pub fn new(max_concurrent: usize, timeout_minutes: u64) -> Result<Self> {
+    pub fn new(
+        max_concurrent: usize,
+        timeout_minutes: u64,
+        max_queue_depth: usize,
+    ) -> Result<Self> {
         let (event_sender, _) = broadcast::channel(256);
         Ok(Self {
             max_concurrent,
             timeout_minutes,
+            max_queue_depth,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
         })
@@ -165,6 +171,11 @@ impl JobManager {
     /// Get max concurrent jobs
     pub fn max_concurrent(&self) -> usize {
         self.max_concurrent
+    }
+
+    /// Get max queue depth
+    pub fn max_queue_depth(&self) -> usize {
+        self.max_queue_depth
     }
 
     /// Subscribe to job status events
@@ -335,9 +346,17 @@ impl JobManager {
             .count()
     }
 
-    /// Check if can accept new job (respecting max_concurrent)
+    /// Check if can accept new job (respecting max_queue_depth)
+    /// Returns false when the total number of pending + running jobs
+    /// equals or exceeds the configured queue depth cap.
     pub async fn can_accept_job(&self) -> bool {
-        self.running_count().await < self.max_concurrent
+        let jobs = self.jobs.read().await;
+        let active_count = jobs
+            .values()
+            .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+            .count();
+        drop(jobs);
+        active_count < self.max_queue_depth
     }
 
     /// Delete a completed/failed job from history
@@ -401,6 +420,7 @@ impl Clone for JobManager {
         Self {
             max_concurrent: self.max_concurrent,
             timeout_minutes: self.timeout_minutes,
+            max_queue_depth: self.max_queue_depth,
             jobs: self.jobs.clone(),
             event_sender: self.event_sender.clone(),
         }

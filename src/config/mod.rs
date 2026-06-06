@@ -6,6 +6,6 @@
 //! - Auto-reload on file change via notify watcher
 
 pub mod loader;
-pub use loader::{validate_certs, AppConfig, CertStatus, EnrollmentConfig};
+pub use loader::{validate_certs, AppConfig, CertStatus, EnrollmentConfig, RateLimitConfig};
 pub mod validator;
 pub mod watcher;
