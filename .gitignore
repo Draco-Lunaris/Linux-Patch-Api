@@ -14,5 +14,12 @@ debian/linux-patch-api.substvars
 *.buildinfo
 *.changes
 
+# Private key material - NEVER commit
+*.key
+*.key.pem
+configs/certs/*.pem
+configs/certs/*.srl
+tests/e2e/certs/*.key
+
 # Agent Zero project data
 .a0proj/
