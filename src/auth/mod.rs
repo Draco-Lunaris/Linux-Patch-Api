@@ -1,17 +1,27 @@
-//! Auth Module - mTLS and IP Whitelist Enforcement
+//! Auth Module - mTLS, IP Whitelist, and Security Headers
 //!
 //! This module provides security authentication and authorization:
-//! - mTLS (Mutual TLS) certificate-based authentication
+//! - mTLS (Mutual TLS) certificate-based authentication (enforced at TLS handshake by rustls)
 //! - IP whitelist enforcement with CIDR subnet support
+//! - Security header validation (VULN-006: duplicate critical header rejection)
 //! - Silent drop for non-compliant connections
 //! - Comprehensive audit logging
+//!
+//! # Architecture Decision Record: rustls as Authoritative Client-Auth Gate
+//!
+//! Client certificate authentication is enforced at the TLS handshake level by
+//! rustls via `CrlAwareVerifier`. No application-layer certificate validation
+//! middleware is needed — rustls rejects connections that fail client-cert
+//! verification before any HTTP request is processed. See `mtls.rs` for details.
 
 pub mod crl;
 pub mod mtls;
+pub mod security_headers;
 pub mod whitelist;
 
 pub use crl::{new_shared_state, CrlState, CrlStatus, SharedCrlState};
-pub use mtls::{ClientCertInfo, MtlsConfig, MtlsError, MtlsMiddleware};
+pub use mtls::{ClientCertInfo, MtlsConfig, MtlsError};
+pub use security_headers::SecurityHeadersMiddleware;
 pub use whitelist::{
     WhitelistConfig, WhitelistEntry, WhitelistManager, WhitelistMiddleware,
     WhitelistMiddlewareService,

@@ -20,7 +20,7 @@ This report documents the implementation of 6 security hardening fixes deferred 
 | VULN-003 | LOW | Input Validation | ✅ RESOLVED | src/api/handlers/packages.rs |
 | VULN-004 | MEDIUM | Header Security | ✅ RESOLVED | src/main.rs |
 | VULN-005 | LOW | HTTP Protocol | ✅ RESOLVED | src/api/routes.rs |
-| VULN-006 | LOW | Header Security | ✅ RESOLVED | src/auth/mtls.rs |
+| VULN-006 | LOW | Header Security | ✅ RESOLVED | src/auth/security_headers.rs |
 
 ---
 
@@ -176,20 +176,19 @@ web::scope("/api/v1")
 **Finding:** Duplicate Content-Type headers were accepted.
 
 **Implementation:**
-- Added `has_duplicate_critical_headers()` function to check for duplicate headers
+- `has_duplicate_critical_headers()` function checks for duplicate headers on every request
 - Monitors critical headers: `content-type`, `authorization`, `host`
-- Integrated into mTLS middleware `call()` method
-- Rejects requests with duplicate critical headers before further processing
+- Implemented as `SecurityHeadersMiddleware` — a dedicated Actix-web middleware
+- Wired into the middleware pipeline in `main.rs` between WhitelistMiddleware and Logger
+- Rejects requests with duplicate critical headers with HTTP 400 Bad Request
 
-**Code Location:** `src/auth/mtls.rs` (lines 26-49, 203-212)
+**Code Location:** `src/auth/security_headers.rs`
 
 ```rust
-fn has_duplicate_critical_headers(req: &ServiceRequest) -> bool {
-    let critical_headers = ["content-type", "authorization", "host"];
-    
-    for header_name in critical_headers.iter() {
+pub fn has_duplicate_critical_headers(headers: &HeaderMap) -> bool {
+    for header_name in CRITICAL_HEADERS.iter() {
         let mut count = 0;
-        for (name, _) in req.headers().iter() {
+        for (name, _value) in headers.iter() {
             if name.as_str().eq_ignore_ascii_case(header_name) {
                 count += 1;
                 if count > 1 {
@@ -202,7 +201,29 @@ fn has_duplicate_critical_headers(req: &ServiceRequest) -> bool {
 }
 ```
 
-**Response:** HTTP 400 Bad Request with message "Duplicate critical headers not allowed"
+**Response:** HTTP 400 Bad Request with error message "Duplicate critical headers not allowed"
+
+**Architecture Note:** The duplicate-header check was originally in `MtlsMiddleware`, which was dead code (never wired into the pipeline). It has been extracted into `SecurityHeadersMiddleware`, which IS wired into the pipeline and runs on every request. Client certificate authentication is handled at the TLS handshake level by rustls via `CrlAwareVerifier` — no application-layer certificate middleware is needed. See `src/auth/mtls.rs` for the ADR documenting this decision.
+
+---
+
+## Architecture Decision Record: rustls as Authoritative Client-Auth Gate
+
+**Decision:** Client certificate authentication is enforced at the TLS handshake level by rustls via `CrlAwareVerifier`, NOT by application-layer middleware.
+
+**Context:** The original `MtlsMiddleware` was never wired into the Actix-web pipeline. It contained both a duplicate-header check (VULN-006) and a `validate_client_certificate()` stub that returned `Ok(())` unconditionally. Meanwhile, the actual client certificate verification was always performed by rustls at the TLS handshake level through `CrlAwareVerifier`, which wraps `WebPkiClientVerifier`.
+
+**Rationale:**
+- rustls provides battle-tested X.509 verification at the TLS handshake level
+- Enforcing auth at the TLS layer eliminates bypass vulnerabilities (middleware ordering bugs, route-specific skips)
+- CRL revocation checking is integrated into the same handshake path via `CrlAwareVerifier`
+- Application-layer certificate validation is redundant when the TLS layer already rejects untrusted connections
+
+**Consequences:**
+- `MtlsMiddleware` (Transform/Service) and `validate_client_certificate()` have been removed as dead code
+- `build_rustls_config()` is now a free function (no longer a method on `MtlsMiddleware`)
+- `SecurityHeadersMiddleware` handles VULN-006 (duplicate critical header rejection) as a dedicated, wired middleware
+- `ClientCertInfo` struct is preserved for potential future use in extracting certificate details from TLS sessions
 
 ---
 

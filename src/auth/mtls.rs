@@ -1,20 +1,33 @@
-//! mTLS Authentication Module
+//! mTLS Configuration Module
 //!
-//! Provides mutual TLS authentication middleware for Actix-web.
-//! Non-mTLS connections are silently dropped (no response).
-//! Supports CRL-aware client certificate verification when CRL is available.
+//! Provides rustls-based mutual TLS configuration for the API server.
+//!
+//! # Architecture Decision Record: rustls as Authoritative Client-Auth Gate
+//!
+//! Client certificate authentication is enforced at the TLS handshake level by
+//! rustls via `CrlAwareVerifier` (which wraps `WebPkiClientVerifier`). This means:
+//!
+//! - **rustls + CrlAwareVerifier IS the authoritative client-auth gate.**
+//! - No application-layer certificate validation middleware is needed because
+//!   rustls rejects connections that fail client-cert verification before any
+//!   HTTP request is processed.
+//! - `build_rustls_config()` configures the TLS listener to require client
+//!   certificates (`with_client_cert_verifier`), making mTLS enforcement
+//!   unavoidable at the transport layer.
+//! - CRL revocation checking is integrated into the same handshake path via
+//!   `CrlAwareVerifier`, so revoked certificates are also rejected before any
+//!   HTTP handler runs.
+//!
+//! This design was chosen because rustls provides battle-tested X.509
+//! verification, and enforcing auth at the TLS layer eliminates an entire
+//! class of bypass vulnerabilities that application-layer checks are
+//! susceptible to (e.g., middleware ordering bugs, route-specific skips).
 
-use actix_web::{
-    dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform},
-    Error, HttpMessage,
-};
-#[allow(unused_imports)]
-use chrono::{DateTime, Duration, Utc};
-use futures_util::future::LocalBoxFuture;
+use chrono::{DateTime, Utc};
 use rustls::{
     client::danger::HandshakeSignatureValid,
     crypto::aws_lc_rs,
-    pki_types::{CertificateDer, UnixTime},
+    pki_types::CertificateDer,
     server::{
         danger::{ClientCertVerified, ClientCertVerifier},
         ServerConfig, WebPkiClientVerifier,
@@ -24,34 +37,9 @@ use rustls::{
 };
 use rustls_pemfile::{certs, private_key};
 use std::{fs::File, io::BufReader, sync::Arc};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use super::crl::{cert_serial_hex, SharedCrlState};
-
-/// Check for duplicate critical headers (VULN-006)
-/// Returns true if duplicate headers are detected
-fn has_duplicate_critical_headers(req: &ServiceRequest) -> bool {
-    let critical_headers = ["content-type", "authorization", "host"];
-
-    for header_name in critical_headers.iter() {
-        // Count occurrences of this header
-        let mut count = 0;
-        for (name, _) in req.headers().iter() {
-            if name.as_str().eq_ignore_ascii_case(header_name) {
-                count += 1;
-                if count > 1 {
-                    warn!(
-                        peer_addr = ?req.peer_addr(),
-                        header = header_name,
-                        "Duplicate critical header detected - rejecting request"
-                    );
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
 
 /// CRL-aware client certificate verifier.
 ///
@@ -87,7 +75,7 @@ impl ClientCertVerifier for CrlAwareVerifier {
         &self,
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
-        now: UnixTime,
+        now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, RustlsError> {
         // 1. Delegate chain validation to WebPKI
         self.inner
@@ -163,51 +151,40 @@ pub struct MtlsConfig {
     pub min_tls_version: String,
 }
 
-/// mTLS Middleware for Actix-web
-pub struct MtlsMiddleware {
-    config: Arc<MtlsConfig>,
-    cert_store: Arc<RootCertStore>,
-}
+/// Build a rustls ServerConfig with client certificate verification.
+///
+/// This is the authoritative mTLS gate — rustls enforces client certificate
+/// validation at the TLS handshake level, before any HTTP request is processed.
+///
+/// When `crl_state` is provided and the CRL is available, wraps the
+/// WebPkiClientVerifier with CrlAwareVerifier for revocation checking.
+/// When CRL is missing/degraded, falls back to WebPKI-only verification.
+pub fn build_rustls_config(
+    config: &MtlsConfig,
+    crl_state: Option<SharedCrlState>,
+) -> Result<Arc<ServerConfig>, MtlsError> {
+    let cert_store = load_ca_certs(&config.ca_cert_path)?;
 
-impl MtlsMiddleware {
-    /// Create a new mTLS middleware
-    pub fn new(config: MtlsConfig) -> Result<Self, MtlsError> {
-        let cert_store = load_ca_certs(&config.ca_cert_path)?;
+    let webpki_verifier = WebPkiClientVerifier::builder(cert_store.clone().into())
+        .build()
+        .map_err(|e| MtlsError::ClientVerifierError(e.to_string()))?;
 
-        Ok(Self {
-            config: Arc::new(config),
-            cert_store: Arc::new(cert_store),
-        })
-    }
+    let client_verifier: Arc<dyn ClientCertVerifier> = match crl_state {
+        Some(state) => {
+            info!("CRL-aware client verification enabled");
+            Arc::new(CrlAwareVerifier::new(webpki_verifier, state))
+        }
+        None => {
+            info!("No CRL state provided -- using WebPKI-only client verification");
+            webpki_verifier
+        }
+    };
 
-    /// Build rustls server configuration with client certificate verification.
-    ///
-    /// When `crl_state` is provided and the CRL is available, wraps the
-    /// WebPkiClientVerifier with CrlAwareVerifier for revocation checking.
-    /// When CRL is missing/degraded, falls back to WebPKI-only verification.
-    pub fn build_rustls_config(
-        &self,
-        crl_state: Option<SharedCrlState>,
-    ) -> Result<Arc<ServerConfig>, MtlsError> {
-        let webpki_verifier = WebPkiClientVerifier::builder(self.cert_store.clone())
-            .build()
-            .map_err(|e| MtlsError::ClientVerifierError(e.to_string()))?;
+    let server_cert = load_certs(&config.server_cert_path)?;
+    let server_key = load_private_key(&config.server_key_path)?;
 
-        let client_verifier: Arc<dyn ClientCertVerifier> = match crl_state {
-            Some(state) => {
-                info!("CRL-aware client verification enabled");
-                Arc::new(CrlAwareVerifier::new(webpki_verifier, state))
-            }
-            None => {
-                info!("No CRL state provided -- using WebPKI-only client verification");
-                webpki_verifier
-            }
-        };
-
-        let server_cert = load_certs(&self.config.server_cert_path)?;
-        let server_key = load_private_key(&self.config.server_key_path)?;
-
-        let config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+    let server_config =
+        ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
             .with_protocol_versions(&[&TLS13])
             .map_err(|e| {
                 MtlsError::ServerConfigError(format!("Failed to set TLS 1.3 only: {}", e))
@@ -216,8 +193,7 @@ impl MtlsMiddleware {
             .with_single_cert(server_cert, server_key)
             .map_err(|e| MtlsError::ServerConfigError(e.to_string()))?;
 
-        Ok(Arc::new(config))
-    }
+    Ok(Arc::new(server_config))
 }
 
 /// Load CA certificates from PEM file
@@ -268,6 +244,21 @@ fn load_private_key(path: &str) -> Result<rustls::pki_types::PrivateKeyDer<'stat
     Ok(key)
 }
 
+/// Certificate information extracted from client certificate.
+///
+/// NOTE: This struct is preserved for potential future use in extracting
+/// client certificate details from the TLS session at the application layer.
+/// Client authentication is enforced at the TLS handshake level by
+/// CrlAwareVerifier — this struct is NOT used for validation.
+#[derive(Debug, Clone)]
+pub struct ClientCertInfo {
+    pub subject: String,
+    pub issuer: String,
+    pub serial: String,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+}
+
 /// mTLS Error types
 #[derive(Debug, thiserror::Error)]
 pub enum MtlsError {
@@ -285,229 +276,16 @@ pub enum MtlsError {
     ValidationError(String),
 }
 
-impl<S, B> Transform<S, ServiceRequest> for MtlsMiddleware
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
-    S::Future: 'static,
-    B: 'static,
-{
-    type Response = ServiceResponse<B>;
-    type Error = Error;
-    type InitError = ();
-    type Transform = MtlsMiddlewareService<S>;
-    type Future = futures_util::future::Ready<Result<Self::Transform, Self::InitError>>;
-
-    fn new_transform(&self, service: S) -> Self::Future {
-        futures_util::future::ok(MtlsMiddlewareService {
-            service,
-            config: self.config.clone(),
-            cert_store: self.cert_store.clone(),
-        })
-    }
-}
-
-pub struct MtlsMiddlewareService<S> {
-    service: S,
-    #[allow(dead_code)]
-    config: Arc<MtlsConfig>,
-    cert_store: Arc<RootCertStore>,
-}
-
-impl<S, B> Service<ServiceRequest> for MtlsMiddlewareService<S>
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
-    S::Future: 'static,
-    B: 'static,
-{
-    type Response = ServiceResponse<B>;
-    type Error = Error;
-    type Future = LocalBoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    forward_ready!(service);
-
-    fn call(&self, req: ServiceRequest) -> Self::Future {
-        let cert_store = self.cert_store.clone();
-        let peer_addr = req.peer_addr();
-
-        // VULN-006: Check for duplicate critical headers before processing
-        if has_duplicate_critical_headers(&req) {
-            warn!(
-                peer_addr = ?peer_addr,
-                "Duplicate critical headers detected - rejecting request (VULN-006)"
-            );
-            return Box::pin(async move {
-                Err(actix_web::error::ErrorBadRequest(
-                    "Duplicate critical headers not allowed",
-                ))
-            });
-        }
-
-        // Check for client certificate in request extensions
-        // In a proper mTLS setup with Actix-web + rustls, the certificate
-        // would be extracted from the TLS connection before reaching this middleware
-        let has_client_cert = req.extensions().get::<ClientCertInfo>().is_some();
-
-        if !has_client_cert {
-            // No client certificate provided - silent drop
-            warn!(
-                peer_addr = ?peer_addr,
-                "No client certificate provided - dropping connection (mTLS required)"
-            );
-            // Return error immediately without calling service
-            return Box::pin(async move {
-                Err(actix_web::error::ErrorBadRequest(
-                    "Client certificate required",
-                ))
-            });
-        }
-
-        // Certificate present - validate it
-        let cert_info = req.extensions().get::<ClientCertInfo>().cloned();
-
-        if let Some(info) = cert_info {
-            // Validate certificate against CA store
-            match validate_client_certificate(&info, &cert_store) {
-                Ok(_) => {
-                    info!(
-                        subject = %info.subject,
-                        issuer = %info.issuer,
-                        peer_addr = ?peer_addr,
-                        "mTLS client certificate validated successfully"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        peer_addr = ?peer_addr,
-                        "mTLS client certificate validation failed - dropping connection"
-                    );
-                    return Box::pin(async move {
-                        Err(actix_web::error::ErrorBadRequest(
-                            "Certificate validation failed",
-                        ))
-                    });
-                }
-            }
-        } else {
-            warn!(
-                peer_addr = ?peer_addr,
-                "No client certificate provided - dropping connection (mTLS required)"
-            );
-            return Box::pin(async move {
-                Err(actix_web::error::ErrorBadRequest(
-                    "Client certificate required",
-                ))
-            });
-        }
-
-        debug!("mTLS authentication passed for request");
-
-        // All checks passed - call the service
-        let fut = self.service.call(req);
-        Box::pin(fut)
-    }
-}
-
-/// Certificate information extracted from client certificate
-#[derive(Debug, Clone)]
-pub struct ClientCertInfo {
-    pub subject: String,
-    pub issuer: String,
-    pub serial: String,
-    pub not_before: DateTime<Utc>,
-    pub not_after: DateTime<Utc>,
-}
-
-/// Validate client certificate against CA store
-fn validate_client_certificate(
-    cert_info: &ClientCertInfo,
-    _cert_store: &RootCertStore,
-) -> Result<(), MtlsError> {
-    // Check certificate validity period
-    let now = Utc::now();
-
-    if now < cert_info.not_before {
-        return Err(MtlsError::ValidationError(
-            "Certificate is not yet valid".to_string(),
-        ));
-    }
-
-    if now > cert_info.not_after {
-        return Err(MtlsError::ValidationError(
-            "Certificate has expired".to_string(),
-        ));
-    }
-
-    // In production, would verify certificate chain against CA store
-    // For now, we trust certificates that were extracted from the TLS connection
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
-    #[test]
-    fn test_mtls_config_creation() {
-        let config = MtlsConfig {
-            ca_cert_path: "/etc/linux_patch_api/certs/ca.pem".to_string(),
-            server_cert_path: "/etc/linux_patch_api/certs/server.pem".to_string(),
-            server_key_path: "/etc/linux_patch_api/certs/server.key".to_string(),
-            min_tls_version: "1.3".to_string(),
-        };
-
-        assert_eq!(config.ca_cert_path, "/etc/linux_patch_api/certs/ca.pem");
-        assert_eq!(config.min_tls_version, "1.3");
-    }
-
-    #[test]
-    fn test_client_cert_info() {
-        let info = ClientCertInfo {
-            subject: "CN=test-client".to_string(),
-            issuer: "CN=Test CA".to_string(),
-            serial: "12345".to_string(),
-            not_before: Utc::now() - Duration::days(1),
-            not_after: Utc::now() + Duration::days(365),
-        };
-
-        assert!(info.subject.contains("CN="));
-        assert!(info.issuer.contains("CN="));
-
-        // Test validation with valid cert
-        let cert_store = RootCertStore::empty();
-        assert!(validate_client_certificate(&info, &cert_store).is_ok());
-    }
-
-    #[test]
-    fn test_client_cert_expired() {
-        let info = ClientCertInfo {
-            subject: "CN=expired-client".to_string(),
-            issuer: "CN=Test CA".to_string(),
-            serial: "12345".to_string(),
-            not_before: Utc::now() - Duration::days(365),
-            not_after: Utc::now() - Duration::days(1),
-        };
-
-        let cert_store = RootCertStore::empty();
-        let result = validate_client_certificate(&info, &cert_store);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expired"));
-    }
-
-    // -----------------------------------------------------------------------
-    // CrlAwareVerifier unit tests
-    // -----------------------------------------------------------------------
-
-    /// Test that CrlAwareVerifier can be constructed with a WebPKI verifier
-    /// and a SharedCrlState. This verifies the wiring is correct.
-    #[test]
-    fn crl_aware_verifier_construction() {
+    fn init_crypto_provider() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        use super::super::crl::{new_shared_state, CrlState, CrlStatus};
-        use std::collections::HashSet;
+    }
 
-        // Build a simple CA cert + key for the root store.
+    fn make_test_ca_and_root_store() -> (rcgen::KeyPair, RootCertStore) {
         let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
         let mut ca_params = rcgen::CertificateParams::default();
         ca_params.not_before = time::OffsetDateTime::now_utc();
@@ -519,18 +297,26 @@ mod tests {
         ca_params.distinguished_name = dn;
         let ca_cert = ca_params.self_signed(&ca_key).unwrap();
 
-        // Build root cert store with the CA.
         let mut root_store = RootCertStore::empty();
         root_store.add(ca_cert.der().to_owned()).unwrap();
 
-        // Build WebPKI verifier — build() returns Arc<WebPkiClientVerifier>
-        // which coerces to Arc<dyn ClientCertVerifier>.
+        (ca_key, root_store)
+    }
+
+    /// Test that CrlAwareVerifier can be constructed with a WebPKI verifier
+    /// and a SharedCrlState. This verifies the wiring is correct.
+    #[test]
+    fn crl_aware_verifier_construction() {
+        init_crypto_provider();
+        use super::super::crl::{new_shared_state, CrlState, CrlStatus};
+
+        let (_ca_key, root_store) = make_test_ca_and_root_store();
+
         let webpki_verifier: Arc<dyn ClientCertVerifier> =
             WebPkiClientVerifier::builder(root_store.into())
                 .build()
                 .unwrap();
 
-        // Build CRL state in Valid status.
         let crl_state = new_shared_state();
         let valid_state = CrlState {
             status: CrlStatus::Valid,
@@ -540,31 +326,16 @@ mod tests {
         };
         crl_state.store(Arc::new(valid_state));
 
-        // Construct CrlAwareVerifier — should succeed.
         let _verifier = CrlAwareVerifier::new(webpki_verifier, crl_state);
-        // If we reach here without panic, construction succeeded.
     }
 
     /// Test that CrlAwareVerifier with Missing CRL state can be constructed.
-    /// Missing CRL means the verifier falls back to WebPKI-only.
     #[test]
     fn crl_aware_verifier_with_missing_crl() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        init_crypto_provider();
         use super::super::crl::new_shared_state;
 
-        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut ca_params = rcgen::CertificateParams::default();
-        ca_params.not_before = time::OffsetDateTime::now_utc();
-        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
-        let mut dn = rcgen::DistinguishedName::new();
-        dn.push(rcgen::DnType::CommonName, "Test CA for Verifier");
-        ca_params.distinguished_name = dn;
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let mut root_store = RootCertStore::empty();
-        root_store.add(ca_cert.der().to_owned()).unwrap();
+        let (_ca_key, root_store) = make_test_ca_and_root_store();
 
         let webpki_verifier: Arc<dyn ClientCertVerifier> =
             WebPkiClientVerifier::builder(root_store.into())
@@ -577,26 +348,12 @@ mod tests {
     }
 
     /// Test that CrlAwareVerifier with Invalid CRL state can be constructed.
-    /// Invalid CRL means the verifier should reject ALL client certificates.
     #[test]
     fn crl_aware_verifier_with_invalid_crl() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        init_crypto_provider();
         use super::super::crl::{new_shared_state, CrlState, CrlStatus};
-        use std::collections::HashSet;
 
-        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut ca_params = rcgen::CertificateParams::default();
-        ca_params.not_before = time::OffsetDateTime::now_utc();
-        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
-        let mut dn = rcgen::DistinguishedName::new();
-        dn.push(rcgen::DnType::CommonName, "Test CA for Verifier");
-        ca_params.distinguished_name = dn;
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let mut root_store = RootCertStore::empty();
-        root_store.add(ca_cert.der().to_owned()).unwrap();
+        let (_ca_key, root_store) = make_test_ca_and_root_store();
 
         let webpki_verifier: Arc<dyn ClientCertVerifier> =
             WebPkiClientVerifier::builder(root_store.into())
@@ -616,27 +373,13 @@ mod tests {
     }
 
     /// Test that CrlAwareVerifier with a revoked serial in Valid CRL state
-    /// can be constructed. The actual verification logic is tested through
-    /// integration tests since it requires a full TLS handshake.
+    /// can be constructed.
     #[test]
     fn crl_aware_verifier_with_revoked_serial() {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        init_crypto_provider();
         use super::super::crl::{new_shared_state, CrlState, CrlStatus};
-        use std::collections::HashSet;
 
-        let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-        let mut ca_params = rcgen::CertificateParams::default();
-        ca_params.not_before = time::OffsetDateTime::now_utc();
-        ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
-        let mut dn = rcgen::DistinguishedName::new();
-        dn.push(rcgen::DnType::CommonName, "Test CA for Verifier");
-        ca_params.distinguished_name = dn;
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let mut root_store = RootCertStore::empty();
-        root_store.add(ca_cert.der().to_owned()).unwrap();
+        let (_ca_key, root_store) = make_test_ca_and_root_store();
 
         let webpki_verifier: Arc<dyn ClientCertVerifier> =
             WebPkiClientVerifier::builder(root_store.into())
@@ -655,6 +398,5 @@ mod tests {
         crl_state.store(Arc::new(valid_with_revoked));
 
         let _verifier = CrlAwareVerifier::new(webpki_verifier, crl_state);
-        // Construction succeeded — the verifier is ready to reject revoked certs.
     }
 }

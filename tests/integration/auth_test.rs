@@ -19,8 +19,14 @@ mod mtls_tests {
         };
 
         assert_eq!(config.ca_cert_path, "/etc/linux_patch_api/certs/ca.pem");
-        assert_eq!(config.server_cert_path, "/etc/linux_patch_api/certs/server.pem");
-        assert_eq!(config.server_key_path, "/etc/linux_patch_api/certs/server.key");
+        assert_eq!(
+            config.server_cert_path,
+            "/etc/linux_patch_api/certs/server.pem"
+        );
+        assert_eq!(
+            config.server_key_path,
+            "/etc/linux_patch_api/certs/server.key"
+        );
         assert_eq!(config.min_tls_version, "1.3");
     }
 
@@ -232,9 +238,61 @@ mod auth_result_tests {
 
         assert!(result.is_authenticated());
         assert!(result.cert_info.is_some());
-        assert_eq!(
-            result.cert_info.unwrap().subject,
-            "CN=client001"
-        );
+        assert_eq!(result.cert_info.unwrap().subject, "CN=client001");
+    }
+}
+
+/// Integration tests for SecurityHeadersMiddleware (VULN-006)
+#[cfg(test)]
+mod security_headers_tests {
+    use actix_web::http::header;
+    use linux_patch_api::auth::security_headers::has_duplicate_critical_headers;
+
+    #[test]
+    fn test_no_duplicate_headers_passes() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        headers.insert(header::AUTHORIZATION, "Bearer test".parse().unwrap());
+        headers.insert(header::HOST, "localhost".parse().unwrap());
+        assert!(!has_duplicate_critical_headers(&headers));
+    }
+
+    #[test]
+    fn test_duplicate_content_type_detected() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        headers.append(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        assert!(has_duplicate_critical_headers(&headers));
+    }
+
+    #[test]
+    fn test_duplicate_authorization_detected() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer test1".parse().unwrap());
+        headers.append(header::AUTHORIZATION, "Bearer test2".parse().unwrap());
+        assert!(has_duplicate_critical_headers(&headers));
+    }
+
+    #[test]
+    fn test_duplicate_host_detected() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::HOST, "localhost".parse().unwrap());
+        headers.append(header::HOST, "evil.com".parse().unwrap());
+        assert!(has_duplicate_critical_headers(&headers));
+    }
+
+    #[test]
+    fn test_non_critical_duplicates_allowed() {
+        // Duplicate Accept headers should be fine
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::ACCEPT, "text/html".parse().unwrap());
+        headers.append(header::ACCEPT, "application/json".parse().unwrap());
+        assert!(!has_duplicate_critical_headers(&headers));
+    }
+
+    #[test]
+    fn test_empty_headers_passes() {
+        let headers = header::HeaderMap::new();
+        assert!(!has_duplicate_critical_headers(&headers));
     }
 }

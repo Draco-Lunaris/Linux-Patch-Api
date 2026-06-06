@@ -28,7 +28,9 @@ use tracing::{error, info, warn};
 
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::crl::{self, CrlStatus};
-use linux_patch_api::auth::{mtls, MtlsMiddleware, WhitelistManager, WhitelistMiddleware};
+use linux_patch_api::auth::{
+    mtls, SecurityHeadersMiddleware, WhitelistManager, WhitelistMiddleware,
+};
 use linux_patch_api::config::loader::{validate_certs, CertStatus};
 use linux_patch_api::enroll;
 use linux_patch_api::packages::cache::PackageCacheState;
@@ -310,9 +312,14 @@ async fn main() -> Result<()> {
     let wl = whitelist_manager.clone();
 
     // Create server builder
+    // Security middleware stack (order matters):
+    //   1. WhitelistMiddleware   — IP-based access control (deny-by-default)
+    //   2. SecurityHeadersMiddleware — VULN-006: reject duplicate critical headers
+    //   3. Logger                 — request logging (after auth decisions)
     let server_builder = HttpServer::new(move || {
         let mut app = App::new()
             .wrap(WhitelistMiddleware::new(wl.clone()))
+            .wrap(SecurityHeadersMiddleware::new())
             .wrap(Logger::default())
             .app_data(job_manager_data.clone())
             .app_data(backend_data.clone())
@@ -406,63 +413,58 @@ async fn main() -> Result<()> {
             info!("No manager URL configured -- CRL auto-refresh disabled");
         }
 
-        match MtlsMiddleware::new(mtls_config.clone()) {
-            Ok(middleware) => {
-                // Build rustls server configuration with CRL-aware verifier
-                let rustls_config = middleware
-                    .build_rustls_config(Some(shared_crl_state.clone()))
-                    .map_err(|e| anyhow::anyhow!("Failed to build rustls config: {}", e))?;
+        // ADR: rustls is the authoritative client-auth gate.
+        // Client certificate verification happens at the TLS handshake level
+        // via CrlAwareVerifier (which wraps WebPkiClientVerifier). No
+        // application-layer certificate validation middleware is needed.
+        // See src/auth/mtls.rs for the full ADR.
+        let rustls_config = mtls::build_rustls_config(&mtls_config, Some(shared_crl_state.clone()))
+            .map_err(|e| anyhow::anyhow!("Failed to build rustls config: {}", e))?;
 
-                info!("mTLS middleware and rustls config initialized successfully");
+        info!(
+            "mTLS rustls config initialized successfully (client auth enforced at TLS handshake)"
+        );
 
-                // Create TCP listener with SO_REUSEADDR using socket2
-                // This prevents "Address already in use" errors when restarting after a crash
-                let socket = socket2::Socket::new(
-                    socket2::Domain::IPV4,
-                    socket2::Type::STREAM,
-                    Some(socket2::Protocol::TCP),
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to create socket: {}", e))?;
+        // Create TCP listener with SO_REUSEADDR using socket2
+        // This prevents "Address already in use" errors when restarting after a crash
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create socket: {}", e))?;
 
-                socket
-                    .set_reuse_address(true)
-                    .map_err(|e| anyhow::anyhow!("Failed to set SO_REUSEADDR: {}", e))?;
+        socket
+            .set_reuse_address(true)
+            .map_err(|e| anyhow::anyhow!("Failed to set SO_REUSEADDR: {}", e))?;
 
-                let bind_addr: std::net::SocketAddr = bind_address.parse().map_err(|e| {
-                    anyhow::anyhow!("Invalid bind address '{}': {}", bind_address, e)
-                })?;
+        let bind_addr: std::net::SocketAddr = bind_address
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid bind address '{}': {}", bind_address, e))?;
 
-                socket
-                    .bind(&socket2::SockAddr::from(bind_addr))
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to bind socket to {}: {}", bind_address, e)
-                    })?;
+        socket
+            .bind(&socket2::SockAddr::from(bind_addr))
+            .map_err(|e| anyhow::anyhow!("Failed to bind socket to {}: {}", bind_address, e))?;
 
-                socket
-                    .listen(128)
-                    .map_err(|e| anyhow::anyhow!("Failed to listen on socket: {}", e))?;
+        socket
+            .listen(128)
+            .map_err(|e| anyhow::anyhow!("Failed to listen on socket: {}", e))?;
 
-                let tcp_listener: std::net::TcpListener = socket.into();
+        let tcp_listener: std::net::TcpListener = socket.into();
 
-                // Log listening AFTER successful bind
-                info!("Listening on {} (mTLS enabled)", bind_address);
+        // Log listening AFTER successful bind
+        info!("Listening on {} (mTLS enabled)", bind_address);
 
-                // Clone the ServerConfig from Arc for listen_rustls_0_23
-                let server_config = (*rustls_config).clone();
+        // Clone the ServerConfig from Arc for listen_rustls_0_23
+        let server_config = (*rustls_config).clone();
 
-                info!("Binding server with TLS 1.3 - non-TLS connections will be rejected");
+        info!("Binding server with TLS 1.3 - non-TLS connections will be rejected");
 
-                // Bind with TLS using rustls 0.23 - non-TLS connections fail at handshake
-                server_builder
-                    .listen_rustls_0_23(tcp_listener, server_config)?
-                    .run()
-                    .await?;
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to initialize mTLS middleware");
-                return Err(anyhow::anyhow!("mTLS initialization failed: {}", e));
-            }
-        }
+        // Bind with TLS using rustls 0.23 - non-TLS connections fail at handshake
+        server_builder
+            .listen_rustls_0_23(tcp_listener, server_config)?
+            .run()
+            .await?;
     } else {
         // Create TCP listener with SO_REUSEADDR for non-TLS mode
         let socket = socket2::Socket::new(
