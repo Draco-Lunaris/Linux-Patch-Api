@@ -114,6 +114,10 @@ path = "tests/integration/enrollment_test.rs"
 name = "enrollment_e2e"
 path = "tests/e2e/test_enrollment_e2e.rs"
 
+[[test]]
+name = "auth_test"
+path = "tests/integration/auth_test.rs"
+
 [[bench]]
 name = "api_benchmarks"
 harness = false

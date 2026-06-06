@@ -265,5 +265,39 @@ The Linux_Patch_API Phase 3 is now **SECURE FOR DEPLOYMENT** in an internal netw
 
 ---
 
+## Architecture Decision Record: rustls as Authoritative Client-Auth Gate
+
+**Date:** 2026-06-06  
+**Status:** Accepted  
+**Context:** Issue #13
+
+### Decision
+
+Client certificate authentication is enforced at the TLS handshake level by rustls via `CrlAwareVerifier`, NOT by application-layer middleware.
+
+### Context
+
+The original `MtlsMiddleware` was never wired into the Actix-web pipeline (dead code). It contained:
+1. A duplicate-header check (VULN-006) that never ran
+2. A `validate_client_certificate()` stub that returned `Ok(())` unconditionally
+
+Meanwhile, actual client certificate verification was always performed by rustls at the TLS handshake level through `CrlAwareVerifier` (which wraps `WebPkiClientVerifier`), with CRL revocation checking integrated into the same path.
+
+### Changes Made
+
+1. **Removed dead code:** `MtlsMiddleware`, `MtlsMiddlewareService`, `validate_client_certificate()`, and the Transform/Service impls
+2. **Extracted VULN-006:** `has_duplicate_critical_headers()` moved to new `SecurityHeadersMiddleware` (wired into pipeline)
+3. **Converted `build_rustls_config()`** from method on `MtlsMiddleware` to free function
+4. **Preserved:** `CrlAwareVerifier`, `MtlsConfig`, `MtlsError`, `ClientCertInfo`, `build_rustls_config()`, and all CRL infrastructure
+
+### Rationale
+
+- rustls provides battle-tested X.509 verification at the TLS handshake level
+- Enforcing auth at the TLS layer eliminates bypass vulnerabilities (middleware ordering bugs, route-specific skips)
+- CRL revocation checking is integrated into the same handshake path
+- Application-layer certificate validation is redundant when TLS already rejects untrusted connections
+
+---
+
 **Report Generated:** 2026-04-09T22:57:00Z  
 **Verified By:** Security Verification Agent (Agent Zero)
