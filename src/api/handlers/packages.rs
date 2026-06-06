@@ -14,29 +14,18 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages::{InstallOptions, Package, PackageManagerBackend, PackageSpec};
+use crate::packages::{
+    validate_package_name, validate_version_string, InstallOptions, Package, PackageManagerBackend,
+    PackageSpec,
+};
 
-/// Maximum allowed length for package names
-const MAX_PACKAGE_NAME_LENGTH: usize = 256;
-
-/// Validate package name: must not be empty and must not exceed max length
-fn validate_package_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Package name cannot be empty".to_string());
-    }
-    if name.len() > MAX_PACKAGE_NAME_LENGTH {
-        return Err(format!(
-            "Package name exceeds maximum length of {} characters",
-            MAX_PACKAGE_NAME_LENGTH
-        ));
-    }
-    Ok(())
-}
-
-/// Validate all package names in a request
+/// Validate all package names and versions in a request
 fn validate_package_names(packages: &[PackageSpec]) -> Result<(), String> {
     for pkg in packages {
         validate_package_name(&pkg.name)?;
+        if let Some(version) = &pkg.version {
+            validate_version_string(version)?;
+        }
     }
     Ok(())
 }
