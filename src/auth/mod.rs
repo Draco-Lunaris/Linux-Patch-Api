@@ -12,7 +12,10 @@ pub mod whitelist;
 
 pub use crl::{new_shared_state, CrlState, CrlStatus, SharedCrlState};
 pub use mtls::{ClientCertInfo, MtlsConfig, MtlsError, MtlsMiddleware};
-pub use whitelist::{WhitelistConfig, WhitelistEntry, WhitelistManager, WhitelistMiddleware};
+pub use whitelist::{
+    WhitelistConfig, WhitelistEntry, WhitelistManager, WhitelistMiddleware,
+    WhitelistMiddlewareService,
+};
 
 /// Combined authentication result
 #[derive(Debug, Clone)]
