@@ -14,7 +14,7 @@ Vcs-Browser: https://gitea.moon-dragon.us/echo/linux_patch_api
 
 Package: linux-patch-api
 Architecture: amd64
-Version: 1.2.0-1
+Version: VERSION_PLACEHOLDER
 Installed-Size: 0
 Depends: systemd,
          libsystemd0,
