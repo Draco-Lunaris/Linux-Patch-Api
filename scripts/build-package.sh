@@ -21,7 +21,7 @@ warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="1.2.0"
+VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 RELEASE="1"
 PKG_NAME="linux-patch-api"
 DEB_NAME="${PKG_NAME}_${VERSION}-${RELEASE}_amd64.deb"
