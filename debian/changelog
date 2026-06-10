@@ -1,3 +1,11 @@
+linux-patch-api (1.4.1) unstable; urgency=medium
+
+  * fix: single-source version from Cargo.toml for all package formats
+  * fix: remove hardcoded version strings in debian/control, build-package.sh, install.sh
+  * chore: bump version to 1.4.1
+
+ -- Echo <echo@moon-dragon.us>  Tue, 10 Jun 2026 13:00:00 -0500
+
 linux-patch-api (1.2.0) unstable; urgency=medium
 
   * Add auto-enrollment on startup when certs are missing/invalid
