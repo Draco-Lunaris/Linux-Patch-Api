@@ -287,7 +287,21 @@ pub async fn refresh_crl(
 
     info!(url = %crl_url, "Fetching CRL from manager");
 
-    let response = reqwest::get(&crl_url)
+    // Build an HTTP client that trusts the pinned CA certificate.
+    // The default reqwest client uses webpki-roots (Mozilla's embedded CA bundle),
+    // which does not include private CAs like the Patch Manager Root CA.
+    // By adding the configured CA cert to the root store, outbound TLS connections
+    // to the manager succeed without requiring the CA to be in the system trust store.
+    let ca_cert = reqwest::Certificate::from_pem(ca_cert_der)
+        .map_err(|e| format!("Failed to parse CA certificate for HTTP client: {}", e))?;
+    let http_client = reqwest::Client::builder()
+        .add_root_certificate(ca_cert)
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client with CA cert: {}", e))?;
+
+    let response = http_client
+        .get(&crl_url)
+        .send()
         .await
         .map_err(|e| format!("CRL fetch request failed: {}", e))?;
 
