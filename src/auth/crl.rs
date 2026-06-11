@@ -303,7 +303,7 @@ pub async fn refresh_crl(
         .get(&crl_url)
         .send()
         .await
-        .map_err(|e| format!("CRL fetch request failed: {}", e))?
+        .map_err(|e| format!("CRL fetch request failed: {}", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
