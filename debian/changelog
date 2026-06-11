@@ -1,3 +1,9 @@
+linux-patch-api (1.4.2) unstable; urgency=medium
+
+  * fix: use pinned CA cert for outbound TLS in CRL refresh
+
+ -- Echo <echo@moon-dragon.us>  Wed, 11 Jun 2026 01:15:00 -0500
+
 linux-patch-api (1.4.1) unstable; urgency=medium
 
   * fix: single-source version from Cargo.toml for all package formats
@@ -13,18 +19,5 @@ linux-patch-api (1.2.0) unstable; urgency=medium
   * Add --renew-certs CLI flag for manual cert renewal
   * Fix --enroll to exit after completion (no port conflict)
   * Add SO_REUSEADDR to prevent Address already in use errors
-  * Add polling token persistence for enrollment resume after restart
-  * Add exit code strategy (0=clean, 1=error, 2=enrollment in progress)
-  * Increase RestartSec to 10s and add StartLimitBurst=5
-  * Add cert and enrollment URL check in postinst
-  * Fix misleading "Listening on" log before actual bind
 
- -- Echo <echo@moon-dragon.us>  Thu, 29 May 2026 10:20:00 -0500
-
-linux-patch-api (1.1.17) unstable; urgency=medium
-
-  * Add mandatory package cache refresh before patch_apply
-  * Add health check cache refresh when stale (>4h)
-  * Add cache status fields to health response
-
- -- Echo <echo@moon-dragon.us>  Thu, 22 May 2026 12:00:00 -0500
+ -- Echo <echo@moon-dragon.us>  Mon, 26 May 2026 00:00:00 -0500
