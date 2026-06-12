@@ -1,3 +1,9 @@
+linux-patch-api (1.4.3) unstable; urgency=low
+
+  * Release v1.4.3
+
+ -- git-echo <git-echo@moon-dragon.us>  Fri, 12 Jun 2026 18:30:56 -0500
+
 linux-patch-api (1.4.2) unstable; urgency=medium
 
   * fix: use pinned CA cert for outbound TLS in CRL refresh
