@@ -14,6 +14,8 @@ tls:
   ca_cert: "/etc/linux_patch_api/certs/ca.pem"
   server_cert: "/etc/linux_patch_api/certs/server.pem"
   server_key: "/etc/linux_patch_api/certs/server.key"
+  # Path to Certificate Revocation List (CRL) for client cert revocation checking
+  crl_path: "/etc/linux_patch_api/certs/crl.pem"
   # TLS 1.3 is the only supported version (hardcoded, not configurable)
 
 # Job Configuration
@@ -21,6 +23,8 @@ jobs:
   max_concurrent: 5
   timeout_minutes: 30
   storage_path: "/var/lib/linux_patch_api/jobs"
+  # Maximum number of jobs waiting in queue before rejecting (returns 503)
+  max_queue_depth: 100
 
 # Logging Configuration
 logging:
@@ -44,6 +48,17 @@ package_manager:
   # Primary backend (auto-detected if not specified)
   # Options: apt, dnf, yum, apk, pacman
   backend: "auto"
+
+# Rate Limiting Configuration
+# Per-IP rate limiting with separate tiers for destructive and read operations
+rate_limit:
+  enabled: true
+  # Destructive operations (PATCH, POST, DELETE) rate limit
+  destructive_per_minute: 20
+  destructive_burst: 10
+  # Read operations (GET) rate limit
+  read_per_minute: 120
+  read_burst: 30
 
 # Enrollment Configuration (optional)
 # Uncomment and configure for self-enrollment with linux_patch_manager
@@ -71,3 +86,5 @@ package_manager:
 #   This is the most accurate method for multi-homed hosts because it queries
 #   the kernel routing table directly.
 #   Priority order: report_ip > report_interface > route-based > auto-detect
+  #   # Days before certificate expiry to trigger re-enrollment
+  #   cert_renewal_threshold_days: 7

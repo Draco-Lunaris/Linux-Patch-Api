@@ -17,7 +17,7 @@ This report validates all STRIDE threat mitigations against actual implementatio
 | Tampering | ⚠️ Partially Mitigated | Medium |
 | Repudiation | ✅ Fully Mitigated | High |
 | Information Disclosure | ✅ Fully Mitigated | High |
-| Denial of Service | ⚠️ Partially Mitigated | Medium |
+| Denial of Service | ✅ Mostly Mitigated | Medium |
 | Elevation of Privilege | ✅ Fully Mitigated | High |
 
 ---
@@ -110,13 +110,13 @@ This report validates all STRIDE threat mitigations against actual implementatio
 
 | Threat | Required Mitigation | Implementation Evidence | Status | Confidence |
 |--------|---------------------|------------------------|--------|------------|
-| Resource exhaustion via many requests | Rate limiting | SECURITY.md line 120: "Not Required: Internal network only" | ⚠️ Missing | Low |
+| Resource exhaustion via many requests | Rate limiting | `src/api/rate_limit.rs`: Per-IP, two-tier (destructive/read) rate limiting — enabled by default | ✅ Mitigated | High |
 | Job queue flooding | Configurable concurrent job limit | SECURITY.md line 41: Default 5 concurrent jobs; FUZZ_TEST_REPORT.md Test 4.3 PASS | ✅ Mitigated | High |
 | Long-running job starvation | 30-minute job timeout | SPEC.md line 74; SECURITY.md line 42; FUZZ_TEST_REPORT.md Test 4.1-4.3 PASS | ✅ Mitigated | High |
 | Large payload DoS | Payload size limits | FUZZ_TEST_REPORT.md Test 4.2: 10MB payloads rejected with HTTP 413 | ✅ Mitigated | High |
 | Header-based DoS | Header size limits | FUZZ_TEST_REPORT.md Test 2.3 FAIL: 10KB headers accepted without rejection | ⚠️ Missing | Low |
 
-**DoS Assessment:** Job-level DoS protections are implemented (concurrency limits, timeouts, payload limits). However, **rate limiting is not implemented** and **header size limits are not configured**, representing gaps in DoS protection.
+**DoS Assessment:** Job-level DoS protections are implemented (concurrency limits, timeouts, payload limits). **Rate limiting is now implemented** via `src/api/rate_limit.rs` with per-IP, two-tier throttling. Header size limits remain unconfigured.
 
 **Evidence Sources:**
 - SPEC.md: Lines 74, 187
@@ -125,7 +125,7 @@ This report validates all STRIDE threat mitigations against actual implementatio
 - SECURITY_FINDINGS_REPORT.md: MEDIUM finding "Rate Limiting Not Implemented"
 
 **Gaps Identified:**
-1. **Rate limiting not implemented** - SECURITY_FINDINGS_REPORT.md lists as MEDIUM severity
+1. **Rate limiting is now implemented** — `src/api/rate_limit.rs` provides per-IP, two-tier throttling
 2. **Header size limits not configured** - FUZZ_TEST_REPORT.md VULN-004 (MEDIUM)
 3. Internal network assumption may not hold if network is compromised
 
@@ -155,12 +155,12 @@ This report validates all STRIDE threat mitigations against actual implementatio
 
 | ID | Category | Finding | Evidence | Recommendation |
 |----|----------|---------|----------|----------------|
-| M-001 | DoS | Rate limiting not implemented | SECURITY_FINDINGS_REPORT.md; FUZZ_TEST_REPORT.md | Implement per-client rate limiting even for internal network |
+| M-001 | DoS | ~~Rate limiting not implemented~~ ✅ Rate limiting implemented | `src/api/rate_limit.rs`; SECURITY_FINDINGS_REPORT.md | Per-IP, two-tier rate limiting (destructive/read) — enabled by default |
 | M-002 | DoS | Header size limits not configured | FUZZ_TEST_REPORT.md VULN-004 | Configure server to reject headers > 8KB |
 | M-003 | Tampering | No config file integrity verification | SECURITY.md relies on permissions only | Add hash verification before config reload |
 | M-004 | Input Validation | Missing input length validation | FUZZ_TEST_REPORT.md VULN-001 | Implement max length validation (package names: 256 chars) |
 | M-005 | Input Validation | Path traversal partial bypass | FUZZ_TEST_REPORT.md VULN-002 | Implement strict path normalization |
-| M-006 | Auth | No certificate revocation mechanism | SECURITY_FINDINGS_REPORT.md MEDIUM finding | Implement CRL or OCSP stapling |
+| M-006 | Auth | ~~No certificate revocation mechanism~~ ✅ CRL implemented | `src/auth/crl.rs`; SECURITY_FINDINGS_REPORT.md | CRL loading, CA signature verification, in-memory revoked serial index, manager-based refresh |
 
 ### Low Priority
 
@@ -186,11 +186,7 @@ None - No high severity vulnerabilities remain.
 
 ### Medium Priority (Recommended for Phase 4)
 
-1. **Implement Rate Limiting**
-   - Add per-client request throttling (e.g., 100 requests/minute)
-   - Implement request queuing with backpressure
-   - Add monitoring and alerting for unusual patterns
-   - **Rationale:** Internal network assumption may not hold if network is compromised
+1. ~~**Implement Rate Limiting**~~ ✅ **Implemented** — `src/api/rate_limit.rs` provides per-IP, two-tier (destructive/read) rate limiting, enabled by default. See `rate_limit` config section for tuning.
 
 2. **Configure Header Size Limits**
    - Set maximum header size to 8KB in Actix-web configuration
@@ -215,11 +211,7 @@ None - No high severity vulnerabilities remain.
    - Log integrity check failures
    - **Rationale:** Defense in depth against config tampering
 
-6. **Implement Certificate Revocation**
-   - Add CRL (Certificate Revocation List) checking
-   - Or implement OCSP stapling
-   - Consider shorter certificate lifetimes (90 days)
-   - **Rationale:** Enables immediate response to compromised certificates
+6. ~~**Implement Certificate Revocation**~~ ✅ **Implemented** — `src/auth/crl.rs` provides CRL loading, CA signature verification, in-memory revoked serial index, and manager-based CRL refresh. Configured via `tls.crl_path`.
 
 ### Low Priority (Nice to Have)
 
@@ -247,11 +239,11 @@ The Linux_Patch_API Phase 3 implementation successfully mitigates all critical a
 - ✅ Systemd hardening
 
 **Areas for Improvement:**
-- ⚠️ Rate limiting not implemented (relies on network security)
+- ✅ Rate limiting now implemented (`src/api/rate_limit.rs`)
 - ⚠️ Header size limits not configured
 - ⚠️ Input length validation missing
 - ⚠️ Config file integrity relies on permissions only
-- ⚠️ No certificate revocation mechanism
+- ✅ Certificate revocation now implemented (`src/auth/crl.rs`)
 
 **Recommendation:** Proceed to Phase 4 implementation with focus on medium-priority items. The API is suitable for internal network deployment with current mitigations, but Phase 4 improvements will provide defense-in-depth against compromised network scenarios.
 

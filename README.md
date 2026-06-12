@@ -614,7 +614,7 @@ See [PERFORMANCE_BENCHMARK.md](./PERFORMANCE_BENCHMARK.md) for detailed benchmar
 
 ```bash
 # Clone repository
-git clone https://gitea.internal/linux-patch-api.git
+git clone https://git.local/linux-patch-api.git
 cd linux-patch-api
 
 # Install Rust toolchain
