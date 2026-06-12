@@ -92,17 +92,17 @@ scp /tmp/client001.pem /tmp/client001.key.pem client001:/etc/linux_patch_api/cer
 # IP Whitelist Configuration
 # Default: Block all connections not listed
 
-allowed_ips:
+entries:
   # Individual IPv4 addresses
-  - 192.168.1.100    # Primary management server
-  - 192.168.1.101    # Secondary management server
+  - "192.168.1.100"    # Primary management server
+  - "192.168.1.101"    # Secondary management server
   
   # CIDR subnets
-  - 192.168.1.0/24   # Management network
-  - 10.0.0.0/8       # Internal network (if needed)
+  - "192.168.1.0/24"   # Management network
+  - "10.0.0.0/8"       # Internal network (if needed)
   
   # Hostnames (resolved at config load)
-  - management.internal.domain
+  - "management.internal.domain"
 ```
 
 ### 2.3 Whitelist Management Procedures
@@ -183,11 +183,12 @@ WantedBy=multi-user.target
   chmod 600 /etc/linux_patch_api/certs/*.key.pem
   chmod 644 /etc/linux_patch_api/certs/*.pem
   ```
-- [ ] **TLS 1.3 Only:** Verify in config.yaml:
+- [ ] **TLS 1.3 Only:** Verify in config.yaml (TLS 1.3 is hardcoded, no configuration needed):
   ```yaml
   tls:
     enabled: true
-    min_version: "TLS1.3"
+    # TLS 1.3 is the only supported version — hardcoded, not configurable
+    # The min_version field is deprecated and ignored
   ```
 - [ ] **Debug Mode:** Disabled in production:
   ```yaml
@@ -324,7 +325,7 @@ If a client certificate is compromised:
 
 1. **Immediate:** Remove client IP from whitelist
 2. **Document:** Record certificate CN, issue date, client identity
-3. **Revoke:** Add to revocation list (Phase 4: implement CRL)
+3. **Revoke:** Add to CRL (Certificate Revocation List — see `tls.crl_path` in config)
 4. **Replace:** Issue new certificate to legitimate client
 5. **Investigate:** Determine compromise source
 
@@ -398,26 +399,38 @@ Before declaring deployment complete:
 ```yaml
 server:
   port: 12443
-  bind_address: "0.0.0.0"  # Restrict via firewall
-  timeout: 30
+  bind: "0.0.0.0"  # Restrict via firewall
+  timeout_seconds: 30
 
 tls:
   enabled: true
-  min_version: "TLS1.3"
+  # TLS 1.3 is the only supported version — hardcoded, not configurable
+  # The min_version field is deprecated and ignored
   ca_cert: "/etc/linux_patch_api/certs/ca.pem"
   server_cert: "/etc/linux_patch_api/certs/server.pem"
   server_key: "/etc/linux_patch_api/certs/server.key.pem"
+  crl_path: "/etc/linux_patch_api/certs/crl.pem"
+
+jobs:
+  max_concurrent: 5
+  timeout_minutes: 30
+  storage_path: "/var/lib/linux_patch_api/jobs"
+  max_queue_depth: 100
+
+rate_limit:
+  enabled: true
+  destructive_per_minute: 20
+  destructive_burst: 10
+  read_per_minute: 120
+  read_burst: 30
 
 logging:
   level: INFO
+  journal_enabled: true
+  syslog_enabled: false
+  # syslog_server: "udp://syslog.internal.domain:514"
+  file_path: "/var/log/linux_patch_api/audit.log"
   retention_days: 30
-  remote_syslog: null  # Optional: "syslog.internal.domain:514"
-
-security:
-  job_timeout_minutes: 30
-  max_concurrent_jobs: 5
-  # Rate limiting: Phase 4
-  # rate_limit_requests_per_minute: 100
 ```
 
 ### whitelist.yaml.example
@@ -426,10 +439,10 @@ security:
 # IP Whitelist Configuration
 # Default: Block all connections not listed
 
-allowed_ips:
-  - 192.168.1.100    # Primary management server
-  - 192.168.1.101    # Secondary management server
-  - 192.168.1.0/24   # Management network
+entries:
+  - "192.168.1.100"    # Primary management server
+  - "192.168.1.101"    # Secondary management server
+  - "192.168.1.0/24"   # Management network
 ```
 
 ---

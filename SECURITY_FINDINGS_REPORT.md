@@ -81,35 +81,49 @@ With TLS not working, the IP whitelist enforcement was also bypassed.
 
 ## Medium Severity Findings (Unchanged)
 
-### 🟡 MEDIUM: No Certificate Revocation Mechanism
+### ✅ MEDIUM: Certificate Revocation — RESOLVED (CRL Implemented)
 
 **Description:**  
-SECURITY.md states "Revocation: Not implemented (rely on expiry + physical cert retrieval)". Compromised certificates remain valid until expiry.
+CRL (Certificate Revocation List) checking is now fully implemented in `src/auth/crl.rs`. The module provides:
+- CRL loading from disk (PEM format)
+- CA signature verification
+- In-memory revoked serial index
+- Manager-based CRL refresh background task
+- Fail-closed on invalid CRL signatures
+- Degraded mode on missing/expired CRL
 
-**Impact:**  
-- Stolen certificates usable for 1 year
-- No immediate revocation capability
+**Configuration:**
+```yaml
+tls:
+  crl_path: "/etc/linux_patch_api/certs/crl.pem"
+```
 
-**Remediation:**  
-1. Implement CRL (Certificate Revocation List) checking
-2. Or implement OCSP stapling
-3. Consider shorter certificate lifetimes
+**Impact (Resolved):**  
+- Compromised certificates can now be immediately revoked via CRL
+- CRL is checked on every mTLS handshake
+- Manager can push CRL updates to enrolled agents
 
 ---
 
-### 🟡 MEDIUM: Rate Limiting Not Implemented
+### ✅ MEDIUM: Rate Limiting — RESOLVED (Implemented)
 
 **Description:**  
-API has no rate limiting. SECURITY.md states "Not Required: Internal network only" but this relies on network security.
+Rate limiting is now fully implemented via `RateLimitMiddleware` in `src/api/rate_limit.rs`. Per-IP, two-tier (destructive/read) rate limiting is enforced on all API endpoints.
 
-**Impact:**  
-- DoS attacks possible from authenticated clients
-- Resource exhaustion via job queue flooding
+**Configuration:**
+```yaml
+rate_limit:
+  enabled: true
+  destructive_per_minute: 20
+  destructive_burst: 10
+  read_per_minute: 120
+  read_burst: 30
+```
 
-**Remediation:**  
-1. Implement per-client rate limiting
-2. Add request throttling even for internal network
-3. Monitor and alert on unusual request patterns
+**Impact (Resolved):**  
+- DoS attacks from authenticated clients are now rate-limited
+- Job queue flooding is mitigated by per-IP throttling
+- Rate limiting is configurable and enabled by default
 
 ---
 
