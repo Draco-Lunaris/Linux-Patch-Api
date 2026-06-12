@@ -667,13 +667,14 @@ impl PackageManagerBackend for AptBackend {
 /// Query systemd service status via systemctl
 fn get_systemd_service_status(name: &str) -> Result<Option<ServiceStatus>> {
     // SECURITY: -- separator prevents argument injection via service name
+    // Must be placed AFTER all options so systemctl treats only the name as positional
     let output = Command::new("systemctl")
         .args([
             "show",
-            "--",
-            name,
             "--property=Id,Description,ActiveState,SubState,LoadState,UnitFileState,MainPID",
             "--no-pager",
+            "--",
+            name,
         ])
         .output()
         .context("Failed to execute systemctl command")?;
