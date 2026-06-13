@@ -3,8 +3,8 @@
 ## Project Overview
 **Title:** Linux_Patch_API  
 **Description:** API service for secure remote management of patching processes and software add/removal  
-**Version:** 1.2.0  
-**Status:** Draft  
+**Version:** 1.4.3  
+**Status:** Active  
 
 ## Scope
 
@@ -21,8 +21,10 @@
 
 **Supported Operations:**
 - **Core Package:** GET /packages (with filtering), GET /packages/{name}, POST /packages (install), PUT /packages/{name} (update), DELETE /packages/{name} (remove)
+- **File Install:** POST /packages/install-file (multipart upload of .deb/.rpm/.apk/.tar.zst files)
 - **Patch Management:** GET /patches (list available), POST /patches/apply (apply all or specific)
 - **System Info:** GET /system/info (OS version, kernel, last update time)
+- **System Restart:** POST /system/restart (graceful self-restart for self-upgrade workflows)
 
 **Operation Features:**
 - Version pinning support (e.g., package=1.2.3)
@@ -30,6 +32,31 @@
 - Batch operations: best-effort (not atomic)
 - GET filtering: by name, version, status, upgradable
 - No pagination (return all results)
+
+**File Install Endpoint:**
+- **Endpoint:** `POST /api/v1/packages/install-file` (multipart upload)
+- **Flow:** Upload → Stage → Validate → Install → Cleanup → Return job result
+- **Staging dir:** `/tmp` by default, configurable via `file_install.staging_dir` in config.yaml
+- **File validation:** Extension allowlist (`.deb`, `.rpm`, `.apk`, `.tar.zst`), 1GB size limit
+- **Config gate:** `file_install.enabled: true` in config.yaml (default: false for security)
+- **Job-tracked:** Like other install operations, returns job_id for async tracking
+
+**Backend Commands for File Install:**
+
+| Backend | Command |
+|---------|----------|
+| APT | `apt install -y /path/to/file.deb` |
+| DNF | `dnf install -y /path/to/file.rpm` |
+| YUM | `yum install -y /path/to/file.rpm` |
+| APK | `apk add --allow-untrusted /path/to/file.apk` |
+| Pacman | `pacman -U --noconfirm /path/to/file.tar.zst` |
+
+**System Restart Endpoint:**
+- **Endpoint:** `POST /api/v1/system/restart`
+- **Purpose:** Graceful self-restart for self-upgrade workflows
+- **Behavior:** Drain active connections, then `systemctl restart linux-patch-api`
+- **Use case:** Manager orchestrates: install-file → poll job → call restart → reconnect
+- **Auth:** mTLS required (already enforced)
 
 **Out of Scope (for now):**
 - GUI/frontend interface (API-only)
@@ -82,6 +109,11 @@
 - Network-level access control via IP/subnet whitelist
 - Silent drop for non-mTLS connections (no response)
 - Detailed error messages for authenticated clients only
+- File installs bypass repo GPG signing — must be explicitly enabled via `file_install.enabled`
+- Extension allowlist prevents arbitrary file upload (`.deb`, `.rpm`, `.apk`, `.tar.zst` only)
+- 1GB file upload size limit prevents disk exhaustion
+- Staging directory must be root-owned with mode 0700
+- Rate limiting on file upload endpoint
 
 ## Error Handling
 
@@ -111,6 +143,12 @@
     - `ENROLLMENT_TIMEOUT`: 24-hour polling limit exceeded (1440 attempts exhausted)
     - `ENROLLMENT_RATE_LIMITED`: Request rate limit exceeded (1/minute per IP, HTTP 429)
     - `PKI_PROVISION_FAILED`: Certificate write or PEM validation failed during provisioning
+  - File install failures:
+    - `FILE_INSTALL_DISABLED`: File install endpoint disabled (file_install.enabled is false)
+    - `INVALID_EXTENSION`: File extension not in allowlist (.deb, .rpm, .apk, .tar.zst only)
+    - `FILE_TOO_LARGE`: Uploaded file exceeds 1GB size limit
+    - `STAGING_ERROR`: Staging directory operation failed
+    - `INSTALL_FAILED`: Package install command failed
 
 - **Error Message Policy:**
   - mTLS confirmed clients: Detailed error messages with debugging info
@@ -318,6 +356,7 @@ The enrollment flow runs and **exits after completion** — it does NOT start th
   - **mTLS:** CA cert path, server cert path, server key path
   - **Logging:** log level, log retention, remote syslog server (optional)
   - **Security:** job timeout, max concurrent jobs, rate limiting
+  - **File Install:** file_install.enabled (default: false), file_install.staging_dir (default: "/tmp")
   - **Enrollment:** manager_url, polling_interval_seconds, max_poll_attempts, polling_token (auto-populated), cert_renewal_threshold_days
 
 - **Hard-Coded Paths (not configurable):**

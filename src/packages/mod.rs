@@ -15,6 +15,30 @@ use tracing::info;
 /// Maximum allowed length for package names and version strings
 pub const MAX_NAME_LENGTH: usize = 256;
 
+/// Maximum allowed file size for file install (1 GB)
+pub const MAX_FILE_SIZE: usize = 1_073_741_824;
+
+/// Validate file extension against backend allowlist
+pub fn validate_file_extension(filename: &str, backend: &str) -> Result<(), String> {
+    let allowed = match backend {
+        "apt" => &[".deb"][..],
+        "dnf" | "yum" => &[".rpm"][..],
+        "apk" => &[".apk"][..],
+        "pacman" => &[".tar.zst"][..],
+        _ => return Err(format!("Unknown backend: {}", backend)),
+    };
+
+    let filename_lower = filename.to_lowercase();
+    if allowed.iter().any(|ext| filename_lower.ends_with(ext)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "File extension not allowed for {} backend. Allowed: {:?}",
+            backend, allowed
+        ))
+    }
+}
+
 /// Validate a package name against a strict allowlist pattern.
 /// Prevents argument injection by blocking shell metacharacters,
 /// path separators, whitespace, and leading hyphens.
@@ -205,6 +229,12 @@ pub trait PackageManagerBackend: Send + Sync {
 
     /// Get the last cache update timestamp
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>>;
+
+    /// Install a package from a local file
+    fn install_file(&self, file_path: &str) -> Result<()>;
+
+    /// Get the backend name (e.g., "apt", "dnf", "apk")
+    fn backend_name(&self) -> &str;
 }
 
 /// Package specification for installation
@@ -661,6 +691,17 @@ impl PackageManagerBackend for AptBackend {
 
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
+    }
+
+    fn install_file(&self, file_path: &str) -> Result<()> {
+        validate_file_extension(file_path, "apt").map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.run_apt(&["install", "-y", "--", file_path])?;
+        info!("Installed package from file: {}", file_path);
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        "apt"
     }
 }
 
@@ -1338,6 +1379,17 @@ impl PackageManagerBackend for ApkBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn install_file(&self, file_path: &str) -> Result<()> {
+        validate_file_extension(file_path, "apk").map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.run_apk(&["add", "--allow-untrusted", "--", file_path])?;
+        info!("Installed package from file: {}", file_path);
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        "apk"
+    }
 }
 
 impl Default for ApkBackend {
@@ -1915,6 +1967,17 @@ impl PackageManagerBackend for DnfBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn install_file(&self, file_path: &str) -> Result<()> {
+        validate_file_extension(file_path, "dnf").map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.run_dnf(&["install", "-y", "--", file_path])?;
+        info!("Installed package from file: {}", file_path);
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        "dnf"
+    }
 }
 
 impl Default for DnfBackend {
@@ -2461,6 +2524,17 @@ impl PackageManagerBackend for YumBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn install_file(&self, file_path: &str) -> Result<()> {
+        validate_file_extension(file_path, "yum").map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.run_yum(&["install", "-y", "--", file_path])?;
+        info!("Installed package from file: {}", file_path);
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        "yum"
+    }
 }
 
 impl Default for YumBackend {
@@ -2910,6 +2984,17 @@ impl PackageManagerBackend for PacmanBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn install_file(&self, file_path: &str) -> Result<()> {
+        validate_file_extension(file_path, "pacman").map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.run_pacman(&["-U", "--noconfirm", "--", file_path])?;
+        info!("Installed package from file: {}", file_path);
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        "pacman"
+    }
 }
 
 impl Default for PacmanBackend {
@@ -3289,5 +3374,45 @@ mod tests {
     fn test_validate_service_name_with_plus() {
         // Plus is allowed in service names
         assert!(validate_service_name("cups+daemon").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_apt_deb() {
+        assert!(validate_file_extension("package.deb", "apt").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_apt_rejects_rpm() {
+        assert!(validate_file_extension("package.rpm", "apt").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_extension_dnf_rpm() {
+        assert!(validate_file_extension("package.rpm", "dnf").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_apk_apk() {
+        assert!(validate_file_extension("package.apk", "apk").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_pacman_tar_zst() {
+        assert!(validate_file_extension("package.tar.zst", "pacman").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_unknown_backend() {
+        assert!(validate_file_extension("package.deb", "unknown").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_extension_case_insensitive() {
+        assert!(validate_file_extension("package.DEB", "apt").is_ok());
+    }
+
+    #[test]
+    fn test_max_file_size_constant() {
+        assert_eq!(MAX_FILE_SIZE, 1_073_741_824);
     }
 }

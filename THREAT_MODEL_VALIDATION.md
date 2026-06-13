@@ -149,6 +149,41 @@ This report validates all STRIDE threat mitigations against actual implementatio
 
 ---
 
+### 7. FILE INSTALL SECURITY (Upload-Based Package Installation)
+
+| Threat | Required Mitigation | Implementation Evidence | Status | Confidence |
+|--------|---------------------|------------------------|--------|------------|
+| Malicious package uploaded | Extension allowlist (.deb, .rpm, .apk, .tar.zst) | SPEC.md: Only listed extensions accepted; all others rejected | ✅ Mitigated | High |
+| Disk exhaustion via large uploads | 1GB file size limit | SPEC.md: Hard limit on multipart upload size | ✅ Mitigated | High |
+| Arbitrary file write via staging | Staging dir root-owned, mode 0700 | SPEC.md: file_install.staging_dir permissions enforced | ✅ Mitigated | Medium |
+| GPG signing bypass | Config gate: file_install.enabled defaults to false | SPEC.md: Must be explicitly enabled; documented security risk | ✅ Mitigated | High |
+| Upload endpoint abuse | Rate limiting on upload endpoint | SPEC.md: Rate limiting applied to POST /packages/install-file | ✅ Mitigated | High |
+| Untrusted APK packages | `--allow-untrusted` flag required for APK | SPEC.md: APK backend uses `apk add --allow-untrusted` | ⚠️ Acceptable Risk | Medium |
+| Staged file cleanup failure | Cleanup after install (success or failure) | SPEC.md: Flow includes Cleanup step after Install | ✅ Mitigated | Medium |
+
+**File Install Assessment:** The file install feature introduces a controlled risk by bypassing repository GPG signing. This is mitigated through defense-in-depth: the feature is disabled by default (`file_install.enabled: false`), extension allowlisting prevents arbitrary file uploads, size limits prevent disk exhaustion, and staging directory permissions prevent tampering. The `--allow-untrusted` flag for APK is an acceptable risk since the entire file install feature is opt-in and the user explicitly chooses to install an untrusted file.
+
+**Evidence Sources:**
+- SPEC.md: File Install Endpoint section, Security section
+
+**Note:** File installs inherently bypass repository GPG verification. Administrators must understand this trade-off when enabling `file_install.enabled`. Only use with files from trusted sources.
+
+### 8. SELF-RESTART SECURITY (System Restart Endpoint)
+
+| Threat | Required Mitigation | Implementation Evidence | Status | Confidence |
+|--------|---------------------|------------------------|--------|------------|
+| Unauthorized service restart | mTLS required (already enforced) | SPEC.md: mTLS required for all endpoints; SECURITY.md: All connections require valid client cert | ✅ Mitigated | High |
+| Restart during active operations | Drain active connections before restart | SPEC.md: Behavior includes draining active connections | ✅ Mitigated | Medium |
+| Restart loop / DoS | mTLS + IP whitelist + rate limiting | SECURITY.md: Layered security; rate limiting on destructive endpoints | ✅ Mitigated | High |
+
+**Self-Restart Assessment:** The restart endpoint is protected by the existing mTLS + IP whitelist + rate limiting stack. The drain-before-restart behavior prevents data loss from in-flight operations. The primary use case (self-upgrade workflow) requires the manager to orchestrate: install-file → poll job → call restart → reconnect, which is a controlled sequence.
+
+**Evidence Sources:**
+- SPEC.md: System Restart Endpoint section
+- SECURITY.md: mTLS enforcement, IP whitelist
+
+---
+
 ## Missing or Incomplete Mitigations
 
 ### Medium Priority

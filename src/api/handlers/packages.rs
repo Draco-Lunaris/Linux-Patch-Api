@@ -530,6 +530,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::scope("/packages")
             .route("", web::get().to(list_packages))
             .route("", web::post().to(install_packages))
+            .route(
+                "/install-file",
+                web::post().to(super::file_install::install_file),
+            )
             .route("/{name}", web::get().to(get_package))
             .route("/{name}", web::put().to(update_package))
             .route("/{name}", web::delete().to(remove_package)),

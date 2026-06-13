@@ -19,6 +19,9 @@ actix-tls = { version = "3", features = ["rustls-0_23"] }
 # Rate limiting (actix-governor for per-IP rate limiting)
 actix-governor = "0.6"
 
+# Multipart form handling (file upload support)
+actix-multipart = "0.7"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

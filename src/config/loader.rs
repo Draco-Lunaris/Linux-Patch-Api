@@ -157,6 +157,28 @@ fn default_backend() -> String {
     "auto".to_string()
 }
 
+/// File install configuration
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FileInstallConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_staging_dir")]
+    pub staging_dir: String,
+}
+
+fn default_staging_dir() -> String {
+    "/tmp".to_string()
+}
+
+impl Default for FileInstallConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            staging_dir: default_staging_dir(),
+        }
+    }
+}
+
 /// Enrollment polling configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentConfig {
@@ -487,6 +509,8 @@ pub struct AppConfig {
     pub enrollment: Option<EnrollmentConfig>,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub file_install: FileInstallConfig,
 }
 
 impl AppConfig {
@@ -694,5 +718,17 @@ enrollment:
         let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
         let migrated = config.migrate_empty_strings();
         assert!(migrated.enrollment.unwrap().manager_url.is_none());
+    }
+
+    #[test]
+    fn test_file_install_config_default_disabled() {
+        let config = FileInstallConfig::default();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_file_install_config_default_staging_dir() {
+        let config = FileInstallConfig::default();
+        assert_eq!(config.staging_dir, "/tmp");
     }
 }

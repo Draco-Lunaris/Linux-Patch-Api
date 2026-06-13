@@ -302,6 +302,9 @@ async fn main() -> Result<()> {
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
 
+    // Store config for file_install handler (needs config gate check)
+    let config_data = web::Data::new(config.clone());
+
     // Initialize package cache state
     let cache_state = web::Data::new(PackageCacheState::new());
     info!("Package cache state initialized");
@@ -337,6 +340,7 @@ async fn main() -> Result<()> {
             .app_data(backend_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
+            .app_data(config_data.clone())
             .configure(|cfg| {
                 configure_api_routes(
                     cfg,
