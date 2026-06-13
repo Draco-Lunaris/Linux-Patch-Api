@@ -11,9 +11,30 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
+  skip-duplicate:
+    name: Skip Duplicate
+    runs-on: ubuntu-24.04
+    outputs:
+      should_skip: ${{ steps.skip.outputs.should_skip }}
+    steps:
+      - id: skip
+        run: |
+          # Skip push-to-master (merge) - PR already tested the same code
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            echo "should_skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_skip=false" >> $GITHUB_OUTPUT
+          fi
+
   fmt:
     name: Code Format
+    needs: [skip-duplicate]
+    if: needs.skip-duplicate.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -32,6 +53,8 @@ jobs:
 
   clippy:
     name: Clippy Lints
+    needs: [skip-duplicate]
+    if: needs.skip-duplicate.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -55,6 +78,8 @@ jobs:
 
   test:
     name: All Unit Tests
+    needs: [skip-duplicate]
+    if: needs.skip-duplicate.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -77,6 +102,8 @@ jobs:
 
   audit:
     name: Security Audit
+    needs: [skip-duplicate]
+    if: needs.skip-duplicate.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -101,7 +128,8 @@ jobs:
 
   enrollment-tests:
     name: Enrollment Tests
-    needs: [fmt, clippy]
+    needs: [skip-duplicate, fmt, clippy]
+    if: needs.skip-duplicate.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -128,7 +156,8 @@ jobs:
 
   verify-enrollment-cli:
     name: Verify Enrollment CLI Flag
-    needs: [clippy]
+    needs: [skip-duplicate, clippy]
+    if: needs.skip-duplicate.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
