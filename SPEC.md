@@ -3,8 +3,8 @@
 ## Project Overview
 **Title:** Linux_Patch_API  
 **Description:** API service for secure remote management of patching processes and software add/removal  
-**Version:** 1.2.0  
-**Status:** Draft  
+**Version:** 1.4.3  
+**Status:** Active  
 
 ## Scope
 
@@ -36,9 +36,9 @@
 **File Install Endpoint:**
 - **Endpoint:** `POST /api/v1/packages/install-file` (multipart upload)
 - **Flow:** Upload → Stage → Validate → Install → Cleanup → Return job result
-- **Staging dir:** `/tmp` by default, configurable via `file_staging_dir` in config.yaml
+- **Staging dir:** `/tmp` by default, configurable via `file_install.staging_dir` in config.yaml
 - **File validation:** Extension allowlist (`.deb`, `.rpm`, `.apk`, `.tar.zst`), 1GB size limit
-- **Config gate:** `allow_file_install: true` in config.yaml (default: false for security)
+- **Config gate:** `file_install.enabled: true` in config.yaml (default: false for security)
 - **Job-tracked:** Like other install operations, returns job_id for async tracking
 
 **Backend Commands for File Install:**
@@ -109,7 +109,7 @@
 - Network-level access control via IP/subnet whitelist
 - Silent drop for non-mTLS connections (no response)
 - Detailed error messages for authenticated clients only
-- File installs bypass repo GPG signing — must be explicitly enabled via `allow_file_install`
+- File installs bypass repo GPG signing — must be explicitly enabled via `file_install.enabled`
 - Extension allowlist prevents arbitrary file upload (`.deb`, `.rpm`, `.apk`, `.tar.zst` only)
 - 1GB file upload size limit prevents disk exhaustion
 - Staging directory must be root-owned with mode 0700
@@ -143,6 +143,12 @@
     - `ENROLLMENT_TIMEOUT`: 24-hour polling limit exceeded (1440 attempts exhausted)
     - `ENROLLMENT_RATE_LIMITED`: Request rate limit exceeded (1/minute per IP, HTTP 429)
     - `PKI_PROVISION_FAILED`: Certificate write or PEM validation failed during provisioning
+  - File install failures:
+    - `FILE_INSTALL_DISABLED`: File install endpoint disabled (file_install.enabled is false)
+    - `INVALID_EXTENSION`: File extension not in allowlist (.deb, .rpm, .apk, .tar.zst only)
+    - `FILE_TOO_LARGE`: Uploaded file exceeds 1GB size limit
+    - `STAGING_ERROR`: Staging directory operation failed
+    - `INSTALL_FAILED`: Package install command failed
 
 - **Error Message Policy:**
   - mTLS confirmed clients: Detailed error messages with debugging info

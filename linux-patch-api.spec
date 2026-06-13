@@ -166,8 +166,8 @@ fi
 * Thu Jun 12 2026 Echo <echo@moon-dragon.us> - 1.2.0-1
 - Add file install endpoint: POST /api/v1/packages/install-file (multipart upload)
 - Add system restart endpoint: POST /api/v1/system/restart (graceful self-restart)
-- Add allow_file_install config option (default: false)
-- Add file_staging_dir config option (default: /tmp)
+- Add file_install.enabled config option (default: false)
+- Add file_install.staging_dir config option (default: /tmp)
 - File validation: extension allowlist (.deb, .rpm, .apk, .tar.zst), 1GB size limit
 - Rate limiting on file upload endpoint
 

@@ -841,7 +841,7 @@ The system restart endpoint enables self-upgrade workflows managed by the linux_
 ```bash
 # Example: Install a .deb package file
 curl --cacert ca.pem --cert client.pem --key client.key.pem \
-     -F "file=@/path/to/linux-patch-api_1.2.0-1_amd64.deb" \
+     -F "package=@/path/to/linux-patch-api_1.2.0-1_amd64.deb" \
      https://host:12443/api/v1/packages/install-file
 
 # Example: Trigger service restart after upgrade

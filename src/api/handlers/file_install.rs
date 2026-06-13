@@ -51,7 +51,8 @@ pub async fn install_file(
             data: None,
             error: Some(ApiError {
                 code: "FILE_INSTALL_DISABLED".to_string(),
-                message: "File install feature is disabled. Enable file_install in config.".to_string(),
+                message: "File install feature is disabled. Enable file_install in config."
+                    .to_string(),
                 details: None,
                 retryable: false,
             }),
@@ -74,10 +75,7 @@ pub async fn install_file(
             continue;
         }
 
-        let name = content_disposition
-            .get_filename()
-            .unwrap_or("")
-            .to_string();
+        let name = content_disposition.get_filename().unwrap_or("").to_string();
 
         // Read all chunks with size limit enforcement
         let mut data = Vec::new();
@@ -324,7 +322,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename_strips_path() {
-        assert_eq!(sanitize_filename("/tmp/test.deb"), Some("test.deb".to_string()));
+        assert_eq!(
+            sanitize_filename("/tmp/test.deb"),
+            Some("test.deb".to_string())
+        );
     }
 
     #[test]

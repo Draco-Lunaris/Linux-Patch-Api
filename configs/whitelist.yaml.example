@@ -7,10 +7,7 @@
 # - CIDR subnets: "192.168.1.0/24"
 # - Hostnames: "admin-server.internal" (resolved at startup)
 
-# Default entries - common private network ranges and manager IPs:
+# Only the patch manager needs to communicate with the agent API.
+# Add the manager IP here:
 entries:
-  - "192.168.0.0/22"      # Primary management network
-  - "192.168.5.0/24"      # Secondary management network
-  - "192.168.6.0/24"      # Operations network
   - "192.168.0.215"       # Patch manager server
-  - "192.168.0.247"       # Admin workstation

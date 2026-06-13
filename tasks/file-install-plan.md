@@ -50,30 +50,30 @@ postinst stays as-is — does NOT auto-restart on upgrade. The restart is a sepa
 
 ## Implementation Plan
 
-### Phase 1: Infrastructure & Spec
-- [ ] Create feature branch `feature/file-install` from master
-- [ ] Update SPEC.md with file install endpoint design (request/response format, config gate, validation rules)
-- [ ] Update SPEC.md with system restart endpoint design
-- [ ] Update SPEC.md with `allow_file_install` and `file_staging_dir` config options
-- [ ] Update THREAT_MODEL_VALIDATION.md with file install security considerations
-- [ ] Update DEPLOYMENT_GUIDE.md with file install configuration
-- [ ] Create build LXC `lpa-build` (4 cores / 4GB / 100GB / Ubuntu 24.04)
-- [ ] Verify Rust build works in the LXC
-- [ ] Set up SSH access and git clone in LXC
+### Phase 1: Infrastructure & Spec ✅
+- [x] Create feature branch `feature/file-install` from master
+- [x] Update SPEC.md with file install endpoint design (request/response format, config gate, validation rules)
+- [x] Update SPEC.md with system restart endpoint design
+- [x] Update SPEC.md with `file_install.enabled` and `file_install.staging_dir` config options
+- [x] Update THREAT_MODEL_VALIDATION.md with file install security considerations
+- [x] Update DEPLOYMENT_GUIDE.md with file install configuration
+- [x] Create build LXC `lpa-build` (4 cores / 4GB / 100GB / Ubuntu 24.04) — VMID 218, IP 192.168.3.140
+- [x] Verify Rust build works in the LXC — Rust 1.96.0, cargo check passes
+- [x] Set up SSH access and git clone in LXC — repo cloned, feature branch checked out
 
-### Phase 2: Core File Install
-- [ ] Add `allow_file_install` and `file_staging_dir` config options to `src/config/loader.rs`
-- [ ] Add file staging logic (save to staging dir, validate extension, enforce size limit)
-- [ ] Add `install_file` method to `PackageManagerBackend` trait
-- [ ] Implement `install_file` for all 5 backends (apt, apk, dnf, yum, pacman)
-- [ ] Add `POST /api/v1/packages/install-file` endpoint (multipart upload)
-- [ ] Add route in `src/api/routes.rs`
-- [ ] Add file cleanup on success/failure
+### Phase 2: Core File Install ✅
+- [x] Add `file_install.enabled` and `file_install.staging_dir` config options to `src/config/loader.rs`
+- [x] Add file staging logic (save to staging dir, validate extension, enforce size limit)
+- [x] Add `install_file` method to `PackageManagerBackend` trait
+- [x] Implement `install_file` for all 5 backends (apt, apk, dnf, yum, pacman)
+- [x] Add `POST /api/v1/packages/install-file` endpoint (multipart upload)
+- [x] Add route in `src/api/routes.rs`
+- [x] Add file cleanup on success/failure
 
-### Phase 3: Self-Upgrade Support
-- [ ] Add `POST /api/v1/system/restart` endpoint
-- [ ] Implement graceful restart: drain connections, then `systemctl restart linux-patch-api`
-- [ ] Verify postinst does NOT auto-restart on upgrade (current behavior preserved)
+### Phase 3: Self-Upgrade Support ✅
+- [x] Add `POST /api/v1/system/restart` endpoint
+- [x] Implement graceful restart: 2s delay via tokio::spawn, then `systemctl restart linux-patch-api`
+- [x] Verify postinst does NOT auto-restart on upgrade (current behavior preserved)
 
 ### Phase 4: Testing
 - [ ] Unit tests for file validation (extension allowlist, size limits)

@@ -694,8 +694,7 @@ impl PackageManagerBackend for AptBackend {
     }
 
     fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "apt")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        validate_file_extension(file_path, "apt").map_err(|e| anyhow::anyhow!("{}", e))?;
         self.run_apt(&["install", "-y", "--", file_path])?;
         info!("Installed package from file: {}", file_path);
         Ok(())
@@ -1382,8 +1381,7 @@ impl PackageManagerBackend for ApkBackend {
     }
 
     fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "apk")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        validate_file_extension(file_path, "apk").map_err(|e| anyhow::anyhow!("{}", e))?;
         self.run_apk(&["add", "--allow-untrusted", "--", file_path])?;
         info!("Installed package from file: {}", file_path);
         Ok(())
@@ -1971,8 +1969,7 @@ impl PackageManagerBackend for DnfBackend {
     }
 
     fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "dnf")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        validate_file_extension(file_path, "dnf").map_err(|e| anyhow::anyhow!("{}", e))?;
         self.run_dnf(&["install", "-y", "--", file_path])?;
         info!("Installed package from file: {}", file_path);
         Ok(())
@@ -2529,8 +2526,7 @@ impl PackageManagerBackend for YumBackend {
     }
 
     fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "yum")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        validate_file_extension(file_path, "yum").map_err(|e| anyhow::anyhow!("{}", e))?;
         self.run_yum(&["install", "-y", "--", file_path])?;
         info!("Installed package from file: {}", file_path);
         Ok(())
@@ -2990,8 +2986,7 @@ impl PackageManagerBackend for PacmanBackend {
     }
 
     fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "pacman")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        validate_file_extension(file_path, "pacman").map_err(|e| anyhow::anyhow!("{}", e))?;
         self.run_pacman(&["-U", "--noconfirm", "--", file_path])?;
         info!("Installed package from file: {}", file_path);
         Ok(())
