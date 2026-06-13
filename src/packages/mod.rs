@@ -3380,4 +3380,44 @@ mod tests {
         // Plus is allowed in service names
         assert!(validate_service_name("cups+daemon").is_ok());
     }
+
+    #[test]
+    fn test_validate_file_extension_apt_deb() {
+        assert!(validate_file_extension("package.deb", "apt").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_apt_rejects_rpm() {
+        assert!(validate_file_extension("package.rpm", "apt").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_extension_dnf_rpm() {
+        assert!(validate_file_extension("package.rpm", "dnf").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_apk_apk() {
+        assert!(validate_file_extension("package.apk", "apk").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_pacman_tar_zst() {
+        assert!(validate_file_extension("package.tar.zst", "pacman").is_ok());
+    }
+
+    #[test]
+    fn test_validate_file_extension_unknown_backend() {
+        assert!(validate_file_extension("package.deb", "unknown").is_err());
+    }
+
+    #[test]
+    fn test_validate_file_extension_case_insensitive() {
+        assert!(validate_file_extension("package.DEB", "apt").is_ok());
+    }
+
+    #[test]
+    fn test_max_file_size_constant() {
+        assert_eq!(MAX_FILE_SIZE, 1_073_741_824);
+    }
 }

@@ -719,4 +719,16 @@ enrollment:
         let migrated = config.migrate_empty_strings();
         assert!(migrated.enrollment.unwrap().manager_url.is_none());
     }
+
+    #[test]
+    fn test_file_install_config_default_disabled() {
+        let config = FileInstallConfig::default();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_file_install_config_default_staging_dir() {
+        let config = FileInstallConfig::default();
+        assert_eq!(config.staging_dir, "/tmp");
+    }
 }
