@@ -13,7 +13,7 @@ use tracing::info;
 use crate::jobs::manager::JobManager;
 use crate::packages::cache::PackageCacheState;
 
-use super::handlers::{file_install, jobs, packages, patches, system, websocket};
+use super::handlers::{jobs, packages, patches, system, websocket};
 
 /// Default service handler for unsupported HTTP methods (VULN-005)
 /// Returns 405 Method Not Allowed instead of 404 for known endpoints
@@ -47,7 +47,6 @@ pub fn configure_api_routes(
                 .configure(patches::configure_routes)
                 .configure(system::configure_routes)
                 .configure(jobs::configure_routes)
-                .configure(file_install::configure_routes)
                 .configure(websocket::configure_routes),
         );
 }

@@ -313,14 +313,6 @@ pub async fn install_file(
     }
 }
 
-/// Configure file install routes
-pub fn configure_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/packages")
-            .route("/install-file", web::post().to(install_file)),
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
