@@ -20,9 +20,13 @@ use super::packages::{ApiError, ApiResponse, JobResponseData};
 /// Sanitize a filename to prevent path traversal attacks.
 /// Strips directory components and rejects names containing `..`.
 fn sanitize_filename(name: &str) -> Option<String> {
+    // Reject any input containing path traversal before stripping
+    if name.contains("..") {
+        return None;
+    }
     let name = name.replace('\\', "/");
     let file_name = name.rsplit('/').next()?;
-    if file_name.contains("..") || file_name.is_empty() {
+    if file_name.is_empty() {
         return None;
     }
     Some(file_name.to_string())
