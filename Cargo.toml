@@ -95,6 +95,12 @@ arc-swap = "1"
 # Base64 decoding for PEM CRL parsing
 base64 = "0.22"
 
+# SHA-256 checksum verification for URL-based package install
+sha2 = "0.10"
+
+# Hex encoding for checksum verification
+hex = "0.4"
+
 [dev-dependencies]
 actix-rt = "2"
 tokio-test = "0.4"
@@ -103,7 +109,6 @@ serial_test = "3"
 tempfile = "3"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 rand = "0.8"
-hex = "0.4"
 time = { version = "0.3", features = ["std"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
