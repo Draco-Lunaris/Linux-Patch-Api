@@ -8,6 +8,7 @@
 //! - websocket: Real-time job status streaming
 
 pub mod file_install;
+pub mod install_url;
 pub mod jobs;
 pub mod packages;
 pub mod patches;
