@@ -157,6 +157,28 @@ fn default_backend() -> String {
     "auto".to_string()
 }
 
+/// File install configuration
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FileInstallConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_staging_dir")]
+    pub staging_dir: String,
+}
+
+fn default_staging_dir() -> String {
+    "/tmp".to_string()
+}
+
+impl Default for FileInstallConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            staging_dir: default_staging_dir(),
+        }
+    }
+}
+
 /// Enrollment polling configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentConfig {
@@ -487,6 +509,8 @@ pub struct AppConfig {
     pub enrollment: Option<EnrollmentConfig>,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub file_install: FileInstallConfig,
 }
 
 impl AppConfig {
