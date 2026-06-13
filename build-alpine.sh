@@ -59,8 +59,8 @@ fi
 # Get version from Cargo.toml
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 
-# Alpine APK does not allow hyphens in pkgver; replace all hyphens with underscores
-APK_VERSION=$(echo "$VERSION" | tr '-' '_')
+# Alpine APK does not allow hyphens or underscores in pkgver; replace all hyphens with dots
+APK_VERSION=$(echo "$VERSION" | tr '-' '.')
 echo "Alpine package version: $APK_VERSION"
 
 # Create package directory structure
