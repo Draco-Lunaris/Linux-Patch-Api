@@ -24,7 +24,10 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 RELEASE="1"
 PKG_NAME="linux-patch-api"
-DEB_NAME="${PKG_NAME}_${VERSION}-${RELEASE}_amd64.deb"
+# Debian does not allow hyphens in Version; replace first hyphen with tilde
+# (tilde sorts before release, so 1.5.0~beta.1 < 1.5.0)
+DEB_VERSION=$(echo "$VERSION" | sed 's/-/~/')
+DEB_NAME="${PKG_NAME}_${DEB_VERSION}-${RELEASE}_amd64.deb"
 BUILD_DIR="${PROJECT_ROOT}/package-build"
 
 info "=== Linux Patch API — Package Build ==="
@@ -83,7 +86,7 @@ INSTALLED_SIZE=$(du -sk "${BUILD_DIR}" | cut -f1)
 #  ${shlibs:Depends} that dpkg-deb cannot resolve)
 cat > "${BUILD_DIR}/DEBIAN/control" <<EOF
 Package: linux-patch-api
-Version: ${VERSION}-${RELEASE}
+Version: ${DEB_VERSION}-${RELEASE}
 Architecture: amd64
 Maintainer: Echo <echo@moon-dragon.us>
 Installed-Size: ${INSTALLED_SIZE}

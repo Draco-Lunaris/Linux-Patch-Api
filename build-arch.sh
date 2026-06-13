@@ -53,6 +53,10 @@ cp configs/linux-patch-api.install linux-patch-api.install
 # Get version from Cargo.toml
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 
+# Arch PKGBUILD does not allow hyphens in pkgver; replace all hyphens with dots
+ARCH_VERSION=$(echo "$VERSION" | tr '-' '.')
+echo "Arch package version: $ARCH_VERSION"
+
 # Create PKGBUILD with quoted heredoc to prevent $pkgdir expansion
 # $pkgdir must be literal for makepkg to expand at runtime
 echo "Creating PKGBUILD..."
@@ -84,9 +88,9 @@ package() {
 EOF
 
 # Replace version placeholder with actual version
-sed -i "s/VERSION_PLACEHOLDER/$VERSION/" PKGBUILD
+sed -i "s/VERSION_PLACEHOLDER/$ARCH_VERSION/" PKGBUILD
 
-echo "PKGBUILD version: $VERSION"
+echo "PKGBUILD version: $ARCH_VERSION"
 
 # Build package
 # For CI environments where we may run as root
