@@ -160,10 +160,14 @@ fn default_backend() -> String {
 /// File install configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FileInstallConfig {
-    #[serde(default)]
+    #[serde(default = "default_file_install_enabled")]
     pub enabled: bool,
     #[serde(default = "default_staging_dir")]
     pub staging_dir: String,
+}
+
+fn default_file_install_enabled() -> bool {
+    true
 }
 
 fn default_staging_dir() -> String {
