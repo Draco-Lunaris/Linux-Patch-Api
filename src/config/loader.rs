@@ -173,7 +173,7 @@ fn default_staging_dir() -> String {
 impl Default for FileInstallConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             staging_dir: default_staging_dir(),
         }
     }
@@ -721,9 +721,9 @@ enrollment:
     }
 
     #[test]
-    fn test_file_install_config_default_disabled() {
+    fn test_file_install_config_default_enabled() {
         let config = FileInstallConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
     }
 
     #[test]
