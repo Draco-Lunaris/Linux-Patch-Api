@@ -256,20 +256,60 @@ impl AptBackend {
         }
     }
 
-    /// Run apt command and capture output
+    /// Run apt-get command and capture output.
+    /// Uses apt-get instead of apt because apt warns
+    /// "does not have a stable CLI interface" when used non-interactively,
+    /// which causes stderr output that breaks scripted usage.
     fn run_apt(&self, args: &[&str]) -> Result<String> {
-        // Service runs as root - no sudo needed for apt commands
-        let program = "apt";
+        // Service runs as root - no sudo needed for apt-get commands
+        let program = "apt-get";
         let cmd_args: Vec<&str> = args.to_vec();
 
         let output = Command::new(program)
+            .env("DEBIAN_FRONTEND", "noninteractive")
             .args(&cmd_args)
             .output()
-            .context("Failed to execute apt command")?;
+            .context("Failed to execute apt-get command")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("apt command failed: {}", stderr));
+            return Err(anyhow::anyhow!("apt-get command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Run apt-cache command and capture output.
+    /// Used for queries like `apt-cache policy` which have no apt-get equivalent.
+    fn run_apt_cache(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("apt-cache")
+            .args(args)
+            .output()
+            .context("Failed to execute apt-cache command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("apt-cache command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Run apt list command and capture output.
+    /// `apt list` has no apt-get equivalent, so we use `apt` directly
+    /// but suppress the "does not have a stable CLI interface" warning on stderr.
+    fn run_apt_list(&self, args: &[&str]) -> Result<String> {
+        let cmd_args: Vec<&str> = args.to_vec();
+
+        let output = Command::new("apt")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .args(&cmd_args)
+            .output()
+            .context("Failed to execute apt list command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("apt list command failed: {}", stderr));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -338,7 +378,7 @@ impl PackageManagerBackend for AptBackend {
             None => vec!["list", "--installed"],
         };
 
-        let output = self.run_apt(&args)?;
+        let output = self.run_apt_list(&args)?;
         Ok(self.parse_package_list(&output))
     }
 
@@ -348,7 +388,7 @@ impl PackageManagerBackend for AptBackend {
 
         if dpkg_output.is_err() {
             // Package not installed, check if available
-            let list_output = self.run_apt(&["list", name])?;
+            let list_output = self.run_apt_list(&["list", name])?;
             if list_output.contains(name) {
                 let parts: Vec<&str> = list_output
                     .lines()
@@ -411,12 +451,12 @@ impl PackageManagerBackend for AptBackend {
 
         // Check if upgradable
         let upgradable = self
-            .run_apt(&["list", "--upgradable", name])
+            .run_apt_list(&["list", "--upgradable", name])
             .map(|o| o.contains(name))
             .unwrap_or(false);
 
         let latest_version = if upgradable {
-            self.run_apt(&["policy", name]).ok().and_then(|o| {
+            self.run_apt_cache(&["policy", name]).ok().and_then(|o| {
                 o.lines()
                     .find(|l| l.contains("Candidate"))
                     .and_then(|l| l.split_whitespace().nth(1))
@@ -500,7 +540,7 @@ impl PackageManagerBackend for AptBackend {
     }
 
     fn list_patches(&self) -> Result<Vec<Patch>> {
-        let output = self.run_apt(&["list", "--upgradable"])?;
+        let output = self.run_apt_list(&["list", "--upgradable"])?;
         let mut patches = Vec::new();
 
         for line in output.lines() {
