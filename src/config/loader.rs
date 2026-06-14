@@ -164,6 +164,9 @@ pub struct FileInstallConfig {
     pub enabled: bool,
     #[serde(default = "default_staging_dir")]
     pub staging_dir: String,
+    /// Directory for lock and status files used by the self-upgrade mechanism.
+    #[serde(default = "default_state_dir")]
+    pub state_dir: String,
 }
 
 fn default_file_install_enabled() -> bool {
@@ -174,11 +177,16 @@ fn default_staging_dir() -> String {
     "/tmp".to_string()
 }
 
+fn default_state_dir() -> String {
+    "/var/lib/linux_patch_api".to_string()
+}
+
 impl Default for FileInstallConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             staging_dir: default_staging_dir(),
+            state_dir: default_state_dir(),
         }
     }
 }
