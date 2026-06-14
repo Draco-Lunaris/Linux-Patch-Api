@@ -25,7 +25,7 @@ VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 RELEASE="1"
 PKG_NAME="linux-patch-api"
 # Debian does not allow hyphens in Version; replace first hyphen with tilde
-# (tilde sorts before release, so 1.5.0~beta.1 < 1.5.0)
+# (tilde sorts before release, so 1.5.0~beta.2 < 1.5.0)
 DEB_VERSION=$(echo "$VERSION" | sed 's/-/~/')
 DEB_NAME="${PKG_NAME}_${DEB_VERSION}-${RELEASE}_amd64.deb"
 BUILD_DIR="${PROJECT_ROOT}/package-build"
