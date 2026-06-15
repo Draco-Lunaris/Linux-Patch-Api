@@ -11,6 +11,12 @@
 //! escapes the service's cgroup (via systemd-run --scope or cgroup.procs),
 //! the API returns 202 Accepted immediately and the script survives
 //! the service stop to complete the installation independently.
+//!
+//! The install script owns the entire download+install process:
+//! it downloads the package from the URL, verifies the checksum,
+//! stops the service, installs the package, and starts the service.
+//! This avoids the race condition where the API downloads the file
+//! but gets killed before the install script can use it.
 
 use std::fs;
 use std::path::PathBuf;
@@ -27,22 +33,32 @@ const LOCK_STALE_THRESHOLD_SECS: u64 = 1800;
 /// 1. Escapes the systemd cgroup (via `systemd-run --scope` or `setsid`) so it
 ///    survives when the package's pre-remove script stops the API service
 /// 2. Writes "installing" status to the status file
-/// 3. Stops the service (if running) using pkill
-/// 4. Installs the package using the appropriate package manager
-/// 5. Writes success/failure status to the status file
-/// 6. Removes the lock file
-/// 7. Attempts to start the service (safety net; post-install scripts should do this)
+/// 3. Downloads the package from the URL (using curl or wget)
+/// 4. Verifies the SHA-256 checksum (if provided)
+/// 5. Stops the service (if running) using pkill
+/// 6. Installs the package using the appropriate package manager
+/// 7. Writes success/failure status to the status file
+/// 8. Removes the lock file
+/// 9. Attempts to start the service (safety net; post-install scripts should do this)
 ///
 /// The script is designed to work on all supported distros (Debian/Ubuntu,
 /// Fedora/RHEL/AlmaLinux, Alpine, Arch) and does NOT rely on systemctl.
 pub fn generate_install_script(
-    staged_package_path: &str,
+    download_url: &str,
+    checksum: Option<&str>,
+    filename: &str,
     package_type: &str,
     job_id: &str,
     state_dir: &str,
 ) -> String {
     let status_file = format!("{}/install.status", state_dir);
     let lock_file = format!("{}/install.lock", state_dir);
+    let package_path = format!("/tmp/{}", filename);
+
+    // Strip sha256: prefix from checksum if present, keep only the hex digest
+    let checksum_hex = checksum
+        .map(|c| c.strip_prefix("sha256:").unwrap_or(c))
+        .unwrap_or("");
 
     // Determine the install command based on package type
     let install_cmd = match package_type {
@@ -67,15 +83,15 @@ pub fn generate_install_script(
         "#!/bin/sh\n\
 # Self-upgrade installation script\n\
 # Job ID: {job_id}\n\
-# Package: {staged_package_path}\n\
+# Download URL: {download_url}\n\
 # Package type: {package_type}\n\
 #\n\
 # This script is forked as a detached process by the API.\n\
-# It handles stopping the service, installing the package,\n\
+# It handles downloading the package, stopping the service, installing,\n\
 # and writing status for the API to read on next startup.\n\
 \n\
 # CRITICAL: Escape the service cgroup before doing anything else.\n\
-# When this script runs as a child of the API service, it shares the service\'s\n\
+# When this script runs as a child of the API service, it shares the service's\n\
 # cgroup. When the service is stopped (by prerm script or pkill), the init\n\
 # system kills ALL processes in the cgroup - including this install script.\n\
 # We must move ourselves out of the service cgroup to survive the stop.\n\
@@ -96,7 +112,9 @@ fi\n\
 \n\
 set -e\n\
 \n\
-PACKAGE_PATH=\"{staged_package_path}\"\n\
+DOWNLOAD_URL=\"{download_url}\"\n\
+EXPECTED_SHA256=\"{checksum_hex}\"\n\
+PACKAGE_PATH=\"{package_path}\"\n\
 PACKAGE_TYPE=\"{package_type}\"\n\
 JOB_ID=\"{job_id}\"\n\
 STATUS_FILE=\"{status_file}\"\n\
@@ -105,15 +123,43 @@ LOCK_FILE=\"{lock_file}\"\n\
 # Write initial status\n\
 echo \"installing:$JOB_ID\" > \"$STATUS_FILE\"\n\
 \n\
+# Download the package BEFORE stopping the service.\n\
+# The API must stay running during download so the script can fetch the file.\n\
+# The API is only stopped after download succeeds.\n\
+DOWNLOAD_EXIT_CODE=0\n\
+if command -v curl >/dev/null 2>&1; then\n\
+    curl -fSL -o \"$PACKAGE_PATH\" \"$DOWNLOAD_URL\" || DOWNLOAD_EXIT_CODE=$?\n\
+elif command -v wget >/dev/null 2>&1; then\n\
+    wget -O \"$PACKAGE_PATH\" \"$DOWNLOAD_URL\" || DOWNLOAD_EXIT_CODE=$?\n\
+else\n\
+    DOWNLOAD_EXIT_CODE=127\n\
+fi\n\
+\n\
+if [ \"$DOWNLOAD_EXIT_CODE\" -ne 0 ]; then\n\
+    echo \"failed:Download failed with exit code $DOWNLOAD_EXIT_CODE\" > \"$STATUS_FILE\"\n\
+    rm -f \"$PACKAGE_PATH\" 2>/dev/null || true\n\
+    rm -f \"$LOCK_FILE\"\n\
+    exit 1\n\
+fi\n\
+\n\
+# Verify checksum if provided\n\
+if [ -n \"$EXPECTED_SHA256\" ]; then\n\
+    CALCULATED=$(sha256sum \"$PACKAGE_PATH\" | awk '{{print $1}}')\n\
+    if [ \"$CALCULATED\" != \"$EXPECTED_SHA256\" ]; then\n\
+        echo \"failed:SHA-256 checksum verification failed\" > \"$STATUS_FILE\"\n\
+        rm -f \"$PACKAGE_PATH\"\n\
+        rm -f \"$LOCK_FILE\"\n\
+        exit 1\n\
+    fi\n\
+fi\n\
+\n\
 # Stop the service if running (do NOT use systemctl - not all distros have it)\n\
 if command -v pkill >/dev/null 2>&1; then\n\
-    # Use -x (exact process name match) instead of -f (full command pattern)
-\
-    # to avoid killing this install script whose path contains 'linux-patch-api'
+    # Use -x (exact process name match) instead of -f (full command pattern)\n\
+    # to avoid killing this install script whose path contains 'linux-patch-api'\n\
     pkill -x linux-patch-api 2>/dev/null || true\n\
 else\n\
-    # killall matches by process name, not pattern - safe to use as-is
-\
+    # killall matches by process name, not pattern - safe to use as-is\n\
     killall linux-patch-api 2>/dev/null || true\n\
 fi\n\
 # Give the process a moment to shut down gracefully\n\
@@ -146,7 +192,7 @@ else\n\
     echo \"failed:Install exited with code $INSTALL_EXIT_CODE\" > \"$STATUS_FILE\"\n\
 fi\n\
 \n\
-# Remove staged package\n\
+# Remove downloaded package\n\
 rm -f \"$PACKAGE_PATH\"\n\
 \n\
 # Remove lock file (allow new installs)\n\
@@ -162,8 +208,10 @@ elif [ -x /etc/init.d/linux-patch-api ]; then\n\
     /etc/init.d/linux-patch-api start 2>/dev/null || true\n\
 fi\n",
         job_id = job_id,
-        staged_package_path = staged_package_path,
+        download_url = download_url,
         package_type = package_type,
+        checksum_hex = checksum_hex,
+        package_path = package_path,
         status_file = status_file,
         lock_file = lock_file,
         install_cmd = install_cmd,
@@ -253,8 +301,8 @@ pub fn check_lock_file(state_dir: &str) -> Result<(), String> {
     ))
 }
 
-/// Create a lock file with job_id, timestamp, and package path.
-pub fn create_lock_file(state_dir: &str, job_id: &str, package_path: &str) -> Result<(), String> {
+/// Create a lock file with job_id, timestamp, and download URL.
+pub fn create_lock_file(state_dir: &str, job_id: &str, download_url: &str) -> Result<(), String> {
     // Ensure state directory exists
     let state_path = PathBuf::from(state_dir);
     if !state_path.exists() {
@@ -270,8 +318,8 @@ pub fn create_lock_file(state_dir: &str, job_id: &str, package_path: &str) -> Re
     let lock_path = state_path.join("install.lock");
     let timestamp = chrono::Utc::now().to_rfc3339();
     let contents = format!(
-        "job_id={}\ntimestamp={}\npackage={}",
-        job_id, timestamp, package_path
+        "job_id={}\ntimestamp={}\nurl={}",
+        job_id, timestamp, download_url
     );
 
     fs::write(&lock_path, contents)
@@ -451,7 +499,9 @@ mod tests {
     #[test]
     fn test_generate_install_script_contains_key_elements() {
         let script = generate_install_script(
-            "/tmp/package.deb",
+            "https://example.com/package.deb",
+            Some("abc123def456"),
+            "package.deb",
             "deb",
             "test-job-123",
             "/var/lib/linux_patch_api",
@@ -459,12 +509,27 @@ mod tests {
 
         // Script should contain key elements
         assert!(script.contains("#!/bin/sh"));
+        assert!(script.contains("https://example.com/package.deb"));
+        assert!(script.contains("abc123def456"));
         assert!(script.contains("/tmp/package.deb"));
         assert!(script.contains("test-job-123"));
         assert!(script.contains("/var/lib/linux_patch_api/install.status"));
         assert!(script.contains("/var/lib/linux_patch_api/install.lock"));
         assert!(script.contains("apt-get install -y"));
         assert!(script.contains("pkill"));
+
+        // Script should contain download step
+        assert!(
+            script.contains("curl -fSL"),
+            "curl download command missing"
+        );
+        assert!(script.contains("wget -O"), "wget download command missing");
+
+        // Script should contain checksum verification
+        assert!(
+            script.contains("sha256sum"),
+            "sha256sum verification missing"
+        );
 
         // Script should contain cgroup escape logic
         assert!(
@@ -479,17 +544,42 @@ mod tests {
             script.contains("cgroup.procs"),
             "cgroup.procs fallback escape missing"
         );
+
+        // Download should come BEFORE pkill
+        let download_pos = script
+            .find("curl -fSL")
+            .or_else(|| script.find("wget -O"))
+            .unwrap();
+        let pkill_pos = script.find("pkill -x").unwrap();
+        assert!(
+            download_pos < pkill_pos,
+            "Download step should come before pkill step"
+        );
     }
 
     #[test]
-    fn test_generate_install_script_rpm() {
+    fn test_generate_install_script_no_checksum() {
         let script = generate_install_script(
-            "/tmp/package.rpm",
+            "https://example.com/package.rpm",
+            None,
+            "package.rpm",
             "rpm",
             "test-job-456",
             "/var/lib/linux_patch_api",
         );
 
+        // Script should contain download URL
+        assert!(script.contains("https://example.com/package.rpm"));
+        assert!(script.contains("/tmp/package.rpm"));
+
+        // Script should still have download step
+        assert!(script.contains("curl -fSL"));
+        assert!(script.contains("wget -O"));
+
+        // Script should have empty checksum that skips verification
+        assert!(script.contains("EXPECTED_SHA256=\"\""));
+
+        // rpm install command
         assert!(script.contains("dnf install -y"));
         assert!(script.contains("yum install -y"));
     }
@@ -497,7 +587,9 @@ mod tests {
     #[test]
     fn test_generate_install_script_apk() {
         let script = generate_install_script(
-            "/tmp/package.apk",
+            "https://example.com/package.apk",
+            None,
+            "package.apk",
             "apk",
             "test-job-789",
             "/var/lib/linux_patch_api",
@@ -509,13 +601,18 @@ mod tests {
     #[test]
     fn test_generate_install_script_pacman() {
         let script = generate_install_script(
-            "/tmp/package.tar.zst",
+            "https://example.com/package.tar.zst",
+            Some("sha256:deadbeef"),
+            "package.tar.zst",
             "pkg",
             "test-job-012",
             "/var/lib/linux_patch_api",
         );
 
         assert!(script.contains("pacman -U --noconfirm"));
+        // sha256: prefix should be stripped
+        assert!(script.contains("deadbeef"));
+        assert!(!script.contains("sha256:deadbeef"));
     }
 
     #[test]
