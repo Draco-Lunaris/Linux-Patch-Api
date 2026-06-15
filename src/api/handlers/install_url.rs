@@ -3,16 +3,18 @@
 //! Implements REST endpoint for installing a package from a URL:
 //! - POST /api/v1/packages/install-url (JSON body)
 //!
-//! The client downloads the package directly from the provided URL,
-//! verifies the checksum (if provided), stages it, and then forks
-//! a detached shell script to perform the actual installation.
+//! The API validates the request, creates a lock file, and forks a detached
+//! shell script that downloads and installs the package. The install script
+//! owns the entire download+install process to avoid the race condition
+//! where the API downloads a file but gets killed before the install script
+//! can use it.
 //!
 //! This design solves the self-upgrade problem: when the API installs
 //! its own package, the package's pre-remove script stops the API
-//! service, which would kill an in-process installation and leave dpkg
-//! in a broken state. By forking a detached script, the API returns
-//! 202 Accepted immediately and the script completes the installation
-//! independently.
+//! service, which would kill an in-process download and leave a staged
+//! file that gets cleaned up on SIGTERM. By passing the URL to the
+//! install script instead of a file path, the script downloads the
+//! package itself before stopping the API, eliminating the race.
 
 use actix_web::{web, HttpResponse, Responder};
 use chrono::Utc;
@@ -59,25 +61,13 @@ fn filename_from_url(url: &str) -> Option<String> {
     Some(decoded)
 }
 
-/// Verify SHA-256 checksum of data against an expected hex digest.
-fn verify_checksum(data: &[u8], expected_hex: &str) -> bool {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    let actual = hex::encode(result);
-    // Strip optional "sha256:" prefix
-    let expected = expected_hex.strip_prefix("sha256:").unwrap_or(expected_hex);
-    actual.eq_ignore_ascii_case(expected)
-}
-
 /// Install a package from a URL (detached process for self-upgrade safety).
 ///
-/// Downloads the package from the provided URL, verifies the checksum
-/// (if provided), stages it, creates a lock file, and then forks a
-/// detached shell script to perform the actual installation.
+/// Validates the request, creates a lock file, and forks a detached shell
+/// script that downloads the package from the URL, verifies the checksum
+/// (if provided), stops the API service, and installs the package.
 ///
-/// Returns 202 Accepted immediately after staging, before the install begins.
+/// Returns 202 Accepted immediately, before the download begins.
 /// The Manager can detect completion by polling the health endpoint or by
 /// checking the install status on the next API startup.
 pub async fn install_url(
@@ -230,181 +220,11 @@ pub async fn install_url(
         url = %url,
         filename = %safe_name,
         package_type = %package_type,
-        "Downloading package from URL"
-    );
-
-    // Download the file from the URL
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large packages
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to build HTTP client");
-            let response = ApiResponse::<()> {
-                success: false,
-                request_id,
-                timestamp: Utc::now().to_rfc3339(),
-                data: None,
-                error: Some(ApiError {
-                    code: "DOWNLOAD_ERROR".to_string(),
-                    message: format!("Failed to build HTTP client: {}", e),
-                    details: None,
-                    retryable: true,
-                }),
-            };
-            return HttpResponse::InternalServerError().json(response);
-        }
-    };
-
-    let download_response = match client.get(url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(request_id = %request_id, url = %url, error = %e, "Failed to download package");
-            let response = ApiResponse::<()> {
-                success: false,
-                request_id,
-                timestamp: Utc::now().to_rfc3339(),
-                data: None,
-                error: Some(ApiError {
-                    code: "DOWNLOAD_ERROR".to_string(),
-                    message: format!("Failed to download package: {}", e),
-                    details: None,
-                    retryable: true,
-                }),
-            };
-            return HttpResponse::BadGateway().json(response);
-        }
-    };
-
-    if !download_response.status().is_success() {
-        let status = download_response.status();
-        error!(
-            request_id = %request_id,
-            url = %url,
-            status = %status,
-            "Download returned non-success status"
-        );
-        let response = ApiResponse::<()> {
-            success: false,
-            request_id,
-            timestamp: Utc::now().to_rfc3339(),
-            data: None,
-            error: Some(ApiError {
-                code: "DOWNLOAD_ERROR".to_string(),
-                message: format!("Download returned HTTP {}", status),
-                details: None,
-                retryable: true,
-            }),
-        };
-        return HttpResponse::BadGateway().json(response);
-    }
-
-    let data = match download_response.bytes().await {
-        Ok(b) => b.to_vec(),
-        Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to read download body");
-            let response = ApiResponse::<()> {
-                success: false,
-                request_id,
-                timestamp: Utc::now().to_rfc3339(),
-                data: None,
-                error: Some(ApiError {
-                    code: "DOWNLOAD_ERROR".to_string(),
-                    message: format!("Failed to read download body: {}", e),
-                    details: None,
-                    retryable: true,
-                }),
-            };
-            return HttpResponse::BadGateway().json(response);
-        }
-    };
-
-    // Check file size
-    use crate::packages::MAX_FILE_SIZE;
-    if data.len() > MAX_FILE_SIZE {
-        let response = ApiResponse::<()> {
-            success: false,
-            request_id,
-            timestamp: Utc::now().to_rfc3339(),
-            data: None,
-            error: Some(ApiError {
-                code: "FILE_TOO_LARGE".to_string(),
-                message: format!(
-                    "Downloaded file exceeds maximum size of {} bytes",
-                    MAX_FILE_SIZE
-                ),
-                details: None,
-                retryable: false,
-            }),
-        };
-        return HttpResponse::PayloadTooLarge().json(response);
-    }
-
-    // Verify checksum if provided
-    if let Some(ref expected) = req.checksum {
-        if !verify_checksum(&data, expected) {
-            let response = ApiResponse::<()> {
-                success: false,
-                request_id,
-                timestamp: Utc::now().to_rfc3339(),
-                data: None,
-                error: Some(ApiError {
-                    code: "CHECKSUM_MISMATCH".to_string(),
-                    message: "Downloaded file checksum does not match the provided checksum."
-                        .to_string(),
-                    details: None,
-                    retryable: false,
-                }),
-            };
-            return HttpResponse::BadRequest().json(response);
-        }
-        info!(
-            request_id = %request_id,
-            filename = %safe_name,
-            "Checksum verified successfully"
-        );
-    }
-
-    // Stage the file
-    let staging_dir = &config.file_install.staging_dir;
-    let staging_path = std::path::PathBuf::from(staging_dir).join(&safe_name);
-    let staging_path_str = staging_path.display().to_string();
-
-    if let Err(e) = std::fs::write(&staging_path, &data) {
-        error!(
-            request_id = %request_id,
-            path = %staging_path_str,
-            error = %e,
-            "Failed to stage downloaded file"
-        );
-        let response = ApiResponse::<()> {
-            success: false,
-            request_id,
-            timestamp: Utc::now().to_rfc3339(),
-            data: None,
-            error: Some(ApiError {
-                code: "STAGING_ERROR".to_string(),
-                message: format!("Failed to stage file: {}", e),
-                details: None,
-                retryable: true,
-            }),
-        };
-        return HttpResponse::InternalServerError().json(response);
-    }
-
-    info!(
-        request_id = %request_id,
-        file = %safe_name,
-        size = data.len(),
-        staging_path = %staging_path_str,
-        "Downloaded package staged for installation"
+        "Processing URL install request"
     );
 
     // Check job queue capacity
     if !job_manager.can_accept_job().await {
-        // Clean up staged file
-        let _ = std::fs::remove_file(&staging_path);
         let response = ApiResponse::<()> {
             success: false,
             request_id,
@@ -429,8 +249,6 @@ pub async fn install_url(
     {
         Ok(id) => id,
         Err(e) => {
-            // Clean up staged file
-            let _ = std::fs::remove_file(&staging_path);
             error!(request_id = %request_id, error = %e, "Failed to create job");
             let response = ApiResponse::<()> {
                 success: false,
@@ -450,10 +268,9 @@ pub async fn install_url(
 
     // Create lock file to prevent concurrent installs
     let state_dir = &config.file_install.state_dir;
-    if let Err(lock_err) = create_lock_file(state_dir, &job_id.to_string(), &staging_path_str) {
-        // Clean up job and staged file
+    if let Err(lock_err) = create_lock_file(state_dir, &job_id.to_string(), url) {
+        // Clean up job
         let _ = job_manager.fail_job(&job_id, lock_err.clone()).await;
-        let _ = std::fs::remove_file(&staging_path);
         error!(request_id = %request_id, error = %lock_err, "Failed to create lock file");
         let response = ApiResponse::<()> {
             success: false,
@@ -476,13 +293,17 @@ pub async fn install_url(
             &job_id,
             JobStatus::Running,
             Some(0),
-            Some("Staging complete, forking detached install script...".to_string()),
+            Some("Forking detached install script...".to_string()),
         )
         .await;
 
     // Generate the detached install script
+    // The script will download the package itself, verify checksum, stop the
+    // service, and install — all without the API needing to stage the file.
     let script_content = generate_install_script(
-        &staging_path_str,
+        url,
+        req.checksum.as_deref(),
+        &safe_name,
         package_type,
         &job_id.to_string(),
         state_dir,
@@ -490,10 +311,9 @@ pub async fn install_url(
 
     // Fork the detached install script
     if let Err(fork_err) = fork_install_script(&script_content, state_dir) {
-        // Clean up: remove lock file, staged file, and fail the job
+        // Clean up: remove lock file and fail the job
         let lock_path = std::path::PathBuf::from(state_dir).join("install.lock");
         let _ = std::fs::remove_file(&lock_path);
-        let _ = std::fs::remove_file(&staging_path);
         let _ = job_manager.fail_job(&job_id, fork_err.clone()).await;
 
         error!(request_id = %request_id, error = %fork_err, "Failed to fork install script");
@@ -515,7 +335,7 @@ pub async fn install_url(
     info!(
         request_id = %request_id,
         job_id = %job_id,
-        file = %safe_name,
+        url = %url,
         "Install script forked successfully, returning 202 Accepted"
     );
 
@@ -553,20 +373,5 @@ mod tests {
     #[test]
     fn test_filename_from_url_trailing_slash() {
         assert_eq!(filename_from_url("https://example.com/path/"), None);
-    }
-
-    #[test]
-    fn test_verify_checksum_sha256() {
-        let data = b"hello world";
-        // SHA-256 of "hello world"
-        let expected = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        assert!(verify_checksum(data, expected));
-        assert!(verify_checksum(data, &format!("sha256:{}", expected)));
-    }
-
-    #[test]
-    fn test_verify_checksum_mismatch() {
-        let data = b"hello world";
-        assert!(!verify_checksum(data, "0000000000000000"));
     }
 }
