@@ -4,9 +4,15 @@
 //! - POST /api/v1/packages/install-url (JSON body)
 //!
 //! The client downloads the package directly from the provided URL,
-//! verifies the checksum (if provided), and installs it.
-//! This avoids routing the package through the Manager, which is
-//! more efficient for fleet upgrades.
+//! verifies the checksum (if provided), stages it, and then forks
+//! a detached shell script to perform the actual installation.
+//!
+//! This design solves the self-upgrade problem: when the API installs
+//! its own package, the package's pre-remove script stops the API
+//! service, which would kill an in-process installation and leave dpkg
+//! in a broken state. By forking a detached script, the API returns
+//! 202 Accepted immediately and the script completes the installation
+//! independently.
 
 use actix_web::{web, HttpResponse, Responder};
 use chrono::Utc;
@@ -16,9 +22,12 @@ use uuid::Uuid;
 
 use crate::config::loader::AppConfig;
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages::{validate_file_extension, PackageManagerBackend};
 
 use super::packages::{ApiError, ApiResponse, JobResponseData};
+use super::self_upgrade::{
+    check_lock_file, create_lock_file, detect_package_type, fork_install_script,
+    generate_install_script,
+};
 
 /// Request body for URL-based package installation.
 #[derive(Debug, Deserialize)]
@@ -62,14 +71,18 @@ fn verify_checksum(data: &[u8], expected_hex: &str) -> bool {
     actual.eq_ignore_ascii_case(expected)
 }
 
-/// Install a package from a URL (async operation).
+/// Install a package from a URL (detached process for self-upgrade safety).
 ///
 /// Downloads the package from the provided URL, verifies the checksum
-/// (if provided), stages it, and creates a background job to install it.
+/// (if provided), stages it, creates a lock file, and then forks a
+/// detached shell script to perform the actual installation.
+///
+/// Returns 202 Accepted immediately after staging, before the install begins.
+/// The Manager can detect completion by polling the health endpoint or by
+/// checking the install status on the next API startup.
 pub async fn install_url(
     req: web::Json<InstallUrlRequest>,
     config: web::Data<AppConfig>,
-    backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -91,6 +104,28 @@ pub async fn install_url(
             }),
         };
         return HttpResponse::Forbidden().json(response);
+    }
+
+    // Check for existing lock file (concurrent install prevention)
+    if let Err(lock_error) = check_lock_file(&config.file_install.state_dir) {
+        warn!(
+            request_id = %request_id,
+            lock_error = %lock_error,
+            "Install rejected: lock file exists"
+        );
+        let response = ApiResponse::<()> {
+            success: false,
+            request_id,
+            timestamp: Utc::now().to_rfc3339(),
+            data: None,
+            error: Some(ApiError {
+                code: "INSTALL_IN_PROGRESS".to_string(),
+                message: lock_error,
+                details: None,
+                retryable: true,
+            }),
+        };
+        return HttpResponse::Conflict().json(response);
     }
 
     // Validate URL
@@ -166,32 +201,39 @@ pub async fn install_url(
         }
     };
 
-    // Validate file extension against backend allowlist
-    let backend_name = backend.backend_name();
-    if let Err(e) = validate_file_extension(&safe_name, backend_name) {
-        let response = ApiResponse::<()> {
-            success: false,
-            request_id,
-            timestamp: Utc::now().to_rfc3339(),
-            data: None,
-            error: Some(ApiError {
-                code: "INVALID_EXTENSION".to_string(),
-                message: e,
-                details: None,
-                retryable: false,
-            }),
-        };
-        return HttpResponse::BadRequest().json(response);
-    }
+    // Detect package type from filename
+    let package_type = match detect_package_type(&safe_name) {
+        Some(pt) => pt,
+        None => {
+            let response = ApiResponse::<()> {
+                success: false,
+                request_id,
+                timestamp: Utc::now().to_rfc3339(),
+                data: None,
+                error: Some(ApiError {
+                    code: "INVALID_EXTENSION".to_string(),
+                    message: format!(
+                        "Could not determine package type from filename '{}'. \
+                         Supported extensions: .deb, .rpm, .apk, .tar.zst",
+                        safe_name
+                    ),
+                    details: None,
+                    retryable: false,
+                }),
+            };
+            return HttpResponse::BadRequest().json(response);
+        }
+    };
 
-    // Download the file from the URL
     info!(
         request_id = %request_id,
         url = %url,
         filename = %safe_name,
+        package_type = %package_type,
         "Downloading package from URL"
     );
 
+    // Download the file from the URL
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large packages
         .build()
@@ -380,77 +422,12 @@ pub async fn install_url(
             .json(response);
     }
 
-    // Create async job
-    let file_name_for_job = safe_name.clone();
-    match job_manager
+    // Create a job for tracking
+    let job_id = match job_manager
         .create_job(JobOperation::FileInstall, vec![safe_name.clone()])
         .await
     {
-        Ok(job_id) => {
-            // Spawn background task to execute the installation
-            let backend_clone = backend.clone();
-            let job_manager_clone = job_manager.clone();
-            let staging_path_for_cleanup = staging_path.clone();
-
-            tokio::spawn(async move {
-                let job_id_clone = job_id;
-
-                // Update job to running
-                let _ = job_manager_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Starting file installation...".to_string()),
-                    )
-                    .await;
-                let _ = job_manager_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
-
-                // Execute installation
-                match backend_clone.install_file(&staging_path_for_cleanup.display().to_string()) {
-                    Ok(_) => {
-                        // Clean up staged file on success
-                        if let Err(e) = std::fs::remove_file(&staging_path_for_cleanup) {
-                            warn!(
-                                job_id = %job_id_clone,
-                                path = %staging_path_for_cleanup.display(),
-                                error = %e,
-                                "Failed to clean up staged file after successful install"
-                            );
-                        }
-                        let _ = job_manager_clone.complete_job(&job_id_clone).await;
-                        info!(job_id = %job_id_clone, "File installation completed");
-                    }
-                    Err(e) => {
-                        // Clean up staged file on failure
-                        if let Err(cleanup_err) = std::fs::remove_file(&staging_path_for_cleanup) {
-                            warn!(
-                                job_id = %job_id_clone,
-                                path = %staging_path_for_cleanup.display(),
-                                error = %cleanup_err,
-                                "Failed to clean up staged file after failed install"
-                            );
-                        }
-                        let _ = job_manager_clone
-                            .fail_job(&job_id_clone, e.to_string())
-                            .await;
-                        error!(job_id = %job_id_clone, error = %e, "File installation failed");
-                    }
-                }
-            });
-
-            let response = ApiResponse::success(JobResponseData {
-                job_id: job_id.to_string(),
-                status: "pending".to_string(),
-                operation: "file_install".to_string(),
-                packages: Some(vec![file_name_for_job]),
-                package: None,
-            });
-
-            HttpResponse::Accepted().json(response)
-        }
+        Ok(id) => id,
         Err(e) => {
             // Clean up staged file
             let _ = std::fs::remove_file(&staging_path);
@@ -467,9 +444,90 @@ pub async fn install_url(
                     retryable: true,
                 }),
             };
-            HttpResponse::InternalServerError().json(response)
+            return HttpResponse::InternalServerError().json(response);
         }
+    };
+
+    // Create lock file to prevent concurrent installs
+    let state_dir = &config.file_install.state_dir;
+    if let Err(lock_err) = create_lock_file(state_dir, &job_id.to_string(), &staging_path_str) {
+        // Clean up job and staged file
+        let _ = job_manager.fail_job(&job_id, lock_err.clone()).await;
+        let _ = std::fs::remove_file(&staging_path);
+        error!(request_id = %request_id, error = %lock_err, "Failed to create lock file");
+        let response = ApiResponse::<()> {
+            success: false,
+            request_id,
+            timestamp: Utc::now().to_rfc3339(),
+            data: None,
+            error: Some(ApiError {
+                code: "LOCK_ERROR".to_string(),
+                message: format!("Failed to create install lock: {}", lock_err),
+                details: None,
+                retryable: true,
+            }),
+        };
+        return HttpResponse::InternalServerError().json(response);
     }
+
+    // Update job to running
+    let _ = job_manager
+        .update_job(
+            &job_id,
+            JobStatus::Running,
+            Some(0),
+            Some("Staging complete, forking detached install script...".to_string()),
+        )
+        .await;
+
+    // Generate the detached install script
+    let script_content = generate_install_script(
+        &staging_path_str,
+        package_type,
+        &job_id.to_string(),
+        state_dir,
+    );
+
+    // Fork the detached install script
+    if let Err(fork_err) = fork_install_script(&script_content, state_dir) {
+        // Clean up: remove lock file, staged file, and fail the job
+        let lock_path = std::path::PathBuf::from(state_dir).join("install.lock");
+        let _ = std::fs::remove_file(&lock_path);
+        let _ = std::fs::remove_file(&staging_path);
+        let _ = job_manager.fail_job(&job_id, fork_err.clone()).await;
+
+        error!(request_id = %request_id, error = %fork_err, "Failed to fork install script");
+        let response = ApiResponse::<()> {
+            success: false,
+            request_id,
+            timestamp: Utc::now().to_rfc3339(),
+            data: None,
+            error: Some(ApiError {
+                code: "FORK_ERROR".to_string(),
+                message: format!("Failed to start installation: {}", fork_err),
+                details: None,
+                retryable: true,
+            }),
+        };
+        return HttpResponse::InternalServerError().json(response);
+    }
+
+    info!(
+        request_id = %request_id,
+        job_id = %job_id,
+        file = %safe_name,
+        "Install script forked successfully, returning 202 Accepted"
+    );
+
+    let response = ApiResponse::success(JobResponseData {
+        job_id: job_id.to_string(),
+        status: "installing".to_string(),
+        operation: "file_install".to_string(),
+        packages: Some(vec![safe_name]),
+        package: None,
+    });
+
+    HttpResponse::Accepted().json(response)
 }
 
 #[cfg(test)]
