@@ -84,8 +84,13 @@ echo \"installing:$JOB_ID\" > \"$STATUS_FILE\"\n\
 \n\
 # Stop the service if running (do NOT use systemctl - not all distros have it)\n\
 if command -v pkill >/dev/null 2>&1; then\n\
-    pkill -f \"linux-patch-api\" 2>/dev/null || true\n\
+    # Use -x (exact process name match) instead of -f (full command pattern)
+\
+    # to avoid killing this install script whose path contains 'linux-patch-api'
+    pkill -x linux-patch-api 2>/dev/null || true\n\
 else\n\
+    # killall matches by process name, not pattern - safe to use as-is
+\
     killall linux-patch-api 2>/dev/null || true\n\
 fi\n\
 # Give the process a moment to shut down gracefully\n\
