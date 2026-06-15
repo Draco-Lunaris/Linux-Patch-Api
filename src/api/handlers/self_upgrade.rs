@@ -7,9 +7,10 @@
 //!
 //! The core problem this solves: when the API installs its own package,
 //! the package's pre-remove script stops the API service, killing the
-//! in-process installation. By forking a detached shell script, the
-//! API returns 202 Accepted immediately and the script completes
-//! the installation independently.
+//! in-process installation. By forking a detached shell script that
+//! escapes the service's cgroup (via systemd-run --scope or cgroup.procs),
+//! the API returns 202 Accepted immediately and the script survives
+//! the service stop to complete the installation independently.
 
 use std::fs;
 use std::path::PathBuf;
@@ -23,12 +24,14 @@ const LOCK_STALE_THRESHOLD_SECS: u64 = 1800;
 /// Generate the shell script content for a detached package installation.
 ///
 /// The script:
-/// 1. Writes "installing" status to the status file
-/// 2. Stops the service (if running) using pkill
-/// 3. Installs the package using the appropriate package manager
-/// 4. Writes success/failure status to the status file
-/// 5. Removes the lock file
-/// 6. Attempts to start the service (safety net; post-install scripts should do this)
+/// 1. Escapes the systemd cgroup (via `systemd-run --scope` or `setsid`) so it
+///    survives when the package's pre-remove script stops the API service
+/// 2. Writes "installing" status to the status file
+/// 3. Stops the service (if running) using pkill
+/// 4. Installs the package using the appropriate package manager
+/// 5. Writes success/failure status to the status file
+/// 6. Removes the lock file
+/// 7. Attempts to start the service (safety net; post-install scripts should do this)
 ///
 /// The script is designed to work on all supported distros (Debian/Ubuntu,
 /// Fedora/RHEL/AlmaLinux, Alpine, Arch) and does NOT rely on systemctl.
@@ -70,6 +73,26 @@ pub fn generate_install_script(
 # This script is forked as a detached process by the API.\n\
 # It handles stopping the service, installing the package,\n\
 # and writing status for the API to read on next startup.\n\
+\n\
+# CRITICAL: Escape the service cgroup before doing anything else.\n\
+# When this script runs as a child of the API service, it shares the service\'s\n\
+# cgroup. When the service is stopped (by prerm script or pkill), the init\n\
+# system kills ALL processes in the cgroup - including this install script.\n\
+# We must move ourselves out of the service cgroup to survive the stop.\n\
+if [ -z \"$LPA_CGROUP_ESCAPED\" ]; then\n\
+    export LPA_CGROUP_ESCAPED=1\n\
+    if command -v systemd-run >/dev/null 2>&1; then\n\
+        # systemd-run --scope creates a new transient scope outside the service cgroup\n\
+        exec systemd-run --scope --unit=lpa-upgrade-$$ /bin/sh \"$0\" \"$@\"\n\
+    elif [ -w /sys/fs/cgroup/cgroup.procs ]; then\n\
+        # cgroups v2: move ourselves to the root cgroup to escape the service cgroup.\n\
+        # Writing our PID to the root cgroup's cgroup.procs file migrates us out\n\
+        # of any service-specific cgroup. This works on OpenRC, runit, and other\n\
+        # non-systemd init systems that use cgroups v2 for service isolation.\n\
+        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true\n\
+    fi\n\
+    # If neither method is available, proceed anyway (best-effort)\n\
+fi\n\
 \n\
 set -e\n\
 \n\
@@ -322,7 +345,10 @@ impl std::fmt::Display for InstallStatus {
 
 /// Fork a detached shell script to perform the installation.
 /// The script is written to a file in the state directory, made executable,
-/// and launched via nohup to fully detach from the API process.
+/// and launched via setsid to create a new session, fully detaching from the
+/// API's process group. The script itself also escapes the service cgroup
+/// via systemd-run --scope (systemd) or cgroup.procs migration (cgroups v2)
+/// before performing the installation.
 pub fn fork_install_script(script_content: &str, state_dir: &str) -> Result<(), String> {
     // Ensure state directory exists
     let state_path = PathBuf::from(state_dir);
@@ -349,7 +375,7 @@ pub fn fork_install_script(script_content: &str, state_dir: &str) -> Result<(), 
             .map_err(|e| format!("Failed to make install script executable: {}", e))?;
     }
 
-    // Launch the script as a detached process using nohup
+    // Launch the script as a detached process using setsid
     let script_path_str = script_path.display().to_string();
     let log_path = state_path.join("install_upgrade.log");
 
@@ -359,11 +385,13 @@ pub fn fork_install_script(script_content: &str, state_dir: &str) -> Result<(), 
         "Forking detached install script"
     );
 
-    // Use nohup to fully detach from the parent process
+    // Use setsid to create a new session, detaching from the parent's
+    // process group and cgroup. This is more robust than nohup because
+    // setsid creates a new session ID, not just ignoring SIGHUP.
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| format!("Failed to create log file {}: {}", log_path.display(), e))?;
 
-    let child = std::process::Command::new("nohup")
+    let child = std::process::Command::new("setsid")
         .arg("/bin/sh")
         .arg(&script_path_str)
         .stdout(
@@ -437,6 +465,20 @@ mod tests {
         assert!(script.contains("/var/lib/linux_patch_api/install.lock"));
         assert!(script.contains("apt-get install -y"));
         assert!(script.contains("pkill"));
+
+        // Script should contain cgroup escape logic
+        assert!(
+            script.contains("LPA_CGROUP_ESCAPED"),
+            "cgroup escape guard variable missing"
+        );
+        assert!(
+            script.contains("systemd-run --scope"),
+            "systemd-run --scope escape missing"
+        );
+        assert!(
+            script.contains("cgroup.procs"),
+            "cgroup.procs fallback escape missing"
+        );
     }
 
     #[test]
