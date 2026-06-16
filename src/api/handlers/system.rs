@@ -14,7 +14,8 @@ use uuid::Uuid;
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages::{self, PackageManagerBackend, MAX_RESTART_DELAY_SECONDS};
+use crate::packages;
+use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
 /// Returns None if path contains traversal patterns
@@ -74,26 +75,12 @@ pub struct RebootRequest {
     pub force: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-fn default_restart_delay() -> u64 {
-    5
-}
-
 /// Self-update request
 #[derive(Debug, Deserialize, Clone)]
 pub struct SelfUpdateRequest {
     /// Pin to an exact package version. None = upgrade to latest available.
     #[serde(default)]
     pub target_version: Option<String>,
-    /// Restart the service after a successful upgrade so the new binary runs.
-    #[serde(default = "default_true")]
-    pub restart: bool,
-    /// Seconds to wait before the decoupled restart fires.
-    /// Clamped to max 300 (5 minutes) in the handler.
-    #[serde(default = "default_restart_delay")]
-    pub restart_delay_seconds: u64,
 }
 
 /// Get system information
@@ -336,224 +323,6 @@ pub async fn reboot_system(
     }
 }
 
-/// Self-update the agent (async operation)
-pub async fn update_self(
-    body: web::Json<SelfUpdateRequest>,
-    backend: web::Data<Box<dyn PackageManagerBackend>>,
-    job_manager: web::Data<JobManager>,
-    _req: HttpRequest,
-) -> impl Responder {
-    let request_id = Uuid::new_v4().to_string();
-
-    // Validate target_version if present
-    if let Some(ref v) = body.target_version {
-        if let Err(e) = packages::validate_version_string(v) {
-            let response = ApiResponse::<()>::error(
-                "INVALID_VERSION",
-                &format!("Invalid target version: {}", e),
-                None,
-                false,
-            );
-            return HttpResponse::BadRequest().json(response);
-        }
-    }
-
-    // Clamp restart_delay_seconds
-    let restart_delay = body
-        .restart_delay_seconds
-        .clamp(1, MAX_RESTART_DELAY_SECONDS);
-    let restart = body.restart;
-    let target_version = body.target_version.clone();
-
-    info!(
-        request_id = %request_id,
-        target_version = ?target_version,
-        restart = restart,
-        restart_delay_seconds = restart_delay,
-        "Initiating self-update"
-    );
-
-    // Check job queue capacity
-    if !job_manager.can_accept_job().await {
-        let response = ApiResponse::<()>::error(
-            "QUEUE_FULL",
-            "Job queue is at capacity. Please retry later.",
-            None,
-            true,
-        );
-        return HttpResponse::TooManyRequests()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
-    // Create async job for self-update
-    match job_manager
-        .create_job(JobOperation::SelfUpdate, vec![])
-        .await
-    {
-        Ok(job_id) => {
-            // Spawn background task to execute the self-update
-            let backend_for_update = backend.clone();
-            let backend_for_restart = backend.clone();
-            let job_manager_clone = job_manager.clone();
-            let tv_owned = target_version.clone();
-
-            tokio::spawn(async move {
-                let job_id_clone = job_id;
-
-                // Update job to running
-                let _ = job_manager_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Starting self-update...".to_string()),
-                    )
-                    .await;
-                let _ = job_manager_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
-
-                // Execute self-update in blocking context
-                let result = tokio::task::spawn_blocking(move || {
-                    let tv_ref = tv_owned.as_deref();
-                    backend_for_update.update_self(tv_ref)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(outcome)) => {
-                        if !outcome.changed {
-                            // No change needed — persist marker with success, complete job
-                            let _ = packages::persist_self_update_marker(
-                                &outcome.previous_version,
-                                &outcome.new_version,
-                                false,
-                                "success",
-                                None,
-                            );
-                            let _ = job_manager_clone
-                                .add_job_log(&job_id_clone, "Already at target version".to_string())
-                                .await;
-                            let _ = job_manager_clone.complete_job(&job_id_clone).await;
-                        } else if restart {
-                            // Changed and restart requested — schedule restart FIRST
-                            let restart_result = tokio::task::spawn_blocking(move || {
-                                backend_for_restart.schedule_self_restart(restart_delay)
-                            })
-                            .await;
-                            match restart_result {
-                                Ok(Ok(())) => {
-                                    let _ = packages::persist_self_update_marker(
-                                        &outcome.previous_version,
-                                        &outcome.new_version,
-                                        true,
-                                        "success",
-                                        None,
-                                    );
-                                    let _ = job_manager_clone
-                                        .add_job_log(
-                                            &job_id_clone,
-                                            format!(
-                                                "Self-update applied; restart scheduled in {}s",
-                                                restart_delay
-                                            ),
-                                        )
-                                        .await;
-                                    let _ = job_manager_clone.complete_job(&job_id_clone).await;
-                                }
-                                _ => {
-                                    let err_msg = "upgrade applied but restart could not be scheduled; run 'systemctl restart linux-patch-api' manually";
-                                    let _ = packages::persist_self_update_marker(
-                                        &outcome.previous_version,
-                                        &outcome.new_version,
-                                        true,
-                                        "restart_failed",
-                                        Some(err_msg),
-                                    );
-                                    let _ = job_manager_clone
-                                        .fail_job(&job_id_clone, err_msg.to_string())
-                                        .await;
-                                }
-                            }
-                        } else {
-                            // Changed but no restart — persist marker with success, complete job
-                            let _ = packages::persist_self_update_marker(
-                                &outcome.previous_version,
-                                &outcome.new_version,
-                                true,
-                                "success",
-                                None,
-                            );
-                            let _ = job_manager_clone
-                                .add_job_log(
-                                    &job_id_clone,
-                                    "Self-update applied; new binary will activate on next restart"
-                                        .to_string(),
-                                )
-                                .await;
-                            let _ = job_manager_clone.complete_job(&job_id_clone).await;
-                        }
-                        info!(job_id = %job_id_clone, "Self-update completed successfully");
-                    }
-                    Ok(Err(e)) => {
-                        error!(job_id = %job_id_clone, error = %e, "Self-update failed");
-                        let _ = job_manager_clone
-                            .fail_job(&job_id_clone, e.to_string())
-                            .await;
-                    }
-                    Err(e) => {
-                        error!(job_id = %job_id_clone, error = %e, "Self-update task join error");
-                        let _ = job_manager_clone
-                            .fail_job(&job_id_clone, format!("Task join error: {}", e))
-                            .await;
-                    }
-                }
-            });
-
-            let response = ApiResponse::success(serde_json::json!({
-                "job_id": job_id.to_string(),
-                "status": "pending",
-                "operation": "self_update",
-                "target_version": target_version,
-                "restart": restart,
-                "restart_delay_seconds": restart_delay,
-            }));
-
-            HttpResponse::Accepted().json(response)
-        }
-        Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to create self-update job");
-            let response = ApiResponse::<()>::error(
-                "JOB_CREATE_ERROR",
-                &format!("Failed to create job: {}", e),
-                None,
-                true,
-            );
-            HttpResponse::InternalServerError().json(response)
-        }
-    }
-}
-
-/// Get self-update status from marker file
-pub async fn get_self_update_status(_req: HttpRequest) -> impl Responder {
-    match packages::read_self_update_marker() {
-        Some(data) => {
-            let response = ApiResponse::success(data);
-            HttpResponse::Ok().json(response)
-        }
-        None => {
-            let response = ApiResponse::<()>::error(
-                "NO_SELF_UPDATE_RECORD",
-                "No self-update record found",
-                None,
-                false,
-            );
-            HttpResponse::NotFound().json(response)
-        }
-    }
-}
-
 /// Get service status
 pub async fn get_service_status(
     path: web::Path<String>,
@@ -621,15 +390,134 @@ pub async fn get_service_status(
     }
 }
 
+/// Self-update the agent via detached systemd unit
+pub async fn update_self(body: web::Json<SelfUpdateRequest>, _req: HttpRequest) -> impl Responder {
+    let request_id = Uuid::new_v4().to_string();
+
+    // Validate target_version if present
+    if let Some(ref v) = body.target_version {
+        if let Err(e) = packages::validate_version_string(v) {
+            let response = ApiResponse::<()>::error(
+                "INVALID_VERSION",
+                &format!("Invalid target version: {}", e),
+                None,
+                false,
+            );
+            return HttpResponse::BadRequest().json(response);
+        }
+    }
+
+    let target_version = body.target_version.clone();
+
+    info!(
+        request_id = %request_id,
+        target_version = ?target_version,
+        "Initiating self-update"
+    );
+
+    // Write request state file for the update service to read
+    if let Err(e) = packages::write_self_update_request(target_version.as_deref()) {
+        error!(request_id = %request_id, error = %e, "Failed to write self-update request");
+        let response = ApiResponse::<()>::error(
+            "REQUEST_WRITE_ERROR",
+            &format!("Failed to write self-update request: {}", e),
+            None,
+            true,
+        );
+        return HttpResponse::InternalServerError().json(response);
+    }
+
+    // Persist pending marker
+    let _ = packages::persist_self_update_marker(
+        "unknown",
+        &target_version
+            .clone()
+            .unwrap_or_else(|| "latest".to_string()),
+        false,
+        "pending",
+        None,
+    );
+
+    // Start the update service unit (detached, own cgroup)
+    let start_result = std::process::Command::new("systemctl")
+        .args(["start", "--no-block", "linux-patch-api-update.service"])
+        .status();
+
+    match start_result {
+        Ok(st) if st.success() => {
+            info!(request_id = %request_id, "Self-update service started");
+            let response = ApiResponse::success(serde_json::json!({
+                "status": "pending",
+                "target_version": target_version,
+                "message": "Self-update initiated; agent will restart with new version",
+            }));
+            HttpResponse::Accepted().json(response)
+        }
+        Ok(st) => {
+            error!(request_id = %request_id, exit_code = st.code(), "systemctl start --no-block failed");
+            let _ = packages::persist_self_update_marker(
+                "unknown",
+                &target_version.unwrap_or_else(|| "latest".to_string()),
+                false,
+                "failed",
+                Some("Failed to start update service unit"),
+            );
+            let response = ApiResponse::<()>::error(
+                "UPDATE_SERVICE_START_ERROR",
+                "Failed to start update service unit",
+                None,
+                true,
+            );
+            HttpResponse::InternalServerError().json(response)
+        }
+        Err(e) => {
+            error!(request_id = %request_id, error = %e, "Failed to execute systemctl");
+            let _ = packages::persist_self_update_marker(
+                "unknown",
+                &target_version.unwrap_or_else(|| "latest".to_string()),
+                false,
+                "failed",
+                Some(&format!("Failed to execute systemctl: {}", e)),
+            );
+            let response = ApiResponse::<()>::error(
+                "SYSTEMCTL_ERROR",
+                &format!("Failed to execute systemctl: {}", e),
+                None,
+                true,
+            );
+            HttpResponse::InternalServerError().json(response)
+        }
+    }
+}
+
+/// Get self-update status from marker file
+pub async fn get_self_update_status(_req: HttpRequest) -> impl Responder {
+    match packages::read_self_update_marker() {
+        Some(data) => {
+            let response = ApiResponse::success(data);
+            HttpResponse::Ok().json(response)
+        }
+        None => {
+            let response = ApiResponse::<()>::error(
+                "NO_SELF_UPDATE_RECORD",
+                "No self-update record found",
+                None,
+                false,
+            );
+            HttpResponse::NotFound().json(response)
+        }
+    }
+}
+
 /// Configure routes for system endpoints
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/system")
             .route("/info", web::get().to(get_system_info))
             .route("/reboot", web::post().to(reboot_system))
+            .route("/services/{name}", web::get().to(get_service_status))
             .route("/update", web::post().to(update_self))
-            .route("/update/status", web::get().to(get_self_update_status))
-            .route("/services/{name}", web::get().to(get_service_status)),
+            .route("/update/status", web::get().to(get_self_update_status)),
     )
     .route("/health", web::get().to(health_check));
     // Note: health_check receives backend and cache_state via app_data injection
@@ -672,48 +560,5 @@ mod tests {
         assert!(json.contains("12345"));
         assert!(json.contains("fresh"));
         assert!(json.contains("last_cache_update"));
-    }
-
-    #[test]
-    fn test_self_update_request_defaults() {
-        let json = r#"{}"#;
-        let request: SelfUpdateRequest = serde_json::from_str(json).unwrap();
-        assert!(request.target_version.is_none());
-        assert!(request.restart);
-        assert_eq!(request.restart_delay_seconds, 5);
-    }
-
-    #[test]
-    fn test_self_update_request_all_fields() {
-        let json = r#"{"target_version": "1.5.0", "restart": false, "restart_delay_seconds": 30}"#;
-        let request: SelfUpdateRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(request.target_version, Some("1.5.0".to_string()));
-        assert!(!request.restart);
-        assert_eq!(request.restart_delay_seconds, 30);
-    }
-
-    #[test]
-    fn test_self_update_request_version_validation_valid() {
-        assert!(packages::validate_version_string("1.5.0").is_ok());
-        assert!(packages::validate_version_string("2:1.0-1").is_ok());
-        assert!(packages::validate_version_string("1.0~beta1").is_ok());
-    }
-
-    #[test]
-    fn test_self_update_request_version_validation_invalid() {
-        assert!(packages::validate_version_string("").is_err());
-        assert!(packages::validate_version_string("-1.0").is_err());
-        assert!(packages::validate_version_string("1.0;rm -rf").is_err());
-        assert!(packages::validate_version_string("1.0$(cmd)").is_err());
-        assert!(packages::validate_version_string("1.0/evil").is_err());
-    }
-
-    #[test]
-    fn test_self_update_request_restart_delay_clamp() {
-        // Verify clamping logic (handler does the clamp, but test the bounds)
-        let max = MAX_RESTART_DELAY_SECONDS;
-        assert_eq!(0u64.clamp(1, max), 1);
-        assert_eq!(500u64.clamp(1, max), 300);
-        assert_eq!(30u64.clamp(1, max), 30);
     }
 }

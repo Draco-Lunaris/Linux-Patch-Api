@@ -1,0 +1,8 @@
+[Unit]
+Description=Linux Patch API self-update transaction
+# No coupling to linux-patch-api.service — must survive its stop.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/linux-patch-api/self-update.sh
+# Run in its own cgroup under system.slice (default for a separate unit).

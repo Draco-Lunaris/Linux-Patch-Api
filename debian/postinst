@@ -92,8 +92,8 @@ if [ "$1" = "configure" ]; then
         # Upgrade ($2 = previous version): preserve everything
         echo "Upgrading linux-patch-api from $2 ..."
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
-        # DO NOT restart the service (self-update endpoint owns the restart)
         systemctl daemon-reload
+        systemctl start linux-patch-api.service
     fi
 fi
 
