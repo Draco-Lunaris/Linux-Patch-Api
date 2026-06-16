@@ -27,19 +27,28 @@ use tracing::{info, warn};
 /// Lock file staleness threshold in seconds (30 minutes).
 const LOCK_STALE_THRESHOLD_SECS: u64 = 1800;
 
+/// Escape a string for safe use inside single quotes in a shell script.
+/// Single quotes in shell prevent all variable expansion and command
+/// substitution. The only character that needs escaping inside single
+/// quotes is the single quote itself, which is replaced by `'''`
+/// (end quote, escaped quote, start quote).
+fn shell_escape_single(s: &str) -> String {
+    s.replace("'", "'\''")
+}
+
 /// Generate the shell script content for a detached package installation.
 ///
 /// The script:
-/// 1. Escapes the systemd cgroup (via `systemd-run --scope` or `setsid`) so it
-///    survives when the package's pre-remove script stops the API service
+/// 1. Escapes the systemd cgroup (via `systemd-run --scope` or cgroup.procs)
+///    so it survives when the package's pre-remove script stops the API service
 /// 2. Writes "installing" status to the status file
-/// 3. Downloads the package from the URL (using curl or wget)
+/// 3. Downloads the package from the URL (using curl or wget with retries)
 /// 4. Verifies the SHA-256 checksum (if provided)
-/// 5. Stops the service (if running) using pkill
+/// 5. Stops the service (if running) using pkill, waiting for exit
 /// 6. Installs the package using the appropriate package manager
 /// 7. Writes success/failure status to the status file
-/// 8. Removes the lock file
-/// 9. Attempts to start the service (safety net; post-install scripts should do this)
+/// 8. Removes the lock file and cleans up temp files
+/// 9. Attempts to start the service on success (safety net)
 ///
 /// The script is designed to work on all supported distros (Debian/Ubuntu,
 /// Fedora/RHEL/AlmaLinux, Alpine, Arch) and does NOT rely on systemctl.
@@ -54,16 +63,31 @@ pub fn generate_install_script(
     let status_file = format!("{}/install.status", state_dir);
     let lock_file = format!("{}/install.lock", state_dir);
     let package_path = format!("/tmp/{}", filename);
+    let script_file = format!("{}/install_upgrade.sh", state_dir);
+    let log_file = format!("{}/install_upgrade.log", state_dir);
 
     // Strip sha256: prefix from checksum if present, keep only the hex digest
     let checksum_hex = checksum
         .map(|c| c.strip_prefix("sha256:").unwrap_or(c))
         .unwrap_or("");
 
+    // Shell-escape all values interpolated into the script to prevent injection.
+    // Single quotes in shell prevent all variable expansion and command
+    // substitution. We only need to escape literal single quotes.
+    let e_url = shell_escape_single(download_url);
+    let e_sha = shell_escape_single(checksum_hex);
+    let e_pkg = shell_escape_single(&package_path);
+    let e_type = shell_escape_single(package_type);
+    let e_job = shell_escape_single(job_id);
+    let e_status = shell_escape_single(&status_file);
+    let e_lock = shell_escape_single(&lock_file);
+    let e_script = shell_escape_single(&script_file);
+    let e_log = shell_escape_single(&log_file);
+
     // Determine the install command based on package type
     let install_cmd = match package_type {
         "deb" => {
-            r#"DEBIAN_FRONTEND=noninteractive apt-get install -y -- "$PACKAGE_PATH""#.to_string()
+            r#"DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades -- "$PACKAGE_PATH""#.to_string()
         }
         "rpm" => r#"if command -v dnf >/dev/null 2>&1; then
         dnf install -y -- "$PACKAGE_PATH"
@@ -79,141 +103,182 @@ pub fn generate_install_script(
         }
     };
 
+    // Build the shell script using format! macro.
+    // All user-provided values are single-quoted in the script to prevent
+    // shell injection. The shell_escape_single function handles single quotes
+    // in values by replacing them with '''.
     format!(
-        "#!/bin/sh\n\
-# Self-upgrade installation script\n\
-# Job ID: {job_id}\n\
-# Download URL: {download_url}\n\
-# Package type: {package_type}\n\
-#\n\
-# This script is forked as a detached process by the API.\n\
-# It handles downloading the package, stopping the service, installing,\n\
-# and writing status for the API to read on next startup.\n\
-\n\
-# CRITICAL: Escape the service cgroup before doing anything else.\n\
-# When this script runs as a child of the API service, it shares the service's\n\
-# cgroup. When the service is stopped (by prerm script or pkill), the init\n\
-# system kills ALL processes in the cgroup - including this install script.\n\
-# We must move ourselves out of the service cgroup to survive the stop.\n\
-if [ -z \"$LPA_CGROUP_ESCAPED\" ]; then\n\
-    export LPA_CGROUP_ESCAPED=1\n\
-    if command -v systemd-run >/dev/null 2>&1; then\n\
-        # systemd-run --scope creates a new transient scope outside the service cgroup\n\
-        exec systemd-run --scope --unit=lpa-upgrade-$$ /bin/sh \"$0\" \"$@\"\n\
-    elif [ -w /sys/fs/cgroup/cgroup.procs ]; then\n\
-        # cgroups v2: move ourselves to the root cgroup to escape the service cgroup.\n\
-        # Writing our PID to the root cgroup's cgroup.procs file migrates us out\n\
-        # of any service-specific cgroup. This works on OpenRC, runit, and other\n\
-        # non-systemd init systems that use cgroups v2 for service isolation.\n\
-        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true\n\
-    fi\n\
-    # If neither method is available, proceed anyway (best-effort)\n\
-fi\n\
-\n\
-set -e\n\
-\n\
-DOWNLOAD_URL=\"{download_url}\"\n\
-EXPECTED_SHA256=\"{checksum_hex}\"\n\
-PACKAGE_PATH=\"{package_path}\"\n\
-PACKAGE_TYPE=\"{package_type}\"\n\
-JOB_ID=\"{job_id}\"\n\
-STATUS_FILE=\"{status_file}\"\n\
-LOCK_FILE=\"{lock_file}\"\n\
-\n\
-# Write initial status\n\
-echo \"installing:$JOB_ID\" > \"$STATUS_FILE\"\n\
-\n\
-# Download the package BEFORE stopping the service.\n\
-# The API must stay running during download so the script can fetch the file.\n\
-# The API is only stopped after download succeeds.\n\
-DOWNLOAD_EXIT_CODE=0\n\
-if command -v curl >/dev/null 2>&1; then\n\
-    curl -fSL -o \"$PACKAGE_PATH\" \"$DOWNLOAD_URL\" || DOWNLOAD_EXIT_CODE=$?\n\
-elif command -v wget >/dev/null 2>&1; then\n\
-    wget -O \"$PACKAGE_PATH\" \"$DOWNLOAD_URL\" || DOWNLOAD_EXIT_CODE=$?\n\
-else\n\
-    DOWNLOAD_EXIT_CODE=127\n\
-fi\n\
-\n\
-if [ \"$DOWNLOAD_EXIT_CODE\" -ne 0 ]; then\n\
-    echo \"failed:Download failed with exit code $DOWNLOAD_EXIT_CODE\" > \"$STATUS_FILE\"\n\
-    rm -f \"$PACKAGE_PATH\" 2>/dev/null || true\n\
-    rm -f \"$LOCK_FILE\"\n\
-    exit 1\n\
-fi\n\
-\n\
-# Verify checksum if provided\n\
-if [ -n \"$EXPECTED_SHA256\" ]; then\n\
-    CALCULATED=$(sha256sum \"$PACKAGE_PATH\" | awk '{{print $1}}')\n\
-    if [ \"$CALCULATED\" != \"$EXPECTED_SHA256\" ]; then\n\
-        echo \"failed:SHA-256 checksum verification failed\" > \"$STATUS_FILE\"\n\
-        rm -f \"$PACKAGE_PATH\"\n\
-        rm -f \"$LOCK_FILE\"\n\
-        exit 1\n\
-    fi\n\
-fi\n\
-\n\
-# Stop the service if running (do NOT use systemctl - not all distros have it)\n\
-if command -v pkill >/dev/null 2>&1; then\n\
-    # Use -x (exact process name match) instead of -f (full command pattern)\n\
-    # to avoid killing this install script whose path contains 'linux-patch-api'\n\
-    pkill -x linux-patch-api 2>/dev/null || true\n\
-else\n\
-    # killall matches by process name, not pattern - safe to use as-is\n\
-    killall linux-patch-api 2>/dev/null || true\n\
-fi\n\
-# Give the process a moment to shut down gracefully\n\
-sleep 2\n\
-\n\
-# Install the package\n\
-INSTALL_EXIT_CODE=0\n\
-{install_cmd} || INSTALL_EXIT_CODE=$?\n\
-\n\
-# Determine new version for status reporting\n\
-NEW_VERSION=\"\"\n\
-case \"$PACKAGE_TYPE\" in\n\
-    deb)\n\
-        NEW_VERSION=$(dpkg-query -W -f='${{Version}}' linux-patch-api 2>/dev/null || echo \"unknown\")\n\
-        ;;\n\
-    rpm)\n\
-        NEW_VERSION=$(rpm -q --qf='%{{VERSION}}-%{{RELEASE}}' linux-patch-api 2>/dev/null || echo \"unknown\")\n\
-        ;;\n\
-    apk)\n\
-        NEW_VERSION=$(apk info linux-patch-api 2>/dev/null | head -1 | sed 's/^linux-patch-api-//' || echo \"unknown\")\n\
-        ;;\n\
-    pkg)\n\
-        NEW_VERSION=$(pacman -Q linux-patch-api 2>/dev/null | awk '{{print $2}}' || echo \"unknown\")\n\
-        ;;\n\
-esac\n\
-\n\
-if [ \"$INSTALL_EXIT_CODE\" -eq 0 ]; then\n\
-    echo \"success:$NEW_VERSION\" > \"$STATUS_FILE\"\n\
-else\n\
-    echo \"failed:Install exited with code $INSTALL_EXIT_CODE\" > \"$STATUS_FILE\"\n\
-fi\n\
-\n\
-# Remove downloaded package\n\
-rm -f \"$PACKAGE_PATH\"\n\
-\n\
-# Remove lock file (allow new installs)\n\
-rm -f \"$LOCK_FILE\"\n\
-\n\
-# Attempt to start the service (safety net; post-install scripts should do this)\n\
-# Use whichever service manager is available\n\
-if command -v systemctl >/dev/null 2>&1; then\n\
-    systemctl start linux-patch-api 2>/dev/null || true\n\
-elif command -v rc-service >/dev/null 2>&1; then\n\
-    rc-service linux-patch-api start 2>/dev/null || true\n\
-elif [ -x /etc/init.d/linux-patch-api ]; then\n\
-    /etc/init.d/linux-patch-api start 2>/dev/null || true\n\
-fi\n",
+        r#"#!/bin/sh
+# Self-upgrade installation script
+# Job ID: {job_id}
+# Download URL: {download_url}
+# Package type: {package_type}
+#
+# This script is forked as a detached process by the API.
+# It handles downloading the package, stopping the service, installing,
+# and writing status for the API to read on next startup.
+
+# CRITICAL: Escape the service cgroup before doing anything else.
+# When this script runs as a child of the API service, it shares the service's
+# cgroup. When the service is stopped (by prerm script or pkill), the init
+# system kills ALL processes in the cgroup - including this install script.
+# We must move ourselves out of the service cgroup to survive the stop.
+if [ -z "$LPA_CGROUP_ESCAPED" ]; then
+    export LPA_CGROUP_ESCAPED=1
+    if command -v systemd-run >/dev/null 2>&1; then
+        # systemd-run --scope creates a new transient scope outside the service cgroup.
+        # If exec fails (e.g., systemd not actually running), fall through to cgroup.procs.
+        exec systemd-run --scope --unit=lpa-upgrade-$$ /bin/sh "$0" "$@"
+    fi
+    # Try cgroup.procs fallback regardless of whether systemd-run was available
+    # (it might exist as a binary but not be functional, e.g. in containers)
+    if [ -w /sys/fs/cgroup/cgroup.procs ]; then
+        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true
+    fi
+    # If neither method is available, proceed anyway (best-effort)
+fi
+
+set -e
+
+DOWNLOAD_URL='{e_url}'
+EXPECTED_SHA256='{e_sha}'
+PACKAGE_PATH='{e_pkg}'
+PACKAGE_TYPE='{e_type}'
+JOB_ID='{e_job}'
+STATUS_FILE='{e_status}'
+LOCK_FILE='{e_lock}'
+SCRIPT_FILE='{e_script}'
+LOG_FILE='{e_log}'
+
+# Write initial status
+echo "installing:$JOB_ID" > "$STATUS_FILE"
+
+# Trap handler: clean up on unexpected exits (set -e can cause silent exits)
+cleanup() {{
+    # If status file still shows "installing", the script exited unexpectedly
+    if [ -f "$STATUS_FILE" ] && grep -q "^installing:" "$STATUS_FILE" 2>/dev/null; then
+        echo "failed:unexpected script exit" > "$STATUS_FILE"
+    fi
+    rm -f "$PACKAGE_PATH" 2>/dev/null || true
+    rm -f "$LOCK_FILE" 2>/dev/null || true
+}}
+trap cleanup EXIT
+
+# Download the package BEFORE stopping the service.
+# The API must stay running during download so the script can fetch the file.
+# The API is only stopped after download succeeds.
+DOWNLOAD_EXIT_CODE=0
+if command -v curl >/dev/null 2>&1; then
+    curl -fSL --retry 3 --retry-delay 5 -o "$PACKAGE_PATH" "$DOWNLOAD_URL" || DOWNLOAD_EXIT_CODE=$?
+elif command -v wget >/dev/null 2>&1; then
+    wget --tries 3 -O "$PACKAGE_PATH" "$DOWNLOAD_URL" || DOWNLOAD_EXIT_CODE=$?
+else
+    echo "failed:Neither curl nor wget available for download" > "$STATUS_FILE"
+    rm -f "$LOCK_FILE"
+    exit 1
+fi
+
+if [ "$DOWNLOAD_EXIT_CODE" -ne 0 ]; then
+    echo "failed:Download failed with exit code $DOWNLOAD_EXIT_CODE" > "$STATUS_FILE"
+    rm -f "$PACKAGE_PATH" 2>/dev/null || true
+    rm -f "$LOCK_FILE"
+    exit 1
+fi
+
+# Verify checksum if provided
+if [ -n "$EXPECTED_SHA256" ]; then
+    CALCULATED=$(sha256sum "$PACKAGE_PATH" | awk '{{print $1}}')
+    if [ "$CALCULATED" != "$EXPECTED_SHA256" ]; then
+        echo "failed:SHA-256 checksum verification failed (expected $EXPECTED_SHA256, got $CALCULATED)" > "$STATUS_FILE"
+        rm -f "$PACKAGE_PATH"
+        rm -f "$LOCK_FILE"
+        exit 1
+    fi
+fi
+
+# Stop the service if running (do NOT use systemctl - not all distros have it)
+if command -v pkill >/dev/null 2>&1; then
+    # Use -x (exact process name match) instead of -f (full command pattern)
+    # to avoid killing this install script whose path contains 'linux-patch-api'
+    pkill -x linux-patch-api 2>/dev/null || true
+else
+    # killall matches by process name, not pattern - safe to use as-is
+    killall linux-patch-api 2>/dev/null || true
+fi
+# Wait for the process to actually exit (up to 30 seconds)
+WAIT_COUNT=0
+while [ "$WAIT_COUNT" -lt 15 ] && pgrep -x linux-patch-api >/dev/null 2>&1; do
+    sleep 2
+    WAIT_COUNT=$((WAIT_COUNT + 1))
+done
+# If still running after 30s, force kill
+if pgrep -x linux-patch-api >/dev/null 2>&1; then
+    pkill -9 -x linux-patch-api 2>/dev/null || true
+    sleep 1
+fi
+
+# Install the package
+INSTALL_EXIT_CODE=0
+{install_cmd} || INSTALL_EXIT_CODE=$?
+
+# Determine new version for status reporting
+NEW_VERSION=""
+case "$PACKAGE_TYPE" in
+    deb)
+        NEW_VERSION=$(dpkg-query -W -f='${{Version}}' linux-patch-api 2>/dev/null || echo "unknown")
+        ;;
+    rpm)
+        NEW_VERSION=$(rpm -q --qf='%{{VERSION}}-%{{RELEASE}}' linux-patch-api 2>/dev/null || echo "unknown")
+        ;;
+    apk)
+        NEW_VERSION=$(apk info linux-patch-api 2>/dev/null | head -1 | sed 's/^linux-patch-api-//' || echo "unknown")
+        ;;
+    pkg)
+        NEW_VERSION=$(pacman -Q linux-patch-api 2>/dev/null | awk '{{print $2}}' || echo "unknown")
+        ;;
+esac
+
+if [ "$INSTALL_EXIT_CODE" -eq 0 ]; then
+    echo "success:$NEW_VERSION" > "$STATUS_FILE"
+else
+    echo "failed:Install exited with code $INSTALL_EXIT_CODE" > "$STATUS_FILE"
+fi
+
+# Remove downloaded package
+rm -f "$PACKAGE_PATH"
+
+# Remove lock file (allow new installs)
+rm -f "$LOCK_FILE"
+
+# Only attempt service restart on successful install
+if [ "$INSTALL_EXIT_CODE" -eq 0 ]; then
+    # Attempt to start the service (safety net; post-install scripts should do this)
+    # Use whichever service manager is available
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl start linux-patch-api 2>/dev/null || true
+    elif command -v rc-service >/dev/null 2>&1; then
+        rc-service linux-patch-api start 2>/dev/null || true
+    elif [ -x /etc/init.d/linux-patch-api ]; then
+        /etc/init.d/linux-patch-api start 2>/dev/null || true
+    fi
+fi
+
+# Self-cleanup: remove the install script and log file
+rm -f "$SCRIPT_FILE" 2>/dev/null || true
+rm -f "$LOG_FILE" 2>/dev/null || true
+"#,
         job_id = job_id,
         download_url = download_url,
         package_type = package_type,
-        checksum_hex = checksum_hex,
-        package_path = package_path,
-        status_file = status_file,
-        lock_file = lock_file,
+        e_url = e_url,
+        e_sha = e_sha,
+        e_pkg = e_pkg,
+        e_type = e_type,
+        e_job = e_job,
+        e_status = e_status,
+        e_lock = e_lock,
+        e_script = e_script,
+        e_log = e_log,
         install_cmd = install_cmd,
     )
 }
@@ -461,6 +526,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_shell_escape_single() {
+        // No special characters
+        assert_eq!(shell_escape_single("hello"), "hello");
+        // Single quote needs escaping
+        assert_eq!(shell_escape_single("it's"), "it'\''s");
+        // Multiple single quotes
+        assert_eq!(shell_escape_single("a'b'c"), "a'\''b'\''c");
+        // Empty string
+        assert_eq!(shell_escape_single(""), "");
+        // String with dollar and backtick (safe inside single quotes)
+        assert_eq!(shell_escape_single("$HOME"), "$HOME");
+        assert_eq!(shell_escape_single("`whoami`"), "`whoami`");
+    }
+
+    #[test]
     fn test_detect_package_type_deb() {
         assert_eq!(detect_package_type("package.deb"), Some("deb"));
         assert_eq!(detect_package_type("package.DEB"), Some("deb"));
@@ -515,20 +595,27 @@ mod tests {
         assert!(script.contains("test-job-123"));
         assert!(script.contains("/var/lib/linux_patch_api/install.status"));
         assert!(script.contains("/var/lib/linux_patch_api/install.lock"));
-        assert!(script.contains("apt-get install -y"));
-        assert!(script.contains("pkill"));
+        assert!(script.contains("apt-get install -y --allow-downgrades"));
+        assert!(script.contains("pkill -x"));
 
-        // Script should contain download step
+        // Script should contain download step with retries
         assert!(
-            script.contains("curl -fSL"),
-            "curl download command missing"
+            script.contains("curl -fSL --retry 3 --retry-delay 5"),
+            "curl download with retries missing"
         );
-        assert!(script.contains("wget -O"), "wget download command missing");
+        assert!(
+            script.contains("wget --tries 3"),
+            "wget download with retries missing"
+        );
 
-        // Script should contain checksum verification
+        // Script should contain checksum verification with detailed error
         assert!(
             script.contains("sha256sum"),
             "sha256sum verification missing"
+        );
+        assert!(
+            script.contains("checksum verification failed (expected"),
+            "checksum error should include expected vs actual"
         );
 
         // Script should contain cgroup escape logic
@@ -545,16 +632,58 @@ mod tests {
             "cgroup.procs fallback escape missing"
         );
 
+        // Cgroup fallback should be a separate if, not elif
+        let cgroup_section =
+            &script[script.find("LPA_CGROUP_ESCAPED").unwrap()..script.find("set -e").unwrap()];
+        assert!(
+            !cgroup_section.contains("elif"),
+            "cgroup escape should use separate if, not elif"
+        );
+
+        // Script should contain EXIT trap for cleanup on unexpected exits
+        assert!(
+            script.contains("trap cleanup EXIT"),
+            "EXIT trap handler missing"
+        );
+
         // Download should come BEFORE pkill
         let download_pos = script
             .find("curl -fSL")
-            .or_else(|| script.find("wget -O"))
+            .or_else(|| script.find("wget --tries"))
             .unwrap();
         let pkill_pos = script.find("pkill -x").unwrap();
         assert!(
             download_pos < pkill_pos,
             "Download step should come before pkill step"
         );
+
+        // Script should contain service stop wait loop
+        assert!(
+            script.contains("pgrep -x linux-patch-api"),
+            "Process wait loop missing"
+        );
+
+        // Script should contain self-cleanup
+        assert!(
+            script.contains(r#"rm -f "$SCRIPT_FILE""#),
+            "Self-cleanup of script file missing"
+        );
+
+        // Script should only start service on success
+        assert!(
+            script.contains(r#"if [ "$INSTALL_EXIT_CODE" -eq 0 ]; then"#),
+            "Conditional service start on success missing"
+        );
+
+        // Values should be single-quoted (shell injection prevention)
+        assert!(script.contains("DOWNLOAD_URL='https://example.com/package.deb'"));
+
+        // Script should contain SCRIPT_FILE and LOG_FILE variables
+        assert!(
+            script.contains("SCRIPT_FILE='"),
+            "SCRIPT_FILE variable missing"
+        );
+        assert!(script.contains("LOG_FILE='"), "LOG_FILE variable missing");
     }
 
     #[test]
@@ -572,12 +701,12 @@ mod tests {
         assert!(script.contains("https://example.com/package.rpm"));
         assert!(script.contains("/tmp/package.rpm"));
 
-        // Script should still have download step
-        assert!(script.contains("curl -fSL"));
-        assert!(script.contains("wget -O"));
+        // Script should still have download step with retries
+        assert!(script.contains("curl -fSL --retry 3 --retry-delay 5"));
+        assert!(script.contains("wget --tries 3"));
 
         // Script should have empty checksum that skips verification
-        assert!(script.contains("EXPECTED_SHA256=\"\""));
+        assert!(script.contains("EXPECTED_SHA256=''"));
 
         // rpm install command
         assert!(script.contains("dnf install -y"));
@@ -613,6 +742,22 @@ mod tests {
         // sha256: prefix should be stripped
         assert!(script.contains("deadbeef"));
         assert!(!script.contains("sha256:deadbeef"));
+    }
+
+    #[test]
+    fn test_generate_install_script_shell_injection_prevention() {
+        // Test that shell metacharacters in URL are safely escaped
+        let script = generate_install_script(
+            "https://example.com/pkg$(whoami).deb",
+            Some("abc123"),
+            "package.deb",
+            "deb",
+            "test-job-inject",
+            "/var/lib/linux_patch_api",
+        );
+
+        // The URL should be inside single quotes, preventing command substitution
+        assert!(script.contains("DOWNLOAD_URL='https://example.com/pkg$(whoami).deb'"));
     }
 
     #[test]

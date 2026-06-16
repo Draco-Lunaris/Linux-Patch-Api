@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "linux-patch-api"
-version = "1.5.0-beta.10"
+version = "1.5.0-beta.11"
 dependencies = [
  "actix",
  "actix-governor",
@@ -2103,6 +2103,7 @@ dependencies = [
  "hex",
  "if-addrs",
  "notify",
+ "percent-encoding",
  "pidlock",
  "rand 0.8.6",
  "rcgen",
