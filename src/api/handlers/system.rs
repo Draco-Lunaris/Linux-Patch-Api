@@ -359,7 +359,9 @@ pub async fn update_self(
     }
 
     // Clamp restart_delay_seconds
-    let restart_delay = body.restart_delay_seconds.clamp(1, MAX_RESTART_DELAY_SECONDS);
+    let restart_delay = body
+        .restart_delay_seconds
+        .clamp(1, MAX_RESTART_DELAY_SECONDS);
     let restart = body.restart;
     let target_version = body.target_version.clone();
 
