@@ -1,88 +1,100 @@
 #!/bin/bash
 # postinst script for linux-patch-api
 # Created by package build system
+#
+# Upgrade-aware: on upgrade ($2 is non-empty), we skip CRL/cert/config operations
+# and do NOT restart the service (the self-update endpoint owns the restart).
 
 set -e
 
 # Configure with debhelper
 if [ "$1" = "configure" ]; then
-    echo "Configuring linux-patch-api..."
-    
-    # Copy example configs if they don't exist
-    if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
-        echo "Creating default config.yaml..."
-        cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
-        chmod 640 /etc/linux_patch_api/config.yaml
-        chown root:root /etc/linux_patch_api/config.yaml
-    fi
-    
-    if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
-        echo "Creating default whitelist.yaml..."
-        cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
-        chmod 640 /etc/linux_patch_api/whitelist.yaml
-        chown root:root /etc/linux_patch_api/whitelist.yaml
-    fi
-    
-    # Reload systemd daemon to pick up new service file
-    systemctl daemon-reload
-    
-    # Enable the service (but don't start automatically - admin should configure first)
-    systemctl enable linux-patch-api.service
-    
-    # Check for TLS certificates and enrollment URL
-    CERT_DIR="/etc/linux_patch_api/certs"
-    CA_CERT="$CERT_DIR/ca.pem"
-    SERVER_CERT="$CERT_DIR/server.pem"
-    SERVER_KEY="$CERT_DIR/server.key.pem"
-    CONFIG_FILE="/etc/linux_patch_api/config.yaml"
-    
-    CERTS_MISSING=false
-    if [ ! -f "$CA_CERT" ] || [ ! -f "$SERVER_CERT" ] || [ ! -f "$SERVER_KEY" ]; then
-        CERTS_MISSING=true
-    fi
-    
-    if [ "$CERTS_MISSING" = true ]; then
-        echo ""
-        echo "⚠ TLS certificates are missing. The service will not start without them."
-        echo ""
+    if [ -z "$2" ]; then
+        # Fresh install: full setup
+        echo "Configuring linux-patch-api..."
         
-        # Check if enrollment.manager_url is configured
-        if [ -f "$CONFIG_FILE" ]; then
-            # Check for manager_url in config (handles both old String format and new Option format)
-            MANAGER_URL=$(grep -E '^\s*manager_url:' "$CONFIG_FILE" 2>/dev/null | sed 's/^\s*manager_url:\s*//' | tr -d '"' | tr -d "'" | xargs)
-            if [ -n "$MANAGER_URL" ] && [ "$MANAGER_URL" != "" ]; then
-                echo "✓ Auto-enrollment is configured (manager_url: $MANAGER_URL)"
-                echo "  Auto-enrollment will run on first service start."
-                echo "  The service will automatically request and provision certificates."
+        # Copy example configs if they don't exist
+        if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
+            echo "Creating default config.yaml..."
+            cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
+            chmod 640 /etc/linux_patch_api/config.yaml
+            chown root:root /etc/linux_patch_api/config.yaml
+        fi
+        
+        if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
+            echo "Creating default whitelist.yaml..."
+            cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
+            chmod 640 /etc/linux_patch_api/whitelist.yaml
+            chown root:root /etc/linux_patch_api/whitelist.yaml
+        fi
+        
+        # Reload systemd daemon to pick up new service file
+        systemctl daemon-reload
+        
+        # Enable the service (but don't start automatically - admin should configure first)
+        systemctl enable linux-patch-api.service
+        
+        # Check for TLS certificates and enrollment URL
+        CERT_DIR="/etc/linux_patch_api/certs"
+        CA_CERT="$CERT_DIR/ca.pem"
+        SERVER_CERT="$CERT_DIR/server.pem"
+        SERVER_KEY="$CERT_DIR/server.key.pem"
+        CONFIG_FILE="/etc/linux_patch_api/config.yaml"
+        
+        CERTS_MISSING=false
+        if [ ! -f "$CA_CERT" ] || [ ! -f "$SERVER_CERT" ] || [ ! -f "$SERVER_KEY" ]; then
+            CERTS_MISSING=true
+        fi
+        
+        if [ "$CERTS_MISSING" = true ]; then
+            echo ""
+            echo "⚠ TLS certificates are missing. The service will not start without them."
+            echo ""
+            
+            # Check if enrollment.manager_url is configured
+            if [ -f "$CONFIG_FILE" ]; then
+                # Check for manager_url in config (handles both old String format and new Option format)
+                MANAGER_URL=$(grep -E '^\s*manager_url:' "$CONFIG_FILE" 2>/dev/null | sed 's/^\s*manager_url:\s*//' | tr -d '"' | tr -d "'" | xargs)
+                if [ -n "$MANAGER_URL" ] && [ "$MANAGER_URL" != "" ]; then
+                    echo "✓ Auto-enrollment is configured (manager_url: $MANAGER_URL)"
+                    echo "  Auto-enrollment will run on first service start."
+                    echo "  The service will automatically request and provision certificates."
+                else
+                    echo "⚠ No enrollment.manager_url found in config.yaml."
+                    echo ""
+                    echo "To enable automatic certificate enrollment, add the manager URL:"
+                    echo "  1. Edit /etc/linux_patch_api/config.yaml"
+                    echo "  2. Add enrollment.manager_url: https://<your-manager-url>"
+                    echo "  3. Start the service: systemctl start linux-patch-api"
+                    echo ""
+                    echo "Or enroll manually:"
+                    echo "  linux-patch-api --enroll https://<your-manager-url>"
+                    echo ""
+                    echo "Or place certificates manually:"
+                    echo "  - CA certificate: $CA_CERT"
+                    echo "  - Server certificate: $SERVER_CERT"
+                    echo "  - Server key: $SERVER_KEY"
+                fi
             else
-                echo "⚠ No enrollment.manager_url found in config.yaml."
-                echo ""
-                echo "To enable automatic certificate enrollment, add the manager URL:"
-                echo "  1. Edit /etc/linux_patch_api/config.yaml"
-                echo "  2. Add enrollment.manager_url: https://<your-manager-url>"
-                echo "  3. Start the service: systemctl start linux-patch-api"
-                echo ""
-                echo "Or enroll manually:"
-                echo "  linux-patch-api --enroll https://<your-manager-url>"
-                echo ""
-                echo "Or place certificates manually:"
-                echo "  - CA certificate: $CA_CERT"
-                echo "  - Server certificate: $SERVER_CERT"
-                echo "  - Server key: $SERVER_KEY"
+                echo "⚠ Config file not found at $CONFIG_FILE"
+                echo "  Please configure the service before starting."
             fi
         else
-            echo "⚠ Config file not found at $CONFIG_FILE"
-            echo "  Please configure the service before starting."
+            echo ""
+            echo "✓ TLS certificates found. The service is ready to start."
+            echo "  Start the service: systemctl start linux-patch-api"
         fi
-    else
+        
         echo ""
-        echo "✓ TLS certificates found. The service is ready to start."
-        echo "  Start the service: systemctl start linux-patch-api"
+        echo "linux-patch-api installed successfully!"
+        echo ""
+    else
+        # Upgrade ($2 = previous version): preserve everything
+        echo "Upgrading linux-patch-api from $2 ..."
+        # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
+        # DO NOT restart the service (self-update endpoint owns the restart)
+        systemctl daemon-reload
     fi
-    
-    echo ""
-    echo "linux-patch-api installed successfully!"
-    echo ""
 fi
 
 # Handle upgrade

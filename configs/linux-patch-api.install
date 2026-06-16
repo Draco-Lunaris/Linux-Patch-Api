@@ -49,7 +49,10 @@ post_install() {
 }
 
 post_upgrade() {
-    # Reload systemd daemon on upgrade
+    # Upgrade: preserve everything
+    # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
+    # DO NOT restart the service (self-update endpoint owns the restart)
+    echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
 }
 
