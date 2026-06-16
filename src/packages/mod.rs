@@ -15,6 +15,11 @@ use tracing::info;
 /// Maximum allowed length for package names and version strings
 pub const MAX_NAME_LENGTH: usize = 256;
 
+pub const SELF_PACKAGE_NAME: &str = env!("CARGO_PKG_NAME"); // "linux-patch-api"
+pub const SELF_SERVICE_NAME: &str = "linux-patch-api";
+pub const MAX_RESTART_DELAY_SECONDS: u64 = 300;
+pub const SELF_UPDATE_MARKER_PATH: &str = "/var/lib/linux_patch_api/last_self_update.json";
+
 /// Validate a package name against a strict allowlist pattern.
 /// Prevents argument injection by blocking shell metacharacters,
 /// path separators, whitespace, and leading hyphens.
@@ -187,6 +192,25 @@ pub struct ServiceStatus {
     pub healthy: bool,
 }
 
+/// Self-update outcome
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfUpdateOutcome {
+    pub previous_version: String,
+    pub new_version: String,
+    pub changed: bool,
+}
+
+/// Self-update status data (GET endpoint response)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfUpdateStatusData {
+    pub previous_version: String,
+    pub new_version: String,
+    pub changed: bool,
+    pub status: String,   // "success" | "restart_pending" | "restart_failed"
+    pub error: Option<String>,
+    pub at: String,       // RFC3339
+}
+
 /// Package manager backend trait
 pub trait PackageManagerBackend: Send + Sync {
     fn list_packages(&self, filter: Option<&str>) -> Result<Vec<Package>>;
@@ -205,6 +229,10 @@ pub trait PackageManagerBackend: Send + Sync {
 
     /// Get the last cache update timestamp
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>>;
+
+    fn update_self(&self, target_version: Option<&str>) -> Result<SelfUpdateOutcome>;
+    fn schedule_self_restart(&self, delay_seconds: u64) -> Result<()>;
+    fn installed_version(&self, pkg: &str) -> Option<String>;
 }
 
 /// Package specification for installation
@@ -662,6 +690,47 @@ impl PackageManagerBackend for AptBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn update_self(&self, target_version: Option<&str>) -> Result<SelfUpdateOutcome> {
+        // Refresh index; log warning on failure but don't silently discard
+        if let Err(e) = cache::run_command_with_timeout("apt-get", &["update"]) {
+            tracing::warn!("apt-get update failed before self-update: {}", e);
+        }
+
+        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if let Some(v) = target_version {
+            tracing::warn!("pinned version {} may be older than installed", v);
+            self.run_apt(&["install", "-y", "--allow-downgrades", "--", &format!("{}={}", SELF_PACKAGE_NAME, v)])?;
+        } else {
+            self.run_apt(&["install", "-y", "--only-upgrade", "--", SELF_PACKAGE_NAME])?;
+        }
+
+        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Ok(SelfUpdateOutcome {
+            previous_version,
+            new_version,
+            changed: previous_version != new_version,
+        })
+    }
+
+    fn schedule_self_restart(&self, delay_seconds: u64) -> Result<()> {
+        schedule_service_restart(SELF_SERVICE_NAME, delay_seconds)
+    }
+
+    fn installed_version(&self, pkg: &str) -> Option<String> {
+        Command::new("dpkg-query")
+            .args(["-W", &format!("-f=${{Version}}"), "--", pkg])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// Query systemd service status via systemctl
@@ -812,6 +881,49 @@ fn get_openrc_service_status(name: &str) -> Result<Option<ServiceStatus>> {
         main_pid: None,
         healthy,
     }))
+}
+
+fn schedule_service_restart(service: &str, delay_seconds: u64) -> Result<()> {
+    let delay = std::cmp::max(1, delay_seconds);
+    let unit = format!("{}.service", service);
+    if std::path::Path::new("/run/systemd/system").exists() {
+        let st = Command::new("systemd-run")
+            .args(["--on-active", &format!("{}s", delay),
+                   "--unit", &format!("{}-selfupdate-restart", service),
+                   "--collect", "systemctl", "restart", &unit])
+            .status().context("systemd-run failed to schedule restart")?;
+        if !st.success() { return Err(anyhow::anyhow!("systemd-run non-zero exit")); }
+    } else if std::path::Path::new("/sbin/openrc").exists() {
+        Command::new("setsid")
+            .args(["sh", "-c", &format!("sleep {}; rc-service {} restart", delay, service)])
+            .spawn().context("failed to schedule OpenRC restart")?;
+    } else {
+        return Err(anyhow::anyhow!("no supported init system for self-restart"));
+    }
+    Ok(())
+}
+
+fn persist_self_update_marker(previous: &str, new: &str, changed: bool, status: &str, error: Option<&str>) -> Result<()> {
+    let marker = SelfUpdateStatusData {
+        previous_version: previous.to_string(),
+        new_version: new.to_string(),
+        changed,
+        status: status.to_string(),
+        error: error.map(String::from),
+        at: chrono::Utc::now().to_rfc3339(),
+    };
+    let json = serde_json::to_string_pretty(&marker)?;
+    let path = std::path::Path::new(SELF_UPDATE_MARKER_PATH);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+pub fn read_self_update_marker() -> Option<SelfUpdateStatusData> {
+    let content = std::fs::read_to_string(SELF_UPDATE_MARKER_PATH).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 impl Default for AptBackend {
@@ -1337,6 +1449,46 @@ impl PackageManagerBackend for ApkBackend {
 
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
+    }
+
+    fn update_self(&self, target_version: Option<&str>) -> Result<SelfUpdateOutcome> {
+        // Refresh index; log warning on failure but don't silently discard
+        if let Err(e) = cache::run_command_with_timeout("apk", &["update"]) {
+            tracing::warn!("apk update failed before self-update: {}", e);
+        }
+
+        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if let Some(v) = target_version {
+            self.run_apk(&["add", "--", &format!("{}={}", SELF_PACKAGE_NAME, v)])?;
+        } else {
+            self.run_apk(&["upgrade", "--", SELF_PACKAGE_NAME])?;
+        }
+
+        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Ok(SelfUpdateOutcome {
+            previous_version,
+            new_version,
+            changed: previous_version != new_version,
+        })
+    }
+
+    fn schedule_self_restart(&self, delay_seconds: u64) -> Result<()> {
+        schedule_service_restart(SELF_SERVICE_NAME, delay_seconds)
+    }
+
+    fn installed_version(&self, pkg: &str) -> Option<String> {
+        Command::new("apk")
+            .args(["version", "--", pkg])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -1915,6 +2067,47 @@ impl PackageManagerBackend for DnfBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn update_self(&self, target_version: Option<&str>) -> Result<SelfUpdateOutcome> {
+        // Refresh index; log warning on failure but don't silently discard
+        if let Err(e) = cache::run_command_with_timeout("dnf", &["check-update", "--refresh"]) {
+            tracing::warn!("dnf check-update failed before self-update: {}", e);
+        }
+
+        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if let Some(v) = target_version {
+            tracing::warn!("pinned version {} may be older than installed", v);
+            self.run_dnf(&["install", "-y", "--", &format!("{}-{}", SELF_PACKAGE_NAME, v)])?;
+        } else {
+            self.run_dnf(&["upgrade", "-y", "--", SELF_PACKAGE_NAME])?;
+        }
+
+        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Ok(SelfUpdateOutcome {
+            previous_version,
+            new_version,
+            changed: previous_version != new_version,
+        })
+    }
+
+    fn schedule_self_restart(&self, delay_seconds: u64) -> Result<()> {
+        schedule_service_restart(SELF_SERVICE_NAME, delay_seconds)
+    }
+
+    fn installed_version(&self, pkg: &str) -> Option<String> {
+        Command::new("rpm")
+            .args(["-q", "--qf", "%{VERSION}-%{RELEASE}", "--", pkg])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 impl Default for DnfBackend {
@@ -2461,6 +2654,47 @@ impl PackageManagerBackend for YumBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn update_self(&self, target_version: Option<&str>) -> Result<SelfUpdateOutcome> {
+        // Refresh index; log warning on failure but don't silently discard
+        if let Err(e) = cache::run_command_with_timeout("yum", &["makecache"]) {
+            tracing::warn!("yum makecache failed before self-update: {}", e);
+        }
+
+        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if let Some(v) = target_version {
+            tracing::warn!("pinned version {} may be older than installed", v);
+            self.run_yum(&["install", "-y", "--", &format!("{}-{}", SELF_PACKAGE_NAME, v)])?;
+        } else {
+            self.run_yum(&["update", "-y", "--", SELF_PACKAGE_NAME])?;
+        }
+
+        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Ok(SelfUpdateOutcome {
+            previous_version,
+            new_version,
+            changed: previous_version != new_version,
+        })
+    }
+
+    fn schedule_self_restart(&self, delay_seconds: u64) -> Result<()> {
+        schedule_service_restart(SELF_SERVICE_NAME, delay_seconds)
+    }
+
+    fn installed_version(&self, pkg: &str) -> Option<String> {
+        Command::new("rpm")
+            .args(["-q", "--qf", "%{VERSION}-%{RELEASE}", "--", pkg])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 impl Default for YumBackend {
@@ -2909,6 +3143,54 @@ impl PackageManagerBackend for PacmanBackend {
 
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
+    }
+
+    fn update_self(&self, target_version: Option<&str>) -> Result<SelfUpdateOutcome> {
+        // Refresh index; log warning on failure but don't silently discard
+        if let Err(e) = cache::run_command_with_timeout("pacman", &["-Sy"]) {
+            tracing::warn!("pacman -Sy failed before self-update: {}", e);
+        }
+
+        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Pacman has no native version pin; upgrade to latest regardless
+        if target_version.is_some() {
+            tracing::warn!("pacman does not support version pinning; upgrading to latest");
+        }
+        self.run_pacman(&["-S", "--noconfirm", "--", SELF_PACKAGE_NAME])?;
+
+        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Ok(SelfUpdateOutcome {
+            previous_version,
+            new_version,
+            changed: previous_version != new_version,
+        })
+    }
+
+    fn schedule_self_restart(&self, delay_seconds: u64) -> Result<()> {
+        schedule_service_restart(SELF_SERVICE_NAME, delay_seconds)
+    }
+
+    fn installed_version(&self, pkg: &str) -> Option<String> {
+        Command::new("pacman")
+            .args(["-Q", "--", pkg])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .and_then(|s| {
+                // pacman -Q output format: "name version"
+                let parts: Vec<&str> = s.splitn(2, char::is_whitespace).collect();
+                if parts.len() >= 2 {
+                    Some(parts[1].to_string())
+                } else {
+                    None
+                }
+            })
     }
 }
 
