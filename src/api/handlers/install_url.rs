@@ -42,23 +42,32 @@ pub struct InstallUrlRequest {
 }
 
 /// Extract filename from a URL path.
-/// Returns the last path segment, percent-decoded.
+/// Returns the last path segment, percent-decoded and sanitized.
+/// Rejects filenames containing shell metacharacters or other dangerous characters
+/// as a defense-in-depth measure (the install script also single-quotes all values).
 fn filename_from_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
-    let path = parsed.path();
-    let filename = path.rsplit('/').next()?;
+    let filename = parsed.path_segments()?.next_back()?;
     if filename.is_empty() {
         return None;
     }
-    // Simple percent-decoding for common cases
-    let decoded = filename
-        .replace("%20", " ")
-        .replace("%28", "(")
-        .replace("%29", ")")
-        .replace("%5B", "[")
-        .replace("%5D", "]")
-        .replace("%2B", "+");
-    Some(decoded)
+    // Fully percent-decode the filename so that encoded dangerous characters
+    // (e.g. %60 for backtick, %22 for double quote) are caught by the
+    // DANGEROUS_CHARS check below.
+    let decoded = percent_encoding::percent_decode_str(filename)
+        .decode_utf8()
+        .ok()?;
+    // Reject filenames containing shell metacharacters or dangerous characters.
+    // This is defense-in-depth: the install script single-quotes all values,
+    // but we reject obviously dangerous filenames at the API level too.
+    const DANGEROUS_CHARS: &[char] = &[
+        ';', '|', '&', '$', '`', '(', ')', '<', '>', ' ', '\t', '\n', '\r', '\\', '\'', '"', '#',
+        '!', '*', '?', '{', '}', '[', ']', '~',
+    ];
+    if decoded.contains(DANGEROUS_CHARS) {
+        return None;
+    }
+    Some(decoded.into_owned())
 }
 
 /// Install a package from a URL (detached process for self-upgrade safety).
@@ -373,5 +382,34 @@ mod tests {
     #[test]
     fn test_filename_from_url_trailing_slash() {
         assert_eq!(filename_from_url("https://example.com/path/"), None);
+    }
+
+    #[test]
+    fn test_filename_from_url_dangerous_chars() {
+        // Shell metacharacters should be rejected
+        assert_eq!(
+            filename_from_url("https://example.com/pkg;whoami.deb"),
+            None
+        );
+        assert_eq!(filename_from_url("https://example.com/pkg$(cmd).deb"), None);
+        assert_eq!(filename_from_url("https://example.com/pkg`cmd`.deb"), None);
+        assert_eq!(filename_from_url("https://example.com/pkg|cmd.deb"), None);
+        assert_eq!(filename_from_url("https://example.com/pkg&cmd.deb"), None);
+        assert_eq!(filename_from_url("https://example.com/pkg file.deb"), None);
+        assert_eq!(filename_from_url("https://example.com/pkg'file.deb"), None);
+        assert_eq!(filename_from_url("https://example.com/pkg\"file.deb"), None);
+    }
+
+    #[test]
+    fn test_filename_from_url_safe_chars() {
+        // Hyphens, underscores, dots, and alphanumerics should be allowed
+        assert_eq!(
+            filename_from_url("https://example.com/linux-patch-api_1.5.0_amd64.deb"),
+            Some("linux-patch-api_1.5.0_amd64.deb".to_string())
+        );
+        assert_eq!(
+            filename_from_url("https://example.com/v2.0.0-beta.1+x86_64.rpm"),
+            Some("v2.0.0-beta.1+x86_64.rpm".to_string())
+        );
     }
 }
