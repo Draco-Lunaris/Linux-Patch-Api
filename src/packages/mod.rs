@@ -206,9 +206,9 @@ pub struct SelfUpdateStatusData {
     pub previous_version: String,
     pub new_version: String,
     pub changed: bool,
-    pub status: String,   // "success" | "restart_pending" | "restart_failed"
+    pub status: String, // "success" | "restart_pending" | "restart_failed"
     pub error: Option<String>,
-    pub at: String,       // RFC3339
+    pub at: String, // RFC3339
 }
 
 /// Package manager backend trait
@@ -697,23 +697,32 @@ impl PackageManagerBackend for AptBackend {
             tracing::warn!("apt-get update failed before self-update: {}", e);
         }
 
-        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+        let previous_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
         if let Some(v) = target_version {
             tracing::warn!("pinned version {} may be older than installed", v);
-            self.run_apt(&["install", "-y", "--allow-downgrades", "--", &format!("{}={}", SELF_PACKAGE_NAME, v)])?;
+            self.run_apt(&[
+                "install",
+                "-y",
+                "--allow-downgrades",
+                "--",
+                &format!("{}={}", SELF_PACKAGE_NAME, v),
+            ])?;
         } else {
             self.run_apt(&["install", "-y", "--only-upgrade", "--", SELF_PACKAGE_NAME])?;
         }
 
-        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+        let new_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
+        let changed = previous_version != new_version;
         Ok(SelfUpdateOutcome {
             previous_version,
             new_version,
-            changed: previous_version != new_version,
+            changed,
         })
     }
 
@@ -723,7 +732,7 @@ impl PackageManagerBackend for AptBackend {
 
     fn installed_version(&self, pkg: &str) -> Option<String> {
         Command::new("dpkg-query")
-            .args(["-W", &format!("-f=${{Version}}"), "--", pkg])
+            .args(["-W", "-f=${Version}", "--", pkg])
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -888,22 +897,43 @@ fn schedule_service_restart(service: &str, delay_seconds: u64) -> Result<()> {
     let unit = format!("{}.service", service);
     if std::path::Path::new("/run/systemd/system").exists() {
         let st = Command::new("systemd-run")
-            .args(["--on-active", &format!("{}s", delay),
-                   "--unit", &format!("{}-selfupdate-restart", service),
-                   "--collect", "systemctl", "restart", &unit])
-            .status().context("systemd-run failed to schedule restart")?;
-        if !st.success() { return Err(anyhow::anyhow!("systemd-run non-zero exit")); }
+            .args([
+                "--on-active",
+                &format!("{}s", delay),
+                "--unit",
+                &format!("{}-selfupdate-restart", service),
+                "--collect",
+                "systemctl",
+                "restart",
+                &unit,
+            ])
+            .status()
+            .context("systemd-run failed to schedule restart")?;
+        if !st.success() {
+            return Err(anyhow::anyhow!("systemd-run non-zero exit"));
+        }
     } else if std::path::Path::new("/sbin/openrc").exists() {
         Command::new("setsid")
-            .args(["sh", "-c", &format!("sleep {}; rc-service {} restart", delay, service)])
-            .spawn().context("failed to schedule OpenRC restart")?;
+            .args([
+                "sh",
+                "-c",
+                &format!("sleep {}; rc-service {} restart", delay, service),
+            ])
+            .spawn()
+            .context("failed to schedule OpenRC restart")?;
     } else {
         return Err(anyhow::anyhow!("no supported init system for self-restart"));
     }
     Ok(())
 }
 
-fn persist_self_update_marker(previous: &str, new: &str, changed: bool, status: &str, error: Option<&str>) -> Result<()> {
+pub fn persist_self_update_marker(
+    previous: &str,
+    new: &str,
+    changed: bool,
+    status: &str,
+    error: Option<&str>,
+) -> Result<()> {
     let marker = SelfUpdateStatusData {
         previous_version: previous.to_string(),
         new_version: new.to_string(),
@@ -1457,7 +1487,8 @@ impl PackageManagerBackend for ApkBackend {
             tracing::warn!("apk update failed before self-update: {}", e);
         }
 
-        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+        let previous_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
         if let Some(v) = target_version {
@@ -1466,13 +1497,15 @@ impl PackageManagerBackend for ApkBackend {
             self.run_apk(&["upgrade", "--", SELF_PACKAGE_NAME])?;
         }
 
-        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+        let new_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
+        let changed = previous_version != new_version;
         Ok(SelfUpdateOutcome {
             previous_version,
             new_version,
-            changed: previous_version != new_version,
+            changed,
         })
     }
 
@@ -2074,23 +2107,31 @@ impl PackageManagerBackend for DnfBackend {
             tracing::warn!("dnf check-update failed before self-update: {}", e);
         }
 
-        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+        let previous_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
         if let Some(v) = target_version {
             tracing::warn!("pinned version {} may be older than installed", v);
-            self.run_dnf(&["install", "-y", "--", &format!("{}-{}", SELF_PACKAGE_NAME, v)])?;
+            self.run_dnf(&[
+                "install",
+                "-y",
+                "--",
+                &format!("{}-{}", SELF_PACKAGE_NAME, v),
+            ])?;
         } else {
             self.run_dnf(&["upgrade", "-y", "--", SELF_PACKAGE_NAME])?;
         }
 
-        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+        let new_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
+        let changed = previous_version != new_version;
         Ok(SelfUpdateOutcome {
             previous_version,
             new_version,
-            changed: previous_version != new_version,
+            changed,
         })
     }
 
@@ -2661,23 +2702,31 @@ impl PackageManagerBackend for YumBackend {
             tracing::warn!("yum makecache failed before self-update: {}", e);
         }
 
-        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+        let previous_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
         if let Some(v) = target_version {
             tracing::warn!("pinned version {} may be older than installed", v);
-            self.run_yum(&["install", "-y", "--", &format!("{}-{}", SELF_PACKAGE_NAME, v)])?;
+            self.run_yum(&[
+                "install",
+                "-y",
+                "--",
+                &format!("{}-{}", SELF_PACKAGE_NAME, v),
+            ])?;
         } else {
             self.run_yum(&["update", "-y", "--", SELF_PACKAGE_NAME])?;
         }
 
-        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+        let new_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
+        let changed = previous_version != new_version;
         Ok(SelfUpdateOutcome {
             previous_version,
             new_version,
-            changed: previous_version != new_version,
+            changed,
         })
     }
 
@@ -3151,7 +3200,8 @@ impl PackageManagerBackend for PacmanBackend {
             tracing::warn!("pacman -Sy failed before self-update: {}", e);
         }
 
-        let previous_version = self.installed_version(SELF_PACKAGE_NAME)
+        let previous_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
         // Pacman has no native version pin; upgrade to latest regardless
@@ -3160,13 +3210,15 @@ impl PackageManagerBackend for PacmanBackend {
         }
         self.run_pacman(&["-S", "--noconfirm", "--", SELF_PACKAGE_NAME])?;
 
-        let new_version = self.installed_version(SELF_PACKAGE_NAME)
+        let new_version = self
+            .installed_version(SELF_PACKAGE_NAME)
             .unwrap_or_else(|| "unknown".to_string());
 
+        let changed = previous_version != new_version;
         Ok(SelfUpdateOutcome {
             previous_version,
             new_version,
-            changed: previous_version != new_version,
+            changed,
         })
     }
 

@@ -671,4 +671,47 @@ mod tests {
         assert!(json.contains("fresh"));
         assert!(json.contains("last_cache_update"));
     }
+
+    #[test]
+    fn test_self_update_request_defaults() {
+        let json = r#"{}"#;
+        let request: SelfUpdateRequest = serde_json::from_str(json).unwrap();
+        assert!(request.target_version.is_none());
+        assert!(request.restart);
+        assert_eq!(request.restart_delay_seconds, 5);
+    }
+
+    #[test]
+    fn test_self_update_request_all_fields() {
+        let json = r#"{"target_version": "1.5.0", "restart": false, "restart_delay_seconds": 30}"#;
+        let request: SelfUpdateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.target_version, Some("1.5.0".to_string()));
+        assert!(!request.restart);
+        assert_eq!(request.restart_delay_seconds, 30);
+    }
+
+    #[test]
+    fn test_self_update_request_version_validation_valid() {
+        assert!(packages::validate_version_string("1.5.0").is_ok());
+        assert!(packages::validate_version_string("2:1.0-1").is_ok());
+        assert!(packages::validate_version_string("1.0~beta1").is_ok());
+    }
+
+    #[test]
+    fn test_self_update_request_version_validation_invalid() {
+        assert!(packages::validate_version_string("").is_err());
+        assert!(packages::validate_version_string("-1.0").is_err());
+        assert!(packages::validate_version_string("1.0;rm -rf").is_err());
+        assert!(packages::validate_version_string("1.0$(cmd)").is_err());
+        assert!(packages::validate_version_string("1.0/evil").is_err());
+    }
+
+    #[test]
+    fn test_self_update_request_restart_delay_clamp() {
+        // Verify clamping logic (handler does the clamp, but test the bounds)
+        let max = MAX_RESTART_DELAY_SECONDS;
+        assert_eq!(0u64.clamp(1, max), 1);
+        assert_eq!(500u64.clamp(1, max), 300);
+        assert_eq!(30u64.clamp(1, max), 30);
+    }
 }
