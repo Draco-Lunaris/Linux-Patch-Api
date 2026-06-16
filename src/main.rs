@@ -26,7 +26,6 @@ use clap::Parser;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-use linux_patch_api::api::handlers::self_upgrade;
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::crl::{self, CrlStatus};
 use linux_patch_api::auth::{
@@ -112,36 +111,6 @@ async fn main() -> Result<()> {
             std::process::exit(ExitCode::Error as i32);
         }
     };
-
-    // Check for leftover install status from a previous self-upgrade
-    if let Some(status) = self_upgrade::read_install_status(&config.file_install.state_dir) {
-        match &status {
-            self_upgrade::InstallStatus::Success { new_version } => {
-                info!(
-                    new_version = %new_version,
-                    "Previous self-upgrade completed successfully"
-                );
-            }
-            self_upgrade::InstallStatus::Failed { error } => {
-                error!(
-                    error = %error,
-                    "Previous self-upgrade FAILED - service may be running an older version"
-                );
-            }
-            self_upgrade::InstallStatus::Installing { job_id } => {
-                warn!(
-                    job_id = %job_id,
-                    "Previous self-upgrade was still in progress - service may have restarted mid-install"
-                );
-            }
-            self_upgrade::InstallStatus::Unknown { raw } => {
-                warn!(
-                    raw_status = %raw,
-                    "Previous self-upgrade left unreadable status"
-                );
-            }
-        }
-    }
 
     // Handle --renew-certs flag: validate certs and re-enroll if needed
     if args.renew_certs {
@@ -333,9 +302,6 @@ async fn main() -> Result<()> {
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
 
-    // Store config for file_install handler (needs config gate check)
-    let config_data = web::Data::new(config.clone());
-
     // Initialize package cache state
     let cache_state = web::Data::new(PackageCacheState::new());
     info!("Package cache state initialized");
@@ -371,7 +337,6 @@ async fn main() -> Result<()> {
             .app_data(backend_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
-            .app_data(config_data.clone())
             .configure(|cfg| {
                 configure_api_routes(
                     cfg,

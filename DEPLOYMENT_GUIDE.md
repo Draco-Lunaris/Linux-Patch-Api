@@ -18,7 +18,6 @@ Complete guide for deploying Linux Patch API to production environments.
 - [Certificate Deployment](#certificate-deployment)
 - [Self-Enrollment Deployment](#self-enrollment-deployment)
 - [Configuration](#configuration)
-  - [File Install Configuration](#file-install-configuration)
 - [systemd Service Management](#systemd-service-management)
 - [Monitoring and Logging](#monitoring-and-logging)
 - [Troubleshooting](#troubleshooting)
@@ -193,10 +192,6 @@ logging:
   journal_enabled: true
   file_path: "/var/log/linux_patch_api/audit.log"
   retention_days: 30
-
-file_install:
-  enabled: false              # Must be true to allow file installs (default: false)
-  staging_dir: "/tmp"         # Directory for staging uploaded files before install
 ```
 
 ### Step 6: Start Service
@@ -803,50 +798,6 @@ linux-patch-api --check-config
 
 # View current configuration
 linux-patch-api --show-config
-```
-
-### File Install Configuration
-
-File install allows uploading local package files (`.deb`, `.rpm`, `.apk`, `.tar.zst`) directly to the API for installation, bypassing repository GPG signing. This feature is **disabled by default** and must be explicitly enabled.
-
-**Security Warning:** File installs bypass repository GPG verification. Only enable this feature if you understand the risk and trust the source of uploaded packages.
-
-```yaml
-# File Install Configuration
-file_install:
-  enabled: false              # Must be true to allow file installs (default: false)
-  staging_dir: "/tmp"         # Directory for staging uploaded files before install
-```
-
-**Parameter Reference:**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `file_install.enabled` | `false` | Must be `true` to enable file install endpoint. When `false`, `POST /api/v1/packages/install-file` returns HTTP 403. |
-| `file_install.staging_dir` | `/tmp` | Directory where uploaded files are staged before installation. Must be root-owned with mode 0700. |
-
-**File Validation Rules:**
-- Allowed extensions: `.deb`, `.rpm`, `.apk`, `.tar.zst`
-- Maximum file size: 1GB
-- Staging directory permissions: root-owned, mode 0700
-
-**Self-Upgrade Workflow:**
-
-The system restart endpoint enables self-upgrade workflows managed by the linux_patch_manager:
-1. Manager calls `POST /api/v1/packages/install-file` with new package
-2. Manager polls job status until install completes
-3. Manager calls `POST /api/v1/system/restart` to restart the service
-4. Manager reconnects to verify the upgraded service is healthy
-
-```bash
-# Example: Install a .deb package file
-curl --cacert ca.pem --cert client.pem --key client.key.pem \
-     -F "package=@/path/to/linux-patch-api_1.2.0-1_amd64.deb" \
-     https://host:12443/api/v1/packages/install-file
-
-# Example: Trigger service restart after upgrade
-curl --cacert ca.pem --cert client.pem --key client.key.pem \
-     -X POST https://host:12443/api/v1/system/restart
 ```
 
 ---

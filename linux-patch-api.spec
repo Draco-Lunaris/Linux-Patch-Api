@@ -163,14 +163,6 @@ fi
 
 # Changelog
 %changelog
-* Thu Jun 12 2026 Echo <echo@moon-dragon.us> - 1.2.0-1
-- Add file install endpoint: POST /api/v1/packages/install-file (multipart upload)
-- Add system restart endpoint: POST /api/v1/system/restart (graceful self-restart)
-- Add file_install.enabled config option (default: false)
-- Add file_install.staging_dir config option (default: /tmp)
-- File validation: extension allowlist (.deb, .rpm, .apk, .tar.zst), 1GB size limit
-- Rate limiting on file upload endpoint
-
 * Tue May 27 2026 Echo <echo@moon-dragon.us> - 1.1.17-1
 - Add mandatory package cache refresh before patch_apply
 - Add health check cache refresh when stale (>4h)

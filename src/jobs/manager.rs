@@ -45,7 +45,6 @@ pub enum JobOperation {
     PatchApply,
     Reboot,
     Rollback,
-    FileInstall,
 }
 
 /// Job information

@@ -15,30 +15,6 @@ use tracing::info;
 /// Maximum allowed length for package names and version strings
 pub const MAX_NAME_LENGTH: usize = 256;
 
-/// Maximum allowed file size for file install (1 GB)
-pub const MAX_FILE_SIZE: usize = 1_073_741_824;
-
-/// Validate file extension against backend allowlist
-pub fn validate_file_extension(filename: &str, backend: &str) -> Result<(), String> {
-    let allowed = match backend {
-        "apt" => &[".deb"][..],
-        "dnf" | "yum" => &[".rpm"][..],
-        "apk" => &[".apk"][..],
-        "pacman" => &[".tar.zst"][..],
-        _ => return Err(format!("Unknown backend: {}", backend)),
-    };
-
-    let filename_lower = filename.to_lowercase();
-    if allowed.iter().any(|ext| filename_lower.ends_with(ext)) {
-        Ok(())
-    } else {
-        Err(format!(
-            "File extension not allowed for {} backend. Allowed: {:?}",
-            backend, allowed
-        ))
-    }
-}
-
 /// Validate a package name against a strict allowlist pattern.
 /// Prevents argument injection by blocking shell metacharacters,
 /// path separators, whitespace, and leading hyphens.
@@ -229,12 +205,6 @@ pub trait PackageManagerBackend: Send + Sync {
 
     /// Get the last cache update timestamp
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>>;
-
-    /// Install a package from a local file
-    fn install_file(&self, file_path: &str) -> Result<()>;
-
-    /// Get the backend name (e.g., "apt", "dnf", "apk")
-    fn backend_name(&self) -> &str;
 }
 
 /// Package specification for installation
@@ -256,60 +226,20 @@ impl AptBackend {
         }
     }
 
-    /// Run apt-get command and capture output.
-    /// Uses apt-get instead of apt because apt warns
-    /// "does not have a stable CLI interface" when used non-interactively,
-    /// which causes stderr output that breaks scripted usage.
+    /// Run apt command and capture output
     fn run_apt(&self, args: &[&str]) -> Result<String> {
-        // Service runs as root - no sudo needed for apt-get commands
-        let program = "apt-get";
+        // Service runs as root - no sudo needed for apt commands
+        let program = "apt";
         let cmd_args: Vec<&str> = args.to_vec();
 
         let output = Command::new(program)
-            .env("DEBIAN_FRONTEND", "noninteractive")
             .args(&cmd_args)
             .output()
-            .context("Failed to execute apt-get command")?;
+            .context("Failed to execute apt command")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("apt-get command failed: {}", stderr));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    /// Run apt-cache command and capture output.
-    /// Used for queries like `apt-cache policy` which have no apt-get equivalent.
-    fn run_apt_cache(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("apt-cache")
-            .args(args)
-            .output()
-            .context("Failed to execute apt-cache command")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("apt-cache command failed: {}", stderr));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    /// Run apt list command and capture output.
-    /// `apt list` has no apt-get equivalent, so we use `apt` directly
-    /// but suppress the "does not have a stable CLI interface" warning on stderr.
-    fn run_apt_list(&self, args: &[&str]) -> Result<String> {
-        let cmd_args: Vec<&str> = args.to_vec();
-
-        let output = Command::new("apt")
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .args(&cmd_args)
-            .output()
-            .context("Failed to execute apt list command")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("apt list command failed: {}", stderr));
+            return Err(anyhow::anyhow!("apt command failed: {}", stderr));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -378,7 +308,7 @@ impl PackageManagerBackend for AptBackend {
             None => vec!["list", "--installed"],
         };
 
-        let output = self.run_apt_list(&args)?;
+        let output = self.run_apt(&args)?;
         Ok(self.parse_package_list(&output))
     }
 
@@ -388,7 +318,7 @@ impl PackageManagerBackend for AptBackend {
 
         if dpkg_output.is_err() {
             // Package not installed, check if available
-            let list_output = self.run_apt_list(&["list", name])?;
+            let list_output = self.run_apt(&["list", name])?;
             if list_output.contains(name) {
                 let parts: Vec<&str> = list_output
                     .lines()
@@ -451,12 +381,12 @@ impl PackageManagerBackend for AptBackend {
 
         // Check if upgradable
         let upgradable = self
-            .run_apt_list(&["list", "--upgradable", name])
+            .run_apt(&["list", "--upgradable", name])
             .map(|o| o.contains(name))
             .unwrap_or(false);
 
         let latest_version = if upgradable {
-            self.run_apt_cache(&["policy", name]).ok().and_then(|o| {
+            self.run_apt(&["policy", name]).ok().and_then(|o| {
                 o.lines()
                     .find(|l| l.contains("Candidate"))
                     .and_then(|l| l.split_whitespace().nth(1))
@@ -540,7 +470,7 @@ impl PackageManagerBackend for AptBackend {
     }
 
     fn list_patches(&self) -> Result<Vec<Patch>> {
-        let output = self.run_apt_list(&["list", "--upgradable"])?;
+        let output = self.run_apt(&["list", "--upgradable"])?;
         let mut patches = Vec::new();
 
         for line in output.lines() {
@@ -731,17 +661,6 @@ impl PackageManagerBackend for AptBackend {
 
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
-    }
-
-    fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "apt").map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.run_apt(&["install", "-y", "--", file_path])?;
-        info!("Installed package from file: {}", file_path);
-        Ok(())
-    }
-
-    fn backend_name(&self) -> &str {
-        "apt"
     }
 }
 
@@ -1419,17 +1338,6 @@ impl PackageManagerBackend for ApkBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
-
-    fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "apk").map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.run_apk(&["add", "--allow-untrusted", "--", file_path])?;
-        info!("Installed package from file: {}", file_path);
-        Ok(())
-    }
-
-    fn backend_name(&self) -> &str {
-        "apk"
-    }
 }
 
 impl Default for ApkBackend {
@@ -2007,17 +1915,6 @@ impl PackageManagerBackend for DnfBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
-
-    fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "dnf").map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.run_dnf(&["install", "-y", "--", file_path])?;
-        info!("Installed package from file: {}", file_path);
-        Ok(())
-    }
-
-    fn backend_name(&self) -> &str {
-        "dnf"
-    }
 }
 
 impl Default for DnfBackend {
@@ -2564,17 +2461,6 @@ impl PackageManagerBackend for YumBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
-
-    fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "yum").map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.run_yum(&["install", "-y", "--", file_path])?;
-        info!("Installed package from file: {}", file_path);
-        Ok(())
-    }
-
-    fn backend_name(&self) -> &str {
-        "yum"
-    }
 }
 
 impl Default for YumBackend {
@@ -3024,17 +2910,6 @@ impl PackageManagerBackend for PacmanBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
-
-    fn install_file(&self, file_path: &str) -> Result<()> {
-        validate_file_extension(file_path, "pacman").map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.run_pacman(&["-U", "--noconfirm", "--", file_path])?;
-        info!("Installed package from file: {}", file_path);
-        Ok(())
-    }
-
-    fn backend_name(&self) -> &str {
-        "pacman"
-    }
 }
 
 impl Default for PacmanBackend {
@@ -3414,45 +3289,5 @@ mod tests {
     fn test_validate_service_name_with_plus() {
         // Plus is allowed in service names
         assert!(validate_service_name("cups+daemon").is_ok());
-    }
-
-    #[test]
-    fn test_validate_file_extension_apt_deb() {
-        assert!(validate_file_extension("package.deb", "apt").is_ok());
-    }
-
-    #[test]
-    fn test_validate_file_extension_apt_rejects_rpm() {
-        assert!(validate_file_extension("package.rpm", "apt").is_err());
-    }
-
-    #[test]
-    fn test_validate_file_extension_dnf_rpm() {
-        assert!(validate_file_extension("package.rpm", "dnf").is_ok());
-    }
-
-    #[test]
-    fn test_validate_file_extension_apk_apk() {
-        assert!(validate_file_extension("package.apk", "apk").is_ok());
-    }
-
-    #[test]
-    fn test_validate_file_extension_pacman_tar_zst() {
-        assert!(validate_file_extension("package.tar.zst", "pacman").is_ok());
-    }
-
-    #[test]
-    fn test_validate_file_extension_unknown_backend() {
-        assert!(validate_file_extension("package.deb", "unknown").is_err());
-    }
-
-    #[test]
-    fn test_validate_file_extension_case_insensitive() {
-        assert!(validate_file_extension("package.DEB", "apt").is_ok());
-    }
-
-    #[test]
-    fn test_max_file_size_constant() {
-        assert_eq!(MAX_FILE_SIZE, 1_073_741_824);
     }
 }

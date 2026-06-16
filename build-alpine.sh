@@ -59,10 +59,6 @@ fi
 # Get version from Cargo.toml
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 
-# Alpine APK pkgver format: digits.digits.digits_suffixN (no hyphens, no suffix dots)
-APK_VERSION=$(echo "$VERSION" | sed 's/-\([a-zA-Z]*\)\.\([0-9]*\)/_\1\2/')
-echo "Alpine package version: $APK_VERSION"
-
 # Create package directory structure
 PKGDIR=$(pwd)/apk-package
 rm -rf "$PKGDIR"
@@ -104,7 +100,7 @@ cp configs/linux-patch-api.post-deinstall "$WORKSPACE_DIR"/linux-patch-api.post-
 echo "Creating APKBUILD..."
 cat > "$WORKSPACE_DIR"/APKBUILD << EOF
 pkgname=linux-patch-api
-pkgver=${APK_VERSION}
+pkgver=${VERSION}
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.moon-dragon.us/echo/linux_patch_api"

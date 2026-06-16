@@ -60,14 +60,6 @@ rate_limit:
   read_per_minute: 120
   read_burst: 30
 
-# File Install Configuration
-# File install allows uploading local package files (.deb, .rpm, .apk, .tar.zst)
-# directly to the API for installation. This bypasses repository GPG signing.
-# DISABLED BY DEFAULT - only enable if you understand the security implications.
-file_install:
-  enabled: false              # Must be true to allow file installs (default: false)
-  staging_dir: "/tmp"         # Directory for staging uploaded files before install
-
 # Enrollment Configuration (optional)
 # Uncomment and configure for self-enrollment with linux_patch_manager
 # enrollment:

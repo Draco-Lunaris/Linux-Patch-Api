@@ -107,9 +107,3 @@
 **Correction:** Removed ALL restrictive sandbox settings at once after understanding that package management requires full system access.
 **Rule:** When a service fundamentally conflicts with systemd sandboxing, analyze ALL restrictions at once rather than fixing them one at a time. Package management services need: no ProtectSystem=strict, no NoNewPrivileges, no RestrictSUIDSGID, no CapabilityBoundingSet, no AmbientCapabilities restrictions.
 **Status:** Active
-
-## 2026-06-12 - Whitelist Configuration
-**Mistake:** Configured agent whitelists with multiple subnets and IPs (192.168.0.0/22, 192.168.5.0/24, 192.168.6.0/24, 192.168.0.215, 192.168.0.247) on all 35+ containers.
-**Correction:** Kelly clarified: the agent API only needs the manager IP whitelisted. Nothing else communicates to it. The MANAGER needs multiple subnets because many agents connect to it for enrollment — but agents only need the single manager IP.
-**Rule:** Agent whitelist = manager IP only. Manager whitelist = multiple subnets for all agents. Do not add subnets or other IPs to agent whitelists unless explicitly instructed by Kelly.
-**Status:** Active

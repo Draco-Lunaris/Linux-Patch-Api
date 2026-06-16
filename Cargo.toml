@@ -1,6 +1,6 @@
 [package]
 name = "linux-patch-api"
-version = "1.5.0-beta.13"
+version = "1.4.3"
 edition = "2021"
 authors = ["Echo <echo@moon-dragon.us>"]
 description = "Secure remote package management API for Linux systems"
@@ -18,9 +18,6 @@ actix-tls = { version = "3", features = ["rustls-0_23"] }
 
 # Rate limiting (actix-governor for per-IP rate limiting)
 actix-governor = "0.6"
-
-# Multipart form handling (file upload support)
-actix-multipart = "0.7"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -69,7 +66,6 @@ sysinfo = "0.30"
 # Network utilities
 addr = "0.15"
 if-addrs = "0.13"
-percent-encoding = "2"
 
 # HTTP client for enrollment communication
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -96,12 +92,6 @@ arc-swap = "1"
 # Base64 decoding for PEM CRL parsing
 base64 = "0.22"
 
-# SHA-256 checksum verification for URL-based package install
-sha2 = "0.10"
-
-# Hex encoding for checksum verification
-hex = "0.4"
-
 [dev-dependencies]
 actix-rt = "2"
 tokio-test = "0.4"
@@ -110,6 +100,7 @@ serial_test = "3"
 tempfile = "3"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 rand = "0.8"
+hex = "0.4"
 time = { version = "0.3", features = ["std"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 

@@ -6,14 +6,10 @@
 //! - system: System management endpoints
 //! - jobs: Job management endpoints
 //! - websocket: Real-time job status streaming
-//! - self_upgrade: Detached self-upgrade utilities
 
-pub mod file_install;
-pub mod install_url;
 pub mod jobs;
 pub mod packages;
 pub mod patches;
-pub mod self_upgrade;
 pub mod system;
 pub mod websocket;
 

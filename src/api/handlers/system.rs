@@ -381,34 +381,12 @@ pub async fn get_service_status(
     }
 }
 
-/// Restart the service (for self-upgrade workflows)
-pub async fn restart_service(_req: HttpRequest) -> impl Responder {
-    let request_id = Uuid::new_v4().to_string();
-    info!(request_id = %request_id, "Service restart requested via API");
-
-    // Spawn a delayed restart so we can send the HTTP response first
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        info!("Initiating service restart");
-        let _ = std::process::Command::new("systemctl")
-            .args(["restart", "linux-patch-api"])
-            .status();
-    });
-
-    let response = ApiResponse::success(serde_json::json!({
-        "message": "Service restart scheduled. The service will restart in approximately 2 seconds.",
-        "delay_seconds": 2
-    }));
-    HttpResponse::Ok().json(response)
-}
-
 /// Configure routes for system endpoints
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/system")
             .route("/info", web::get().to(get_system_info))
             .route("/reboot", web::post().to(reboot_system))
-            .route("/restart", web::post().to(restart_service))
             .route("/services/{name}", web::get().to(get_service_status)),
     )
     .route("/health", web::get().to(health_check));
