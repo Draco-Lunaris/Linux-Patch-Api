@@ -45,6 +45,7 @@ pub enum JobOperation {
     PatchApply,
     Reboot,
     Rollback,
+    SelfUpdate,
 }
 
 /// Job information
