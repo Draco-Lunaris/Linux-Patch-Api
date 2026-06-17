@@ -1,6 +1,8 @@
 # Self-Update Design Note — Linux Patch API v1.4.3 → v1.5.0
 
-**Checkpoint 1 of 5** — Architecture, acceptance criteria, and postinst strategy.
+**Updated after E2E verification** — Architecture corrected from agent-runs-apt-get to
+detached-systemd-unit approach after the agent-cgroup kill was identified as the root cause
+of the v1.5.0-beta failure.
 
 Baseline: `v1.4.3` tag, commit `89bc5cc8bc9abab4326910841ad82cc2d034ed60`.
 
@@ -111,52 +113,70 @@ a package name.
 
 All commands use `--` separator and validated version strings. No shell interpolation.
 
-### 1.7 Decoupled Restart
+### 1.7 Detached Systemd Unit — Corrected Architecture
 
-The restart is handed to PID 1 via `systemd-run --on-active` so it survives our cgroup stopping.
-This avoids the `:12443` rebind race (RCA 2026-05-28).
+**Root cause of the v1.5.0-beta failure:** The agent cannot run `apt-get install` in its own
+cgroup because dpkg's `prerm` script runs `systemctl stop linux-patch-api`, killing the very
+process that is running the upgrade. This produces a half-configured package state.
 
-```rust
-fn schedule_service_restart(service: &str, delay_seconds: u64) -> Result<()> {
-    let delay = std::cmp::max(1, delay_seconds);
-    let unit = format!("{}.service", service);
-    if std::path::Path::new("/run/systemd/system").exists() {
-        let st = Command::new("systemd-run")
-            .args(["--on-active", &format!("{}s", delay),
-                   "--unit", &format!("{}-selfupdate-restart", service),
-                   "--collect", "systemctl", "restart", &unit])
-            .status().context("systemd-run failed to schedule restart")?;
-        if !st.success() { return Err(anyhow::anyhow!("systemd-run non-zero exit")); }
-    } else if std::path::Path::new("/sbin/openrc").exists() {
-        // KNOWN LIMITATION: setsid creates a new session, not a separate cgroup.
-        // Weaker isolation than systemd-run. Acceptable on OpenRC/Alpine.
-        Command::new("setsid")
-            .args(["sh", "-c", &format!("sleep {}; rc-service {} restart", delay, service)])
-            .spawn().context("failed to schedule OpenRC restart")?;
-    } else {
-        return Err(anyhow::anyhow!("no supported init system for self-restart"));
-    }
-    Ok(())
-}
+**Corrected architecture:** The agent does NOT run `apt-get` directly. Instead, it hands the
+entire upgrade transaction to a separate systemd oneshot unit that runs in `system.slice`,
+outside the agent's cgroup. The unit survives the agent being killed by prerm.
+
+Flow:
+1. Agent validates request → writes `/var/lib/linux_patch_api/self-update.request` + pending marker
+2. Agent calls `systemctl start --no-block linux-patch-api-update.service` → returns 202
+3. The update service runs `/usr/lib/linux-patch-api/self-update.sh` in its **own cgroup**
+   under `system.slice`
+4. dpkg's prerm stops the agent — the update service **survives** (different cgroup)
+5. dpkg completes → postinst starts the new agent on the new binary
+6. Script writes marker file with success/failure
+7. New agent serves marker at `GET /system/update/status`
+
+**Update service unit** (`configs/linux-patch-api-update.service`):
+```ini
+[Unit]
+Description=Linux Patch API self-update transaction
+# No coupling to linux-patch-api.service — must survive its stop.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/linux-patch-api/self-update.sh
+# Run in its own cgroup under system.slice (default for a separate unit).
 ```
 
-### 1.8 Ordering — Schedule First, Then Record Success
+**Self-update script** (`configs/self-update.sh`):
+- Reads target version from `/var/lib/linux_patch_api/self-update.request`
+- Validates version string (prevents shell injection)
+- Detects package manager (apt/dnf/yum/apk/pacman)
+- Refreshes package index (logs warning on failure, does not abort)
+- Runs upgrade with `--` separator and validated version
+- Compares before/after versions for `changed` detection
+- Writes `/var/lib/linux_patch_api/last_self_update.json` marker
+- Cleans up request file
 
-The previous plan completed the job before scheduling the restart, producing silent false
-success when scheduling failed. Required order in the spawned task:
+**OpenRC fallback** (Alpine):
+- Uses `setsid` + `sleep` + `rc-service restart` as a detached process
+- KNOWN LIMITATION: `setsid` creates a new session, not a separate cgroup. Weaker
+  isolation than systemd-run. Acceptable on OpenRC/Alpine.
 
-1. Run `update_self` (off the async reactor via `spawn_blocking`).
-2. On `changed == false`: persist marker with `status: "success"` + `complete_job`.
-3. On `changed == true` and `restart == true`:
-   - Call `schedule_self_restart`
-   - **If Ok**: persist marker with `status: "success"`, then `complete_job`
-   - **If Err**: persist marker with `status: "restart_failed"` and the error message,
-     then `fail_job` with `"upgrade applied but restart could not be scheduled;
-     run 'systemctl restart linux-patch-api' manually"`
-4. On `changed == true` and `restart == false`: persist marker with
-   `status: "success"` (note: new binary not active until next restart) + `complete_job`.
+### 1.8 Handler Logic — Delegation, Not Execution
 
-Never report clean success when the new binary will not load.
+The handler does NOT run the package manager. It delegates to the detached unit:
+
+1. Validate `target_version` with `validate_version_string` (if present).
+2. Clamp `restart_delay_seconds` to `max(1, min(delay, 300))`.
+3. Log request with `request_id`.
+4. Check `can_accept_job()` → 429 if full.
+5. `create_job(JobOperation::SelfUpdate, vec![])` → 500 if fail.
+6. Write request file to `/var/lib/linux_patch_api/self-update.request`.
+7. Persist pending marker to `/var/lib/linux_patch_api/last_self_update.json`.
+8. `systemctl start --no-block linux-patch-api-update.service`.
+9. If systemctl fails: `fail_job` with the error.
+10. Return `202 Accepted` with `{job_id, status, operation, target_version, restart, restart_delay_seconds}`.
+
+The update script (not the agent) handles the upgrade, version comparison, restart
+scheduling, and marker writing. The agent's job is validation, delegation, and response.
 
 ### 1.9 Completion Visibility Across Restart
 
@@ -184,20 +204,23 @@ Never report clean success when the new binary will not load.
 
 ---
 
-## 2. Handler Logic
+## 2. Handler Logic — Delegation Pattern
 
-The handler mirrors `reboot_system` exactly:
+The handler does **not** run the package manager. It validates, delegates, and responds:
 
 1. Validate `target_version` with `validate_version_string` (if present).
 2. Clamp `restart_delay_seconds` to `max(1, min(delay, 300))`.
 3. Log request with `request_id`.
 4. Check `can_accept_job()` → 429 if full.
 5. `create_job(JobOperation::SelfUpdate, vec![])` → 500 if fail.
-6. `tokio::spawn` the backend work:
-   - `spawn_blocking(|| backend.update_self(tv))`
-   - On success: check `changed`, schedule restart if needed, persist marker, complete/fail job.
-   - On error: `fail_job`.
-7. Return `202 Accepted` with `{job_id, status, operation, target_version, restart, restart_delay_seconds}`.
+6. Write request file to `/var/lib/linux_patch_api/self-update.request`.
+7. Persist pending marker to `/var/lib/linux_patch_api/last_self_update.json`.
+8. `systemctl start --no-block linux-patch-api-update.service`.
+9. If systemctl fails: `fail_job` with the error.
+10. Return `202 Accepted` with `{job_id, status, operation, target_version, restart, restart_delay_seconds}`.
+
+The update service (not the agent) handles the upgrade, version comparison, restart
+scheduling, and final marker writing. The agent's job is validation, delegation, and response.
 
 ### 2.1 New Routes
 
@@ -315,12 +338,12 @@ diff /tmp/certs-before.sha256 /tmp/certs-after.sha256  # must be empty
 | #69 Failure | Required Outcome | How Addressed |
 |---|---|---|
 | CRL overwritten on install → crash loop | postinst upgrade-aware; CRL/cert checksums unchanged across upgrade | §3.3: postinst scripts detect upgrade and skip CRL/cert/config |
-| Install script killed by cgroup | N/A | No install script; restart owned by PID 1 via `systemd-run` (§1.7) |
-| `pkill -f` matched install script | N/A | No `pkill`, no script process to match |
-| API deleting staged files on SIGTERM | N/A | Nothing staged; no temp files to clean up |
+| Install script killed by cgroup | N/A — structurally impossible | No install script; upgrade runs in detached systemd unit under `system.slice` (§1.7). The agent's cgroup is killed by prerm; the update service survives. |
+| `pkill -f` matched install script | N/A — structurally impossible | No `pkill`, no script process to match |
+| API deleting staged files on SIGTERM | N/A — structurally impossible | Nothing staged; no temp files to clean up |
 | apt refusing same-version reinstall | `changed==false` path; no forced reinstall | §1.8: detect unchanged version, skip restart |
 | self-cleanup removed debug info | N/A | No self-cleanup step; marker file persists for debugging |
-| shell injection | `Command` arg-arrays + `--` + `validate_version_string`; no shell | §1.6: all commands use arg arrays with `--` separator |
+| shell injection | `validate_version_string` + `--` separator in script; no shell interpolation | §1.7: self-update.sh validates version with regex before use |
 | version filter offered same version | manager + agent skip when `changed==false` | §1.8 + §5: version comparison before restart |
 | progress tracking broken in UI | persisted marker + manager reconnect/version check | §1.9: marker file + `/system/update/status` endpoint |
 
@@ -453,16 +476,27 @@ If a second round of hardening is needed on the restart/cgroup/process-kill/stag
 
 ---
 
-## 10. File Change Summary (for checkpoint 2)
+## 10. File Change Summary (corrected architecture)
 
 | File | Change |
 |------|--------|
 | `src/jobs/manager.rs` | Add `SelfUpdate` variant to `JobOperation` |
-| `src/packages/mod.rs` | Add `SELF_PACKAGE_NAME`, `SELF_SERVICE_NAME`, `MAX_RESTART_DELAY_SECONDS`, `SELF_UPDATE_MARKER_PATH` constants; `SelfUpdateOutcome` struct; `update_self`, `schedule_self_restart`, `installed_version` trait methods; `schedule_service_restart` free function; `AptBackend`, `DnfBackend`, `YumBackend`, `ApkBackend`, `PacmanBackend` impls |
-| `src/api/handlers/system.rs` | Add `SelfUpdateRequest`, `SelfUpdateStatusData` structs; `update_self` handler; `get_self_update_status` handler; two new routes |
-| `debian/postinst` | Add upgrade-aware branch (`$2` check) |
+| `src/packages/mod.rs` | Add `SELF_PACKAGE_NAME`, `SELF_SERVICE_NAME`, `MAX_RESTART_DELAY_SECONDS`, `SELF_UPDATE_MARKER_PATH`, `SELF_UPDATE_REQUEST_PATH` constants; `SelfUpdateOutcome`, `SelfUpdateStatusData` structs; `persist_self_update_marker`, `write_self_update_request`, `read_self_update_marker` functions; `validate_version_string` function |
+| `src/api/handlers/system.rs` | Add `SelfUpdateRequest` struct; `update_self` handler (delegates to systemd unit, does NOT run apt-get); `get_self_update_status` handler; two new routes |
+| `configs/linux-patch-api-update.service` | **New file** — systemd oneshot unit for detached upgrade transaction. No coupling to `linux-patch-api.service`. Runs under `system.slice`. |
+| `configs/self-update.sh` | **New file** — multi-pkg-mgr upgrade script. Reads request file, validates version, detects package manager, refreshes index, runs upgrade, compares versions, writes marker. |
+| `debian/postinst` | Add upgrade-aware branch (`$2` check); start service on upgrade |
 | `linux-patch-api.spec` | Add upgrade-aware `%post` branch (`$1 -gt 1`) |
 | `configs/linux-patch-api.post-install` | Add upgrade detection (service exists check) |
 | `configs/linux-patch-api.install` | Add comment to `post_upgrade`; verify no CRL/cert/config touch |
+| `scripts/build-package.sh` | Ship `linux-patch-api-update.service` and `self-update.sh` in the package |
+| `tests/e2e/test_self_update.sh` | **New file** — E2E harness with 8 test cases |
+
+**Manager-side changes** (separate repo: Linux-Patch-Manager, branch `feat/agent-upgrade-controls`):
+| File | Change |
+|------|--------|
 | `crates/pm-agent-client/src/types.rs` | Add `SelfUpdateRequest`, `SelfUpdateResponse`, `SelfUpdateStatus` |
-| `crates/pm-agent-client/src/client.rs` | Add `self_update()`, `get_self_update_status()` methods |
+| `crates/pm-agent-client/src/client.rs` | Add `self_update()`, `self_update_status()` methods |
+| `crates/pm-worker/src/job_executor.rs` | Add `execute_self_upgrade_host_job` dispatch and `poll_self_upgrade_host` reconciliation |
+| `crates/pm-web/src/routes/upgrades.rs` | Add `POST /upgrades/trigger` endpoint |
+| `frontend/src/pages/HostDetailPage.tsx` | Add self-upgrade UI |
