@@ -39,6 +39,17 @@ if [ -z "$VERSION" ]; then
 fi
 echo "Building version: $VERSION"
 
+# Split version for RPM: hyphens are illegal in RPM Version field
+# e.g. 1.5.0-rc1 -> RPM_VERSION=1.5.0, RPM_RELEASE=0.rc1
+if echo "$VERSION" | grep -q '-'; then
+    RPM_VERSION=$(echo "$VERSION" | cut -d'-' -f1)
+    RPM_RELEASE=$(echo "$VERSION" | cut -d'-' -f2- | sed 's/^/0./')
+else
+    RPM_VERSION="$VERSION"
+    RPM_RELEASE="1"
+fi
+echo "RPM Version: $RPM_VERSION, Release: $RPM_RELEASE"
+
 # Remove stale RPM artifacts to prevent uploading cached/old packages
 echo "Cleaning stale RPM artifacts..."
 rm -f ~/rpmbuild/RPMS/x86_64/linux-patch-api-*.rpm
@@ -66,61 +77,61 @@ mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 # (required by %autosetup in spec file)
 echo "Creating source tarball with pre-built binary..."
 TMPDIR=$(mktemp -d)
-mkdir -p "$TMPDIR/linux-patch-api-${VERSION}"
+mkdir -p "$TMPDIR/linux-patch-api-${RPM_VERSION}"
 
 # Copy files excluding unnecessary directories
-cp -r . "$TMPDIR/linux-patch-api-${VERSION}/"
+cp -r . "$TMPDIR/linux-patch-api-${RPM_VERSION}/"
 
 # Remove unnecessary directories from tarball
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/target"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.git"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/releases"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.github"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/debian"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/arch-package"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.abuild"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/apk-package"
-rm -rf "$TMPDIR/linux-patch-api-${VERSION}/.a0proj"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/target"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/.git"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/releases"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/.github"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/debian"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/arch-package"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/.abuild"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/apk-package"
+rm -rf "$TMPDIR/linux-patch-api-${RPM_VERSION}/.a0proj"
 
 # Re-create target/release with just the pre-built binary
 # This is the key change: binary is in the tarball so %build is a no-op
-mkdir -p "$TMPDIR/linux-patch-api-${VERSION}/target/release"
-cp target/release/linux-patch-api "$TMPDIR/linux-patch-api-${VERSION}/target/release/"
-chmod 755 "$TMPDIR/linux-patch-api-${VERSION}/target/release/linux-patch-api"
+mkdir -p "$TMPDIR/linux-patch-api-${RPM_VERSION}/target/release"
+cp target/release/linux-patch-api "$TMPDIR/linux-patch-api-${RPM_VERSION}/target/release/"
+chmod 755 "$TMPDIR/linux-patch-api-${RPM_VERSION}/target/release/linux-patch-api"
 
-tar -czf ~/rpmbuild/SOURCES/linux-patch-api-${VERSION}.tar.gz -C "$TMPDIR" "linux-patch-api-${VERSION}"
+tar -czf ~/rpmbuild/SOURCES/linux-patch-api-${RPM_VERSION}.tar.gz -C "$TMPDIR" "linux-patch-api-${RPM_VERSION}"
 rm -rf "$TMPDIR"
 
 # Prepare spec file with dynamic version
 echo "Preparing spec file..."
-sed "s/VERSION_PLACEHOLDER/$VERSION/" linux-patch-api.spec > ~/rpmbuild/SPECS/linux-patch-api.spec
+sed -e "s/VERSION_PLACEHOLDER/$RPM_VERSION/" -e "s/RELEASE_PLACEHOLDER/$RPM_RELEASE/" linux-patch-api.spec > ~/rpmbuild/SPECS/linux-patch-api.spec
 
-# Verify VERSION replacement succeeded
-if grep -q 'VERSION_PLACEHOLDER' ~/rpmbuild/SPECS/linux-patch-api.spec; then
-    echo "Error: VERSION_PLACEHOLDER not replaced in spec file!"
+# Verify placeholder replacement succeeded
+if grep -q 'VERSION_PLACEHOLDER\|RELEASE_PLACEHOLDER' ~/rpmbuild/SPECS/linux-patch-api.spec; then
+    echo "Error: Placeholder not replaced in spec file!"
     exit 1
 fi
-echo "Spec file version verified: $VERSION"
+echo "Spec file version verified: $RPM_VERSION, release: $RPM_RELEASE"
 
 # Build RPM
 echo "Building RPM package..."
 rpmbuild -ba ~/rpmbuild/SPECS/linux-patch-api.spec
 
 # Verify RPM was actually built
-RPM_FILE=$(ls ~/rpmbuild/RPMS/x86_64/linux-patch-api-${VERSION}-*.rpm 2>/dev/null | head -1)
+RPM_FILE=$(ls ~/rpmbuild/RPMS/x86_64/linux-patch-api-${RPM_VERSION}-*.rpm 2>/dev/null | head -1)
 if [ -z "$RPM_FILE" ]; then
     echo "Error: RPM package not found after build!"
-    echo "Looking for: ~/rpmbuild/RPMS/x86_64/linux-patch-api-${VERSION}-*.rpm"
+    echo "Looking for: ~/rpmbuild/RPMS/x86_64/linux-patch-api-${RPM_VERSION}-*.rpm"
     ls -la ~/rpmbuild/RPMS/x86_64/ 2>/dev/null || echo "Directory empty or missing"
     exit 1
 fi
 
 # Verify RPM contains the correct version
-RPM_VERSION=$(rpm -qp --queryformat '%{VERSION}' "$RPM_FILE" 2>/dev/null || true)
+QUERY_RPM_VERSION=$(rpm -qp --queryformat '%{VERSION}' "$RPM_FILE" 2>/dev/null || true)
 echo "RPM built: $RPM_FILE"
-echo "RPM version: $RPM_VERSION"
-if [ "$RPM_VERSION" != "$VERSION" ]; then
-    echo "Error: RPM version ($RPM_VERSION) does not match expected version ($VERSION)!"
+echo "RPM version: $QUERY_RPM_VERSION"
+if [ "$QUERY_RPM_VERSION" != "$RPM_VERSION" ]; then
+    echo "Error: RPM version ($QUERY_RPM_VERSION) does not match expected version ($RPM_VERSION)!"
     exit 1
 fi
 

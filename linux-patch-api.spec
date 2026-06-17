@@ -2,7 +2,7 @@
 
 Name:           linux-patch-api
 Version:        VERSION_PLACEHOLDER
-Release:        1%{?dist}
+Release:        RELEASE_PLACEHOLDER%{?dist}
 Summary:        Secure remote package management API for Linux systems
 License:        MIT
 URL:            https://gitea.moon-dragon.us/echo/linux_patch_api
