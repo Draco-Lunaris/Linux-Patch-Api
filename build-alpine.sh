@@ -59,6 +59,10 @@ fi
 # Get version from Cargo.toml
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*=.*"\([^"]*\)".*/\1/')
 
+# Translate version for Alpine: hyphens are illegal in pkgver
+# e.g. 1.5.0-rc1 -> 1.5.0_rc1
+ALPINE_VERSION=$(echo "$VERSION" | tr '-' '_')
+
 # Create package directory structure
 PKGDIR=$(pwd)/apk-package
 rm -rf "$PKGDIR"
@@ -100,7 +104,7 @@ cp configs/linux-patch-api.post-deinstall "$WORKSPACE_DIR"/linux-patch-api.post-
 echo "Creating APKBUILD..."
 cat > "$WORKSPACE_DIR"/APKBUILD << EOF
 pkgname=linux-patch-api
-pkgver=${VERSION}
+pkgver=${ALPINE_VERSION}
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
 url="https://gitea.moon-dragon.us/echo/linux_patch_api"
