@@ -91,35 +91,48 @@ chmod 755 /var/log/linux_patch_api
 
 # Post-installation script - copy configs, enable service (matches Debian postinst)
 %post
-# Copy example configs if they don't exist
-if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
-    cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
-    chmod 640 /etc/linux_patch_api/config.yaml
-    chown root:root /etc/linux_patch_api/config.yaml
+# Upgrade-aware: on upgrade ($1 > 1), skip CRL/cert/config operations
+# and do NOT restart the service (the self-update endpoint owns the restart).
+if [ $1 -eq 1 ]; then
+    # Fresh install: full setup
+    # Copy example configs if they don't exist
+    if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
+        cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
+        chmod 640 /etc/linux_patch_api/config.yaml
+        chown root:root /etc/linux_patch_api/config.yaml
+    fi
+
+    if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
+        cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
+        chmod 640 /etc/linux_patch_api/whitelist.yaml
+        chown root:root /etc/linux_patch_api/whitelist.yaml
+    fi
+
+    # Reload systemd daemon
+    systemctl daemon-reload
+
+    # Enable the service (but don't start automatically)
+    systemctl enable linux-patch-api.service
+
+    echo ""
+    echo "linux-patch-api installed successfully!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Configure /etc/linux_patch_api/config.yaml with your settings"
+    echo "  2. Place TLS certificates in /etc/linux_patch_api/certs/"
+    echo "  3. Configure IP whitelist in /etc/linux_patch_api/whitelist.yaml"
+    echo "  4. Start the service: systemctl start linux-patch-api"
+    echo "  5. Check status: systemctl status linux-patch-api"
+    echo ""
+elif [ $1 -gt 1 ]; then
+    # Upgrade: preserve everything
+    # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
+    echo "Upgrading linux-patch-api ..."
+    systemctl daemon-reload
+    # Start the service with the new binary after upgrade.
+    # prerm stops it; postinst must restart it.
+    systemctl start linux-patch-api.service || true
 fi
-
-if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
-    cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
-    chmod 640 /etc/linux_patch_api/whitelist.yaml
-    chown root:root /etc/linux_patch_api/whitelist.yaml
-fi
-
-# Reload systemd daemon
-systemctl daemon-reload
-
-# Enable the service (but don't start automatically)
-systemctl enable linux-patch-api.service
-
-echo ""
-echo "linux-patch-api installed successfully!"
-echo ""
-echo "Next steps:"
-echo "  1. Configure /etc/linux_patch_api/config.yaml with your settings"
-echo "  2. Place TLS certificates in /etc/linux_patch_api/certs/"
-echo "  3. Configure IP whitelist in /etc/linux_patch_api/whitelist.yaml"
-echo "  4. Start the service: systemctl start linux-patch-api"
-echo "  5. Check status: systemctl status linux-patch-api"
-echo ""
 
 # Pre-uninstallation script
 %preun

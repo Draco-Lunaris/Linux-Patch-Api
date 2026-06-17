@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
+use crate::packages;
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
@@ -72,6 +73,14 @@ pub struct RebootRequest {
     pub delay_seconds: u64,
     #[serde(default)]
     pub force: bool,
+}
+
+/// Self-update request
+#[derive(Debug, Deserialize, Clone)]
+pub struct SelfUpdateRequest {
+    /// Pin to an exact package version. None = upgrade to latest available.
+    #[serde(default)]
+    pub target_version: Option<String>,
 }
 
 /// Get system information
@@ -381,13 +390,163 @@ pub async fn get_service_status(
     }
 }
 
+/// Self-update the agent via detached systemd unit
+pub async fn update_self(body: web::Json<SelfUpdateRequest>, _req: HttpRequest) -> impl Responder {
+    let request_id = Uuid::new_v4().to_string();
+
+    // Validate target_version if present
+    if let Some(ref v) = body.target_version {
+        if let Err(e) = packages::validate_version_string(v) {
+            let response = ApiResponse::<()>::error(
+                "INVALID_VERSION",
+                &format!("Invalid target version: {}", e),
+                None,
+                false,
+            );
+            return HttpResponse::BadRequest().json(response);
+        }
+    }
+
+    let target_version = body.target_version.clone();
+
+    info!(
+        request_id = %request_id,
+        target_version = ?target_version,
+        "Initiating self-update"
+    );
+
+    // Concurrency guard: check if an update is already in progress
+    // 1. Check if the update service unit is active
+    let systemctl_check = std::process::Command::new("systemctl")
+        .args(["is-active", "linux-patch-api-update.service"])
+        .output();
+    if let Ok(output) = systemctl_check {
+        let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if status == "active" || status == "activating" {
+            let response = ApiResponse::<()>::error(
+                "UPDATE_IN_PROGRESS",
+                "A self-update is already in progress",
+                None,
+                false,
+            );
+            return HttpResponse::Conflict().json(response);
+        }
+    }
+
+    // 2. Check if a request file already exists (update pending or about to start)
+    if std::path::Path::new(packages::SELF_UPDATE_REQUEST_PATH).exists() {
+        let response = ApiResponse::<()>::error(
+            "UPDATE_IN_PROGRESS",
+            "A self-update request is already pending",
+            None,
+            false,
+        );
+        return HttpResponse::Conflict().json(response);
+    }
+
+    // Write request state file for the update service to read
+    if let Err(e) = packages::write_self_update_request(target_version.as_deref()) {
+        error!(request_id = %request_id, error = %e, "Failed to write self-update request");
+        let response = ApiResponse::<()>::error(
+            "REQUEST_WRITE_ERROR",
+            &format!("Failed to write self-update request: {}", e),
+            None,
+            true,
+        );
+        return HttpResponse::InternalServerError().json(response);
+    }
+
+    // Persist pending marker
+    let _ = packages::persist_self_update_marker(
+        "unknown",
+        &target_version
+            .clone()
+            .unwrap_or_else(|| "latest".to_string()),
+        false,
+        "pending",
+        None,
+    );
+
+    // Start the update service unit (detached, own cgroup)
+    let start_result = std::process::Command::new("systemctl")
+        .args(["start", "--no-block", "linux-patch-api-update.service"])
+        .status();
+
+    match start_result {
+        Ok(st) if st.success() => {
+            info!(request_id = %request_id, "Self-update service started");
+            let response = ApiResponse::success(serde_json::json!({
+                "status": "pending",
+                "target_version": target_version,
+                "message": "Self-update initiated; agent will restart with new version",
+            }));
+            HttpResponse::Accepted().json(response)
+        }
+        Ok(st) => {
+            error!(request_id = %request_id, exit_code = st.code(), "systemctl start --no-block failed");
+            let _ = packages::persist_self_update_marker(
+                "unknown",
+                &target_version.unwrap_or_else(|| "latest".to_string()),
+                false,
+                "failed",
+                Some("Failed to start update service unit"),
+            );
+            let response = ApiResponse::<()>::error(
+                "UPDATE_SERVICE_START_ERROR",
+                "Failed to start update service unit",
+                None,
+                true,
+            );
+            HttpResponse::InternalServerError().json(response)
+        }
+        Err(e) => {
+            error!(request_id = %request_id, error = %e, "Failed to execute systemctl");
+            let _ = packages::persist_self_update_marker(
+                "unknown",
+                &target_version.unwrap_or_else(|| "latest".to_string()),
+                false,
+                "failed",
+                Some(&format!("Failed to execute systemctl: {}", e)),
+            );
+            let response = ApiResponse::<()>::error(
+                "SYSTEMCTL_ERROR",
+                &format!("Failed to execute systemctl: {}", e),
+                None,
+                true,
+            );
+            HttpResponse::InternalServerError().json(response)
+        }
+    }
+}
+
+/// Get self-update status from marker file
+pub async fn get_self_update_status(_req: HttpRequest) -> impl Responder {
+    match packages::read_self_update_marker() {
+        Some(data) => {
+            let response = ApiResponse::success(data);
+            HttpResponse::Ok().json(response)
+        }
+        None => {
+            let response = ApiResponse::<()>::error(
+                "NO_SELF_UPDATE_RECORD",
+                "No self-update record found",
+                None,
+                false,
+            );
+            HttpResponse::NotFound().json(response)
+        }
+    }
+}
+
 /// Configure routes for system endpoints
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/system")
             .route("/info", web::get().to(get_system_info))
             .route("/reboot", web::post().to(reboot_system))
-            .route("/services/{name}", web::get().to(get_service_status)),
+            .route("/services/{name}", web::get().to(get_service_status))
+            .route("/update", web::post().to(update_self))
+            .route("/update/status", web::get().to(get_self_update_status)),
     )
     .route("/health", web::get().to(health_check));
     // Note: health_check receives backend and cache_state via app_data injection

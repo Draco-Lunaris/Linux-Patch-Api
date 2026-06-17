@@ -1,35 +1,46 @@
 #!/bin/sh
 # Alpine Linux post-install script for linux-patch-api
-# Runs after package files are laid down
-# Matches Debian postinst behavior: copy example configs, enable service
+# Upgrade-aware: on upgrade (service already exists), skip CRL/cert/config operations
+# and do NOT restart the service (the self-update endpoint owns the restart).
 
-# Copy example configs if they don't exist
-if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
-    if [ -f "/etc/linux_patch_api/config.yaml.example" ]; then
-        cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
-        chmod 640 /etc/linux_patch_api/config.yaml
-        chown root:root /etc/linux_patch_api/config.yaml
+# Detect upgrade by checking if the service already exists
+if rc-service linux-patch-api status >/dev/null 2>&1; then
+    # Upgrade: preserve everything
+    echo "Upgrading linux-patch-api ..."
+    # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
+    # Start the service with the new binary after upgrade.
+    # prerm stops it; postinst must restart it.
+    rc-service linux-patch-api start || true
+else
+    # Fresh install: full setup
+    # Copy example configs if they don't exist
+    if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
+        if [ -f "/etc/linux_patch_api/config.yaml.example" ]; then
+            cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
+            chmod 640 /etc/linux_patch_api/config.yaml
+            chown root:root /etc/linux_patch_api/config.yaml
+        fi
     fi
-fi
 
-if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
-    if [ -f "/etc/linux_patch_api/whitelist.yaml.example" ]; then
-        cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
-        chmod 640 /etc/linux_patch_api/whitelist.yaml
-        chown root:root /etc/linux_patch_api/whitelist.yaml
+    if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
+        if [ -f "/etc/linux_patch_api/whitelist.yaml.example" ]; then
+            cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
+            chmod 640 /etc/linux_patch_api/whitelist.yaml
+            chown root:root /etc/linux_patch_api/whitelist.yaml
+        fi
     fi
+
+    # Enable the service (but don't start automatically - admin should configure first)
+    rc-update add linux-patch-api default
+
+    echo ""
+    echo "linux-patch-api installed successfully!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Configure /etc/linux_patch_api/config.yaml with your settings"
+    echo "  2. Place TLS certificates in /etc/linux_patch_api/certs/"
+    echo "  3. Configure IP whitelist in /etc/linux_patch_api/whitelist.yaml"
+    echo "  4. Start the service: rc-service linux-patch-api start"
+    echo "  5. Check status: rc-service linux-patch-api status"
+    echo ""
 fi
-
-# Enable the service (but don't start automatically - admin should configure first)
-rc-update add linux-patch-api default
-
-echo ""
-echo "linux-patch-api installed successfully!"
-echo ""
-echo "Next steps:"
-echo "  1. Configure /etc/linux_patch_api/config.yaml with your settings"
-echo "  2. Place TLS certificates in /etc/linux_patch_api/certs/"
-echo "  3. Configure IP whitelist in /etc/linux_patch_api/whitelist.yaml"
-echo "  4. Start the service: rc-service linux-patch-api start"
-echo "  5. Check status: rc-service linux-patch-api status"
-echo ""

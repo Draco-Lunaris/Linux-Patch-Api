@@ -49,8 +49,13 @@ post_install() {
 }
 
 post_upgrade() {
-    # Reload systemd daemon on upgrade
+    # Upgrade: preserve everything
+    # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
+    echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
+    # Start the service with the new binary after upgrade.
+    # prerm stops it; postinst must restart it.
+    systemctl start linux-patch-api.service || true
 }
 
 pre_remove() {
