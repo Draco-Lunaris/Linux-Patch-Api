@@ -17,7 +17,7 @@ else
     if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
         if [ -f "/etc/linux_patch_api/config.yaml.example" ]; then
             cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
-            chmod 640 /etc/linux_patch_api/config.yaml
+            chmod 644 /etc/linux_patch_api/config.yaml
             chown root:root /etc/linux_patch_api/config.yaml
         fi
     fi
@@ -25,7 +25,7 @@ else
     if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
         if [ -f "/etc/linux_patch_api/whitelist.yaml.example" ]; then
             cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
-            chmod 640 /etc/linux_patch_api/whitelist.yaml
+            chmod 644 /etc/linux_patch_api/whitelist.yaml
             chown root:root /etc/linux_patch_api/whitelist.yaml
         fi
     fi

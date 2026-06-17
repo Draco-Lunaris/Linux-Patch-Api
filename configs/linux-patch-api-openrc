@@ -17,6 +17,8 @@ depend() {
 
 # Create required directories before starting
 start_pre() {
+    # NOTE: checkpath resets /etc/linux_patch_api/certs/ ownership to root:root on every start.
+    # This is fine for the service (runs as root) but would break enrollment run as a non-root user.
     checkpath --directory --owner root:root --mode 0755 \
         /run/linux-patch-api \
         /var/log/linux_patch_api \
@@ -58,15 +60,4 @@ stop_post() {
         rm -f "$pidfile"
     fi
     einfo "linux-patch-api stopped"
-}
-
-# Service status
-status() {
-    if [ -f "$pidfile" ] && kill -0 $(cat "$pidfile") 2>/dev/null; then
-        einfo "linux-patch-api is running (PID: $(cat $pidfile))"
-        return 0
-    else
-        eerror "linux-patch-api is not running"
-        return 1
-    fi
 }

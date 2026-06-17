@@ -12,21 +12,21 @@ post_install() {
     chown -R root:root /var/log/linux_patch_api
 
     # Set secure permissions
-    chmod 750 /etc/linux_patch_api
-    chmod 750 /etc/linux_patch_api/certs
+    chmod 755 /etc/linux_patch_api
+    chmod 755 /etc/linux_patch_api/certs
     chmod 755 /var/lib/linux_patch_api
     chmod 755 /var/log/linux_patch_api
 
     # Copy example configs if they don't exist
     if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
         cp /etc/linux_patch_api/config.yaml.example /etc/linux_patch_api/config.yaml
-        chmod 640 /etc/linux_patch_api/config.yaml
+        chmod 644 /etc/linux_patch_api/config.yaml
         chown root:root /etc/linux_patch_api/config.yaml
     fi
 
     if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
         cp /etc/linux_patch_api/whitelist.yaml.example /etc/linux_patch_api/whitelist.yaml
-        chmod 640 /etc/linux_patch_api/whitelist.yaml
+        chmod 644 /etc/linux_patch_api/whitelist.yaml
         chown root:root /etc/linux_patch_api/whitelist.yaml
     fi
 
