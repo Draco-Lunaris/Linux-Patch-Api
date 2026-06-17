@@ -415,6 +415,35 @@ pub async fn update_self(body: web::Json<SelfUpdateRequest>, _req: HttpRequest) 
         "Initiating self-update"
     );
 
+    // Concurrency guard: check if an update is already in progress
+    // 1. Check if the update service unit is active
+    let systemctl_check = std::process::Command::new("systemctl")
+        .args(["is-active", "linux-patch-api-update.service"])
+        .output();
+    if let Ok(output) = systemctl_check {
+        let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if status == "active" || status == "activating" {
+            let response = ApiResponse::<()>::error(
+                "UPDATE_IN_PROGRESS",
+                "A self-update is already in progress",
+                None,
+                false,
+            );
+            return HttpResponse::Conflict().json(response);
+        }
+    }
+
+    // 2. Check if a request file already exists (update pending or about to start)
+    if std::path::Path::new(packages::SELF_UPDATE_REQUEST_PATH).exists() {
+        let response = ApiResponse::<()>::error(
+            "UPDATE_IN_PROGRESS",
+            "A self-update request is already pending",
+            None,
+            false,
+        );
+        return HttpResponse::Conflict().json(response);
+    }
+
     // Write request state file for the update service to read
     if let Err(e) = packages::write_self_update_request(target_version.as_deref()) {
         error!(request_id = %request_id, error = %e, "Failed to write self-update request");

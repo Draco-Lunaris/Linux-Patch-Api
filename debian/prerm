@@ -4,7 +4,7 @@
 
 set -e
 
-# Stop the service before removal/upgrade
+# Stop the service before removal or upgrade
 if [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; then
     echo "Stopping linux-patch-api service..."
     
@@ -14,8 +14,11 @@ if [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; then
     else
         echo "Service was not running"
     fi
-    
-    # Disable the service
+fi
+
+# Only disable on removal, NOT on upgrade
+# On upgrade, the postinst will re-enable and start the service.
+if [ "$1" = "remove" ]; then
     if systemctl is-enabled --quiet linux-patch-api.service 2>/dev/null; then
         systemctl disable linux-patch-api.service
         echo "Service disabled"

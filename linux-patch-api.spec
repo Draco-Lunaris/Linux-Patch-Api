@@ -127,9 +127,11 @@ if [ $1 -eq 1 ]; then
 elif [ $1 -gt 1 ]; then
     # Upgrade: preserve everything
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
-    # DO NOT restart the service (self-update endpoint owns the restart)
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
+    # Start the service with the new binary after upgrade.
+    # prerm stops it; postinst must restart it.
+    systemctl start linux-patch-api.service || true
 fi
 
 # Pre-uninstallation script
