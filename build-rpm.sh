@@ -102,6 +102,7 @@ chmod 755 "$TMPDIR/linux-patch-api-${RPM_VERSION}/target/release/linux-patch-api
 # Copy self-update files
 mkdir -p "$TMPDIR/linux-patch-api-${RPM_VERSION}/usr/lib/linux-patch-api"
 cp configs/self-update.sh "$TMPDIR/linux-patch-api-${RPM_VERSION}/usr/lib/linux-patch-api/"
+mkdir -p "$TMPDIR/linux-patch-api-${RPM_VERSION}/usr/lib/systemd/system"
 cp configs/linux-patch-api-update.service "$TMPDIR/linux-patch-api-${RPM_VERSION}/usr/lib/systemd/system/"
 chmod 755 "$TMPDIR/linux-patch-api-${RPM_VERSION}/usr/lib/linux-patch-api/self-update.sh"
 
