@@ -8,9 +8,10 @@ if rc-service linux-patch-api status >/dev/null 2>&1; then
     # Upgrade: preserve everything
     echo "Upgrading linux-patch-api ..."
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
-    # Start the service with the new binary after upgrade.
-    # prerm stops it; postinst must restart it.
-    rc-service linux-patch-api start || true
+    # Restart the service with the new binary after upgrade.
+    # Use restart (not start) to ensure the new binary is loaded
+    # even if pre-deinstall didn't stop the old process.
+    rc-service linux-patch-api restart || true
 else
     # Fresh install: full setup
     # Copy example configs if they don't exist

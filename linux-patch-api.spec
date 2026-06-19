@@ -138,9 +138,10 @@ elif [ $1 -gt 1 ]; then
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
-    # Start the service with the new binary after upgrade.
-    # prerm stops it; postinst must restart it.
-    systemctl start linux-patch-api.service || true
+    # Restart the service with the new binary after upgrade.
+    # Use restart (not start) to ensure the new binary is loaded
+    # even if prerm didn't stop the old process.
+    systemctl restart linux-patch-api.service || true
 fi
 
 # Pre-uninstallation script
