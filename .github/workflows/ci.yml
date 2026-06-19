@@ -125,8 +125,6 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - name: Purge leftover package from previous runs
-        run: sudo apt-get purge -y linux-patch-api 2>/dev/null || sudo dpkg --remove linux-patch-api 2>/dev/null || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
@@ -153,8 +151,6 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - name: Purge leftover package from previous runs
-        run: sudo apt-get purge -y linux-patch-api 2>/dev/null || sudo dpkg --remove linux-patch-api 2>/dev/null || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
@@ -181,8 +177,6 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - name: Purge leftover package from previous runs
-        run: sudo apt-get purge -y linux-patch-api 2>/dev/null || sudo dpkg --remove linux-patch-api 2>/dev/null || true
       - uses: actions/checkout@v4
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
