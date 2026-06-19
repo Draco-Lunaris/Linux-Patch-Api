@@ -1,3 +1,9 @@
+linux-patch-api (1.5.0-rc6) unstable; urgency=low
+
+  * Release v1.5.0-rc6
+
+ -- git-echo <git-echo@moon-dragon.us>  Thu, 18 Jun 2026 20:46:58 -0500
+
 linux-patch-api (1.5.0-rc5) unstable; urgency=low
 
   * Release v1.5.0-rc5
