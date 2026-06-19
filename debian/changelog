@@ -1,3 +1,10 @@
+linux-patch-api (1.5.1-1) stable; urgency=medium
+
+  * fix: handle unset VERSION_ID in self-update.sh for Arch Linux
+  * fix: use apt-get install instead of dpkg -i for Debian self-update
+
+ -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 04:15:00 -0500
+
 linux-patch-api (1.5.0) unstable; urgency=low
 
   * Release v1.5.0
