@@ -99,7 +99,7 @@ DISTRO_VERSION=""
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     DISTRO_ID="$ID"
-    DISTRO_VERSION="$VERSION_ID"
+    DISTRO_VERSION="${VERSION_ID:-}"
 fi
 
 # --- Determine asset pattern based on distro ---
