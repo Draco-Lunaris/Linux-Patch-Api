@@ -128,9 +128,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
@@ -157,9 +154,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
@@ -186,9 +180,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
@@ -215,9 +206,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
@@ -240,9 +228,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
@@ -265,9 +250,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo pacman -Syu --noconfirm systemd openssl pkg-config gcc
       - name: Add Rust to PATH
