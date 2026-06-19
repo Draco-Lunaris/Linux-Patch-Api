@@ -1,3 +1,10 @@
+linux-patch-api (1.5.3-1) stable; urgency=medium
+
+  * fix: move Add Rust to PATH before rust-cache in self-hosted build jobs
+  * Includes all fixes from v1.5.2 (postinst restart, StartLimitIntervalSec, CI cleanup)
+
+ -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 10:35:00 -0500
+
 linux-patch-api (1.5.2-1) stable; urgency=medium
 
   * fix: use systemctl restart instead of start in upgrade paths (Issue #81)
