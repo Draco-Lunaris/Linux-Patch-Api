@@ -113,7 +113,7 @@ jobs:
           echo "$NOTES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body: ${{ steps.release_notes.outputs.notes }}
 
@@ -142,7 +142,7 @@ jobs:
             mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2404_amd64/')"
           fi
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: linux-patch-api_*_u2404_amd64.deb
 
@@ -169,7 +169,7 @@ jobs:
             mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2204_amd64/')"
           fi
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: linux-patch-api_*_u2204_amd64.deb
 
@@ -196,7 +196,7 @@ jobs:
             mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_debian13_amd64/')"
           fi
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: linux-patch-api_*_debian13_amd64.deb
 
@@ -219,7 +219,7 @@ jobs:
       - name: Build RPM package
         run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.rpm
 
@@ -242,7 +242,7 @@ jobs:
       - name: Build RPM package
         run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.rpm
 
@@ -265,7 +265,7 @@ jobs:
       - name: Build Arch package
         run: chmod +x build-arch.sh && SKIP_CARGO_BUILD=1 ./build-arch.sh
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: releases/*.pkg.tar.zst
 
@@ -297,6 +297,6 @@ jobs:
           chmod +x build-alpine.sh
           SKIP_CARGO_BUILD=1 ./build-alpine.sh
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.apk
