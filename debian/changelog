@@ -1,3 +1,13 @@
+linux-patch-api (1.5.2-1) stable; urgency=medium
+
+  * fix: use systemctl restart instead of start in upgrade paths (Issue #81)
+  * ci: remove purge step that destroys production agent on self-hosted runners
+  * ci: update action versions for Node.js 24 compatibility
+  * ci: add Rust dependency caching to self-hosted build jobs
+  * ci: use pre-built cargo-audit binary
+
+ -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 10:10:00 -0500
+
 linux-patch-api (1.5.1-1) stable; urgency=medium
 
   * fix: handle unset VERSION_ID in self-update.sh for Arch Linux
