@@ -1,6 +1,6 @@
 [package]
 name = "linux-patch-api"
-version = "1.5.0-rc5"
+version = "1.5.0-rc6"
 edition = "2021"
 authors = ["Echo <echo@moon-dragon.us>"]
 description = "Secure remote package management API for Linux systems"
