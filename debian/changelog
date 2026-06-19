@@ -1,3 +1,10 @@
+linux-patch-api (1.5.4-1) stable; urgency=medium
+
+  * fix: remove rust-cache from self-hosted build jobs (broken rustup on Fedora/AlmaLinux)
+  * Includes all fixes from v1.5.2-v1.5.3 (postinst restart, StartLimitIntervalSec, CI cleanup)
+
+ -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 11:10:00 -0500
+
 linux-patch-api (1.5.3-1) stable; urgency=medium
 
   * fix: move Add Rust to PATH before rust-cache in self-hosted build jobs
