@@ -22,7 +22,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -33,7 +33,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -46,7 +46,7 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
@@ -57,7 +57,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit && cargo audit --ignore RUSTSEC-2025-0134
 
@@ -65,11 +65,11 @@ jobs:
     name: Secret scanning
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -78,7 +78,7 @@ jobs:
     needs: [fmt, clippy]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
@@ -95,7 +95,7 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Generate release notes
@@ -125,7 +125,7 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
@@ -151,7 +151,7 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
@@ -177,7 +177,7 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
@@ -203,7 +203,7 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
@@ -225,7 +225,7 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
@@ -247,7 +247,7 @@ jobs:
     steps:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system dependencies
         run: sudo pacman -Syu --noconfirm systemd openssl pkg-config gcc
       - name: Add Rust to PATH
@@ -273,7 +273,7 @@ jobs:
     steps:
       - name: Install prerequisites for actions/checkout
         run: apk add --no-cache bash git curl tar
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Alpine build dependencies
         run: apk add --no-cache gcc musl-dev openssl-dev openssl elogind-dev alpine-sdk abuild
       - name: Install Rust via rustup
