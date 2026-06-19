@@ -58,7 +58,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit && cargo audit --ignore RUSTSEC-2025-0134
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit --ignore RUSTSEC-2025-0134
 
   gitleaks:
     name: Secret scanning
