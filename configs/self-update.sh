@@ -99,7 +99,7 @@ DISTRO_VERSION=""
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     DISTRO_ID="$ID"
-    DISTRO_VERSION="$VERSION_ID"
+    DISTRO_VERSION="${VERSION_ID:-}"
 fi
 
 # --- Determine asset pattern based on distro ---
@@ -263,14 +263,7 @@ UPGRADE_OUTPUT=""
 UPGRADE_RC=0
 case "$PKG_MGR" in
     apt)
-        UPGRADE_OUTPUT=$(dpkg -i "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-        if [ $UPGRADE_RC -ne 0 ]; then
-            # Try to fix dependency issues
-            DEP_OUTPUT=$(apt-get -f install -y 2>&1) || true
-            UPGRADE_OUTPUT="$UPGRADE_OUTPUT\n$DEP_OUTPUT"
-            # Recheck if dpkg is now configured
-            dpkg-query -W -f='${Status}' "$PKG_NAME" 2>/dev/null | grep -q 'install ok installed' || UPGRADE_RC=1
-        fi
+        UPGRADE_OUTPUT=$(apt-get install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
         ;;
     dnf)
         UPGRADE_OUTPUT=$(dnf install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
