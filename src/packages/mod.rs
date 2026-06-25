@@ -246,7 +246,7 @@ impl AptBackend {
     /// Run apt command and capture output
     fn run_apt(&self, args: &[&str]) -> Result<String> {
         // Service runs as root - no sudo needed for apt commands
-        let program = "apt";
+        let program = "apt-get";
         let cmd_args: Vec<&str> = args.to_vec();
 
         let output = Command::new(program)
@@ -535,7 +535,10 @@ impl PackageManagerBackend for AptBackend {
                 a
             }
             None => {
-                vec!["upgrade", "-y"]
+                // Run fix-broken first to resolve any unmet dependencies,
+                // then use dist-upgrade to handle new/removed dependencies
+                let _ = self.run_apt(&["-f", "install", "-y"]);
+                vec!["dist-upgrade", "-y"]
             }
         };
 
@@ -1914,18 +1917,25 @@ impl PackageManagerBackend for DnfBackend {
 
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing DNF package cache");
-        match cache::run_command_with_timeout("dnf", &["check-update", "--refresh"]) {
-            Ok(_) => {
-                cache_state.update_success();
-                info!("DNF package cache refreshed successfully");
-                Ok(())
-            }
-            Err(e) => {
-                // dnf check-update returns exit code 100 when updates available (not an error)
-                let err_msg = format!("DNF cache refresh failed: {}", e);
-                cache_state.update_failure(err_msg.clone());
-                Err(anyhow::anyhow!("{}", err_msg))
-            }
+        // dnf check-update returns exit code 100 when updates are available (not an error).
+        // run_command_with_timeout treats non-zero as failure, so we run directly.
+        let output = std::process::Command::new("dnf")
+            .args(["check-update", "--refresh"])
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .output()
+            .context("Failed to execute dnf check-update")?;
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        // Exit code 0 = no updates, 100 = updates available — both are success
+        if exit_code == 0 || exit_code == 100 {
+            cache_state.update_success();
+            info!("DNF package cache refreshed successfully");
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let err_msg = format!("DNF cache refresh failed: {}", stderr);
+            cache_state.update_failure(err_msg.clone());
+            Err(anyhow::anyhow!("{}", err_msg))
         }
     }
 
