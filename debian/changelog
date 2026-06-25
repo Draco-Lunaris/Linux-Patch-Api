@@ -1,3 +1,11 @@
+linux-patch-api (1.5.6-1) stable; urgency=medium
+
+  * fix: APT unmet dependencies (apt->apt-get, upgrade->dist-upgrade, fix-broken)
+  * fix: DNF patching failures (exit code 100 handling in cache refresh)
+  * fix: quinn-proto 0.11.14 -> 0.11.15 (RUSTSEC-2026-0185)
+
+ -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 25 Jun 2026 11:15:00 -0500
+
 linux-patch-api (1.5.5-1) stable; urgency=medium
 
   * fix: remove rust-cache from self-hosted build jobs (broken rustup on Fedora/AlmaLinux)
