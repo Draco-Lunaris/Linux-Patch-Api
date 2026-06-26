@@ -360,7 +360,10 @@ pub async fn refresh_crl(
 
     // Re-read mtime from the freshly written file for accurate age reporting
     let crl_mtime = fs::metadata(crl_path).ok().and_then(|m| m.modified().ok());
-    let new_state = CrlState { crl_mtime, ..new_state };
+    let new_state = CrlState {
+        crl_mtime,
+        ..new_state
+    };
 
     debug!(path = %crl_path.display(), "CRL persisted to disk");
 
@@ -390,10 +393,10 @@ pub fn spawn_crl_refresh_task(
 ) {
     let interval = Duration::from_secs(12 * 60 * 60); // 12 hours (CRL valid 24h → 12h margin)
     let backoff_schedule: [Duration; 4] = [
-        Duration::from_secs(60),       // 1 min
-        Duration::from_secs(300),      // 5 min
-        Duration::from_secs(900),      // 15 min
-        Duration::from_secs(3600),     // 1 hour
+        Duration::from_secs(60),   // 1 min
+        Duration::from_secs(300),  // 5 min
+        Duration::from_secs(900),  // 15 min
+        Duration::from_secs(3600), // 1 hour
     ];
 
     tokio::spawn(async move {
