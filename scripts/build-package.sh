@@ -28,12 +28,13 @@ DEB_NAME="${PKG_NAME}_${VERSION}-${RELEASE}_amd64.deb"
 BUILD_DIR="${PROJECT_ROOT}/package-build"
 
 # Detect distro for informational logging (does not affect build output)
+# Read os-release WITHOUT sourcing — sourcing would clobber the VERSION variable
+# that was already extracted from Cargo.toml above.
 BUILD_DISTRO="unknown"
 BUILD_DISTRO_VERSION=""
 if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    BUILD_DISTRO="${ID:-unknown}"
-    BUILD_DISTRO_VERSION="${VERSION_ID:-}"
+    BUILD_DISTRO=$(grep -E '^ID=' /etc/os-release | head -1 | cut -d'"' -f2)
+    BUILD_DISTRO_VERSION=$(grep -E '^VERSION_ID=' /etc/os-release | head -1 | cut -d'"' -f2)
 fi
 
 info "=== Linux Patch API — Package Build ==="
