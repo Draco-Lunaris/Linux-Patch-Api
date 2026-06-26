@@ -27,9 +27,18 @@ PKG_NAME="linux-patch-api"
 DEB_NAME="${PKG_NAME}_${VERSION}-${RELEASE}_amd64.deb"
 BUILD_DIR="${PROJECT_ROOT}/package-build"
 
+# Detect distro for informational logging (does not affect build output)
+BUILD_DISTRO="unknown"
+BUILD_DISTRO_VERSION=""
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    BUILD_DISTRO="${ID:-unknown}"
+    BUILD_DISTRO_VERSION="${VERSION_ID:-}"
+fi
+
 info "=== Linux Patch API — Package Build ==="
 info "Version: ${VERSION}-${RELEASE}"
-info "Target:  Ubuntu 24.04 (noble) amd64"
+info "Target:  ${BUILD_DISTRO} ${BUILD_DISTRO_VERSION} amd64"
 echo
 
 # ---------------------------------------------------------------------------
