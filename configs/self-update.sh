@@ -6,6 +6,12 @@
 #
 # Downloads the correct package from GitHub Releases and installs
 # it via the native package manager.
+#
+# Failure handling:
+#   - 3 retry attempts for download and install (10s, 30s, 60s backoff)
+#   - On final failure: attempts to fix broken dependencies and revert
+#   - Always cleans up the request file (trap-based, all exit paths)
+#   - Writes failure marker with error cause for manager health reporting
 
 set -uo pipefail
 
@@ -14,6 +20,16 @@ REQUEST_PATH="/var/lib/linux_patch_api/self-update.request"
 PKG_NAME="linux-patch-api"
 GITHUB_OWNER="Draco-Lunaris"
 GITHUB_REPO="Linux-Patch-Api"
+MAX_ATTEMPTS=3
+BACKOFF_SECONDS=(10 30 60)
+
+# --- Cleanup trap: always remove request file on exit ---
+# This prevents the agent from being permanently locked (409 Conflict)
+# after a failed update attempt.
+cleanup() {
+    rm -f "$REQUEST_PATH"
+}
+trap cleanup EXIT
 
 # --- Helper: write failure marker ---
 write_failure_marker() {
@@ -47,6 +63,71 @@ write_success_marker() {
     escaped_new=$(printf '%s' "$new_ver" | sed 's/\\/\\\\/g; s/"/\\"/g')
     printf '{\n  "previous_version": "%s",\n  "new_version": "%s",\n  "changed": %s,\n  "status": "success",\n  "error": null,\n  "at": "%s"\n}\n' \
         "$escaped_prev" "$escaped_new" "$changed" "$timestamp" > "$MARKER_PATH"
+}
+
+# --- Helper: fix broken dependencies (pre-install) ---
+# Mirrors the pattern used by the agent's apt backend (mod.rs:538):
+#   apt-get -f install -y   (fix broken/unmet deps)
+#   dpkg --configure -a     (finish interrupted package config)
+fix_broken_dependencies() {
+    case "$PKG_MGR" in
+        apt)
+            echo "Fixing broken dependencies (apt)..."
+            apt-get -f install -y 2>&1 || true
+            dpkg --configure -a 2>&1 || true
+            ;;
+        dnf|yum)
+            echo "Fixing broken dependencies (dnf/yum)..."
+            $PKG_MGR reinstall -y "$PKG_NAME" 2>&1 || true
+            ;;
+        apk)
+            echo "Fixing broken dependencies (apk)..."
+            apk fix 2>&1 || true
+            ;;
+        pacman)
+            echo "Fixing broken dependencies (pacman)..."
+            pacman -Syu --noconfirm 2>&1 || true
+            ;;
+    esac
+}
+
+# --- Helper: revert to previous version ---
+# Attempts to reinstall the previous package version from cache or repo.
+# If revert fails, writes a critical failure marker and exits.
+revert_to_previous() {
+    local prev_ver="$1"
+    echo "Attempting to revert to previous version: $prev_ver" >&2
+
+    case "$PKG_MGR" in
+        apt)
+            # Try to reinstall from apt cache or repo
+            apt-get install -y --allow-downgrades "${PKG_NAME}=${prev_ver}" 2>&1 || true
+            # If that fails, try fixing broken state
+            apt-get -f install -y 2>&1 || true
+            dpkg --configure -a 2>&1 || true
+            ;;
+        dnf|yum)
+            $PKG_MGR downgrade -y "$PKG_NAME" 2>&1 || true
+            ;;
+        apk)
+            apk add --allow-untrusted "${PKG_NAME}=${prev_ver}" 2>&1 || true
+            ;;
+        pacman)
+            pacman -U --noconfirm "/var/cache/pacman/pkg/${PKG_NAME}-${prev_ver}-*.pkg.tar.zst" 2>&1 || true
+            ;;
+    esac
+
+    # Verify the current version after revert attempt
+    local current_ver
+    current_ver=$(dpkg-query -W -f='${Version}' "$PKG_NAME" 2>/dev/null || rpm -q --qf '%{VERSION}-%{RELEASE}' "$PKG_NAME" 2>/dev/null || pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || apk info -v "$PKG_NAME" 2>/dev/null | head -1 || echo "unknown")
+
+    if [ "$current_ver" = "$prev_ver" ]; then
+        echo "Revert successful: now on $current_ver" >&2
+        write_failure_marker "$prev_ver" "$prev_ver" "Update failed and reverted to previous version"
+    else
+        echo "Revert may have failed: current=$current_ver, expected=$prev_ver" >&2
+        write_failure_marker "$prev_ver" "$current_ver" "Update failed and revert attempt may not have restored previous version"
+    fi
 }
 
 # --- Read request ---
@@ -92,6 +173,9 @@ else
     write_failure_marker "$PREV_VERSION" "$PREV_VERSION" "No supported package manager"
     exit 1
 fi
+
+# --- Pre-install: fix any existing broken dependencies ---
+fix_broken_dependencies
 
 # --- Detect distro ID and version ---
 DISTRO_ID=""
@@ -246,45 +330,77 @@ fi
 echo "Downloading: $ASSET_URL"
 echo "Asset: $ASSET_NAME"
 
-# --- Download package to /tmp ---
+# --- Download and install with retry ---
 DOWNLOAD_PATH="/tmp/${ASSET_NAME}"
-rm -f "$DOWNLOAD_PATH"
-curl -sL -o "$DOWNLOAD_PATH" "$ASSET_URL" 2>&1
-if [ $? -ne 0 ] || [ ! -s "$DOWNLOAD_PATH" ]; then
-    echo "Download failed" >&2
-    write_failure_marker "$PREV_VERSION" "$PREV_VERSION" "Package download failed"
-    exit 1
-fi
+INSTALL_SUCCESS=false
+LAST_ERROR=""
 
-echo "Downloaded to: $DOWNLOAD_PATH ($(stat -c%s "$DOWNLOAD_PATH" 2>/dev/null || echo 'unknown') bytes)"
+for attempt in 1 2 3; do
+    echo "=== Attempt $attempt/$MAX_ATTEMPTS ==="
 
-# --- Install via native package manager ---
-UPGRADE_OUTPUT=""
-UPGRADE_RC=0
-case "$PKG_MGR" in
-    apt)
-        UPGRADE_OUTPUT=$(apt-get install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-        ;;
-    dnf)
-        UPGRADE_OUTPUT=$(dnf install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-        ;;
-    yum)
-        UPGRADE_OUTPUT=$(yum install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-        ;;
-    apk)
-        UPGRADE_OUTPUT=$(apk add --allow-untrusted "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-        ;;
-    pacman)
-        UPGRADE_OUTPUT=$(pacman -U --noconfirm "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-        ;;
-esac
+    # --- Download package to /tmp ---
+    rm -f "$DOWNLOAD_PATH"
+    curl -sL -o "$DOWNLOAD_PATH" "$ASSET_URL" 2>&1
+    CURL_RC=$?
+    if [ $CURL_RC -ne 0 ] || [ ! -s "$DOWNLOAD_PATH" ]; then
+        LAST_ERROR="Download failed (curl rc=$CURL_RC)"
+        echo "$LAST_ERROR" >&2
+        if [ $attempt -lt $MAX_ATTEMPTS ]; then
+            echo "Retrying in ${BACKOFF_SECONDS[$((attempt-1))]}s..."
+            sleep ${BACKOFF_SECONDS[$((attempt-1))]}
+        fi
+        continue
+    fi
+
+    echo "Downloaded to: $DOWNLOAD_PATH ($(stat -c%s "$DOWNLOAD_PATH" 2>/dev/null || echo 'unknown') bytes)"
+
+    # --- Fix broken dependencies before install ---
+    fix_broken_dependencies
+
+    # --- Install via native package manager ---
+    UPGRADE_OUTPUT=""
+    UPGRADE_RC=0
+    case "$PKG_MGR" in
+        apt)
+            UPGRADE_OUTPUT=$(apt-get install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
+            ;;
+        dnf)
+            UPGRADE_OUTPUT=$(dnf install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
+            ;;
+        yum)
+            UPGRADE_OUTPUT=$(yum install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
+            ;;
+        apk)
+            UPGRADE_OUTPUT=$(apk add --allow-untrusted "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
+            ;;
+        pacman)
+            UPGRADE_OUTPUT=$(pacman -U --noconfirm "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
+            ;;
+    esac
+
+    if [ $UPGRADE_RC -ne 0 ]; then
+        LAST_ERROR="Package install failed (rc=$UPGRADE_RC): ${UPGRADE_OUTPUT:0:500}"
+        echo "$LAST_ERROR" >&2
+        # Fix broken deps after failed install
+        fix_broken_dependencies
+        if [ $attempt -lt $MAX_ATTEMPTS ]; then
+            echo "Retrying in ${BACKOFF_SECONDS[$((attempt-1))]}s..."
+            sleep ${BACKOFF_SECONDS[$((attempt-1))]}
+        fi
+        continue
+    fi
+
+    INSTALL_SUCCESS=true
+    break
+done
 
 # --- Clean up downloaded package ---
 rm -f "$DOWNLOAD_PATH"
 
-if [ $UPGRADE_RC -ne 0 ]; then
-    echo "Install failed (rc=$UPGRADE_RC): $UPGRADE_OUTPUT" >&2
-    write_failure_marker "$PREV_VERSION" "$PREV_VERSION" "Package install failed (rc=$UPGRADE_RC)"
+# --- Handle final failure: revert and report ---
+if [ "$INSTALL_SUCCESS" != "true" ]; then
+    echo "All $MAX_ATTEMPTS attempts failed. Last error: $LAST_ERROR" >&2
+    revert_to_previous "$PREV_VERSION"
     exit 1
 fi
 
@@ -299,9 +415,6 @@ fi
 
 # --- Write success marker ---
 write_success_marker "$PREV_VERSION" "$NEW_VERSION" "$CHANGED"
-
-# --- Clean up request file ---
-rm -f "$REQUEST_PATH"
 
 echo "Self-update complete: $PREV_VERSION -> $NEW_VERSION (changed=$CHANGED)"
 exit 0
