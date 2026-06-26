@@ -141,12 +141,33 @@ pub fn load_crl(crl_path: &Path, ca_cert_der: &[u8]) -> CrlState {
 
     let crl_mtime = fs::metadata(crl_path).ok().and_then(|m| m.modified().ok());
 
+    load_crl_from_bytes(&crl_bytes, crl_mtime, ca_cert_der)
+}
+
+/// Parse and verify a CRL from raw bytes (PEM or DER), without touching disk.
+///
+/// This is the core verification logic shared by `load_crl` (disk read) and
+/// `refresh_crl` (network fetch). By verifying in memory before writing to
+/// disk, we ensure a failed verification never destroys a good on-disk CRL.
+///
+/// # Arguments
+/// * `crl_bytes` - Raw CRL bytes (PEM or DER format)
+/// * `crl_mtime` - Modification time to store in CrlState (None for in-memory only)
+/// * `ca_cert_der` - CA certificate bytes (PEM or DER) for signature verification
+///
+/// Returns the new CrlState. On signature failure, returns CrlStatus::Invalid (fail-closed).
+/// On parse error, returns CrlStatus::Invalid. On parse error, returns CrlStatus::Degraded.
+pub fn load_crl_from_bytes(
+    crl_bytes: &[u8],
+    crl_mtime: Option<SystemTime>,
+    ca_cert_der: &[u8],
+) -> CrlState {
     // Parse PEM: extract the DER block between BEGIN/END X509 CRL markers
-    let crl_der = match extract_pem_crl_der(&crl_bytes) {
+    let crl_der = match extract_pem_crl_der(crl_bytes) {
         Some(der) => der,
         None => {
             // Try parsing as raw DER
-            crl_bytes.clone()
+            crl_bytes.to_vec()
         }
     };
 
@@ -315,7 +336,17 @@ pub async fn refresh_crl(
         .await
         .map_err(|e| format!("Failed to read CRL response body: {}", e))?;
 
-    // Persist to disk (atomic write via temp file)
+    // Verify the fetched CRL in memory BEFORE writing to disk.
+    // This prevents a failed verification from destroying the last-known-good
+    // on-disk CRL, which would cause an agent restart to fail-closed.
+    let crl_bytes = crl_pem.as_bytes();
+    let new_state = load_crl_from_bytes(crl_bytes, None, ca_cert_der);
+
+    if new_state.status == CrlStatus::Invalid {
+        return Err("CRL signature verification failed after fetch".to_string());
+    }
+
+    // Verification passed — now persist to disk (atomic write via temp file)
     let parent = crl_path.parent().unwrap_or(Path::new("/tmp"));
     if !parent.exists() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create CRL directory: {}", e))?;
@@ -327,14 +358,14 @@ pub async fn refresh_crl(
     fs::rename(&tmp_path, crl_path)
         .map_err(|e| format!("Failed to rename temp CRL file: {}", e))?;
 
+    // Re-read mtime from the freshly written file for accurate age reporting
+    let crl_mtime = fs::metadata(crl_path).ok().and_then(|m| m.modified().ok());
+    let new_state = CrlState {
+        crl_mtime,
+        ..new_state
+    };
+
     debug!(path = %crl_path.display(), "CRL persisted to disk");
-
-    // Load the freshly written CRL to get a validated CrlState
-    let new_state = load_crl(crl_path, ca_cert_der);
-
-    if new_state.status == CrlStatus::Invalid {
-        return Err("CRL signature verification failed after fetch".to_string());
-    }
 
     info!(
         status = %new_state.status,
@@ -350,19 +381,29 @@ pub async fn refresh_crl(
 
 /// Spawn the CRL refresh background task.
 ///
-/// Runs on a 24-hour interval. On failure, logs a warning and continues
-/// serving with the existing (possibly stale) CRL.
+/// Runs on a 12-hour interval (CRL validity is 24h, giving a 12h margin).
+/// On fetch failure, retries with exponential backoff (1min → 5min → 15min → 1h)
+/// before resuming the normal interval. This ensures transient failures
+/// don't cascade into CRL expiration.
 pub fn spawn_crl_refresh_task(
     manager_url: String,
     crl_path: PathBuf,
     ca_cert_der: Vec<u8>,
     shared_state: SharedCrlState,
 ) {
-    let interval = Duration::from_secs(24 * 60 * 60); // 24 hours
+    let interval = Duration::from_secs(12 * 60 * 60); // 12 hours (CRL valid 24h → 12h margin)
+    let backoff_schedule: [Duration; 4] = [
+        Duration::from_secs(60),   // 1 min
+        Duration::from_secs(300),  // 5 min
+        Duration::from_secs(900),  // 15 min
+        Duration::from_secs(3600), // 1 hour
+    ];
 
     tokio::spawn(async move {
         // Initial small delay to let the server finish binding
         tokio::time::sleep(Duration::from_secs(30)).await;
+
+        let mut retry_idx: usize = 0;
 
         loop {
             let result = refresh_crl(&manager_url, &crl_path, &ca_cert_der, &shared_state).await;
@@ -370,22 +411,29 @@ pub fn spawn_crl_refresh_task(
             match result {
                 Ok(()) => {
                     info!("CRL background refresh completed successfully");
+                    retry_idx = 0;
+                    tokio::time::sleep(interval).await;
                 }
                 Err(e) => {
+                    let delay = backoff_schedule[retry_idx.min(backoff_schedule.len() - 1)];
                     warn!(
                         error = %e,
-                        "CRL background refresh failed -- continuing with current CRL"
+                        retry_in_secs = delay.as_secs(),
+                        retry_count = retry_idx + 1,
+                        "CRL background refresh failed -- retrying with backoff"
                     );
+                    tokio::time::sleep(delay).await;
+                    if retry_idx < backoff_schedule.len() {
+                        retry_idx += 1;
+                    }
                 }
             }
-
-            tokio::time::sleep(interval).await;
         }
     });
 
     info!(
         interval_secs = interval.as_secs(),
-        "CRL refresh background task spawned"
+        "CRL refresh background task spawned (12h interval, retry with backoff on failure)"
     );
 }
 
