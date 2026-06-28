@@ -650,3 +650,141 @@ async fn test_polling_default_parameters() {
 
     assert_eq!(bundle.ca_crt, "DEFAULT_CA");
 }
+
+// =============================================================================
+// Repo Config Provisioning Tests
+//
+// Tests provision_repo_config writes GPG key and sources config to correct
+// distro-specific paths, apk append behavior, and unknown distro error.
+// =============================================================================
+
+use linux_patch_api::enroll::client::RepoConfig;
+use linux_patch_api::enroll::provision::provision_repo_config;
+use tempfile::tempdir;
+
+fn sample_repo_config(distro_id: &str, keyring_path: &str) -> RepoConfig {
+    RepoConfig {
+        gpg_public_key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE_GPG_KEY_DATA\n-----END PGP PUBLIC KEY BLOCK-----".to_string(),
+        sources_config: "deb [signed-by=/etc/apt/keyrings/lpa-repo.gpg] https://manager.example.com/repo stable main".to_string(),
+        distro_id: distro_id.to_string(),
+        keyring_path: keyring_path.to_string(),
+    }
+}
+
+#[actix_rt::test]
+#[serial]
+#[ignore]
+async fn test_provision_repo_config_writes_gpg_key_and_sources() {
+    let keyring_dir = tempdir().expect("Failed to create temp dir for keyring");
+    let keyring_path = keyring_dir.path().join("lpa-repo.gpg");
+    let repo = sample_repo_config("ubuntu", keyring_path.to_str().unwrap());
+
+    provision_repo_config(&repo)
+        .await
+        .expect("provision_repo_config should succeed for ubuntu");
+
+    // 1. Verify GPG key written to keyring_path
+    let key_content =
+        std::fs::read_to_string(&keyring_path).expect("GPG key file should exist at keyring_path");
+    assert!(
+        key_content.contains("-----BEGIN PGP PUBLIC KEY BLOCK-----"),
+        "GPG key file should contain the public key data"
+    );
+
+    // 2. Verify sources config written to /etc/apt/sources.list.d/lpa.list
+    let sources_path = "/etc/apt/sources.list.d/lpa.list";
+    let sources_content = std::fs::read_to_string(sources_path)
+        .expect("Sources config should be written to /etc/apt/sources.list.d/lpa.list");
+    assert!(
+        sources_content.contains("manager.example.com"),
+        "Sources config should contain the repo URL"
+    );
+
+    // Clean up system file
+    let _ = std::fs::remove_file(sources_path);
+}
+
+#[actix_rt::test]
+#[serial]
+#[ignore]
+async fn test_provision_repo_config_apk_append_behavior() {
+    let keyring_dir = tempdir().expect("Failed to create temp dir for keyring");
+    let keyring_path = keyring_dir.path().join("lpa-repo.gpg");
+
+    let repo = RepoConfig {
+        gpg_public_key:
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE_GPG_KEY\n-----END PGP PUBLIC KEY BLOCK-----"
+                .to_string(),
+        sources_config: "https://manager.example.com/repo/alpine/main".to_string(),
+        distro_id: "alpine".to_string(),
+        keyring_path: keyring_path.to_str().unwrap().to_string(),
+    };
+
+    // Save original state of /etc/apk/repositories (may not exist on non-Alpine)
+    let original_content = std::fs::read_to_string("/etc/apk/repositories").ok();
+
+    // On non-Alpine systems, /etc/apk/ may not exist — create it so the test
+    // can verify the append logic without depending on a real Alpine environment.
+    std::fs::create_dir_all("/etc/apk").ok();
+    if !std::path::Path::new("/etc/apk/repositories").exists() {
+        std::fs::write("/etc/apk/repositories", "").ok();
+    }
+
+    provision_repo_config(&repo)
+        .await
+        .expect("provision_repo_config should succeed for alpine");
+
+    // 1. Verify GPG key written
+    let key_content = std::fs::read_to_string(&keyring_path).expect("GPG key file should exist");
+    assert!(key_content.contains("FAKE_GPG_KEY"));
+
+    // 2. Verify repo URL was appended to /etc/apk/repositories
+    let apk_content = std::fs::read_to_string("/etc/apk/repositories")
+        .expect("/etc/apk/repositories should exist after provisioning");
+    assert!(
+        apk_content.contains("https://manager.example.com/repo/alpine/main"),
+        "apk repositories should contain the appended repo URL"
+    );
+
+    // 3. Test idempotency — calling again should not duplicate
+    provision_repo_config(&repo)
+        .await
+        .expect("Second provision_repo_config should succeed (idempotent)");
+    let apk_content2 = std::fs::read_to_string("/etc/apk/repositories")
+        .expect("/etc/apk/repositories should still exist");
+    let count = apk_content2
+        .matches("https://manager.example.com/repo/alpine/main")
+        .count();
+    assert_eq!(
+        count, 1,
+        "Repo URL should appear exactly once after duplicate provisioning (idempotent append)"
+    );
+
+    // Clean up: restore original or remove file
+    if let Some(orig) = original_content {
+        std::fs::write("/etc/apk/repositories", orig).ok();
+    } else {
+        std::fs::remove_file("/etc/apk/repositories").ok();
+    }
+}
+
+#[actix_rt::test]
+#[serial]
+async fn test_provision_repo_config_unknown_distro_returns_error() {
+    let keyring_dir = tempdir().expect("Failed to create temp dir for keyring");
+    let keyring_path = keyring_dir.path().join("lpa-repo.gpg");
+    let repo = sample_repo_config("gentoo", keyring_path.to_str().unwrap());
+
+    let result = provision_repo_config(&repo).await;
+
+    assert!(
+        result.is_err(),
+        "provision_repo_config should return error for unknown distro_id"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("gentoo"),
+        "Error message should mention the unknown distro_id: {}",
+        err_msg
+    );
+}

@@ -103,6 +103,7 @@ rand = "0.8"
 hex = "0.4"
 time = { version = "0.3", features = ["std"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+regex-lite = "0.1"
 
 # Integration tests in subdirectories
 [[test]]
@@ -124,6 +125,10 @@ path = "tests/integration/auth_test.rs"
 [[test]]
 name = "rate_limit_test"
 path = "tests/unit/rate_limit_test.rs"
+
+[[test]]
+name = "self_update_unit"
+path = "tests/unit/self_update_unit.rs"
 
 [[bench]]
 name = "api_benchmarks"

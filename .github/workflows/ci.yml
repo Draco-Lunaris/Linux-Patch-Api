@@ -197,34 +197,6 @@ jobs:
         with:
           files: linux-patch-api_*_debian13_amd64.deb
 
-  build-deb-debian12:
-    name: Build .deb (Debian 12)
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
-    runs-on: [self-hosted, linux, debian-12]
-    steps:
-      - name: Clean previous build artifacts from root
-        run: sudo rm -rf releases/ || true
-      - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
-      - name: Install Rust toolchain
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build .deb package
-        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
-      - name: Rename package with distro suffix
-        run: |
-          FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
-          if [ -n "$FILE" ]; then
-            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_debian12_amd64/')"
-          fi
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: linux-patch-api_*_debian12_amd64.deb
-
   build-rpm-fedora:
     name: Build .rpm (Fedora)
     if: startsWith(github.ref, 'refs/tags/v')
@@ -322,3 +294,71 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.apk
+
+  # ── Publish to Manager-Hosted Repo (tag push only) ──────────────────────
+
+  publish-to-manager-repo:
+    name: Publish to Manager Repo
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-deb-u2404, build-deb-u2204, build-deb-debian13, build-rpm-fedora, build-rpm-almalinux, build-arch, build-alpine]
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Install signing tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-sig rpm-sign createrepo-c gpg jq openssh-client
+      - name: Download all release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          mkdir -p artifacts
+          curl -sfL -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG_NAME" | \
+            jq -r '.assets[].browser_download_url' | \
+            while read -r url; do
+              filename=$(basename "$url")
+              curl -sfL -H "Authorization: token $GITHUB_TOKEN" -o "artifacts/$filename" "$url"
+            done
+      - name: Import GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.LPA_REPO_GPG_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --list-secret-keys
+      - name: Sign and publish .deb packages
+        run: |
+          for deb in artifacts/*.deb; do
+            dpkg-sig --sign builder -k LPA-REPO-SIGNING-KEY "$deb"
+            codename=$(echo "$deb" | grep -oP '(?:u2404|u2204|debian13)' | \
+              sed 's/u2404/noble/;s/u2204/jammy/;s/debian13/trixie/')
+            ssh root@manager.moon-dragon.us \
+              "reprepro -b /var/www/lpa-repo/apt includedeb $codename -" < "$deb"
+          done
+      - name: Sign and publish .rpm packages
+        run: |
+          for rpm in artifacts/*.rpm; do
+            rpmsign --addsign --key-id LPA-REPO-SIGNING-KEY "$rpm"
+            scp "$rpm" root@manager.moon-dragon.us:/var/www/lpa-repo/dnf/el9/Packages/
+          done
+          ssh root@manager.moon-dragon.us "createrepo_c --update /var/www/lpa-repo/dnf/el9/ && \
+            gpg --batch --detach-sign --armor /var/www/lpa-repo/dnf/el9/repodata/repomd.xml"
+      - name: Sign and publish .apk packages
+        run: |
+          for apk in artifacts/*.apk; do
+            scp "$apk" root@manager.moon-dragon.us:/var/www/lpa-repo/apk/v3.21/
+          done
+          ssh root@manager.moon-dragon.us \
+            "cd /var/www/lpa-repo/apk/v3.21/ && \
+             for apk in *.apk; do abuild-sign -k ~/.abuild/lpa-privkey.rsa \"\$apk\"; done && \
+             apk index *.apk -o APKINDEX.tar.gz && \
+             abuild-sign APKINDEX.tar.gz"
+      - name: Sign and publish Arch packages
+        run: |
+          for zst in artifacts/*.pkg.tar.zst; do
+            gpg --detach-sign --armor "$zst"
+            scp "$zst" "$zst.asc" root@manager.moon-dragon.us:/var/www/lpa-repo/pacman/x86_64/
+          done
+          ssh root@manager.moon-dragon.us \
+            "repo-add /var/www/lpa-repo/pacman/x86_64/lpa-repo.db.tar.zst /var/www/lpa-repo/pacman/x86_64/*.pkg.tar.zst && \
+             gpg --detach-sign --armor /var/www/lpa-repo/pacman/x86_64/lpa-repo.db"

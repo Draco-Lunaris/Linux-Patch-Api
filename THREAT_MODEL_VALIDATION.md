@@ -149,6 +149,52 @@ This report validates all STRIDE threat mitigations against actual implementatio
 
 ---
 
+### 7. GPG TRUST CHAIN FOR MANAGER-HOSTED REPOSITORY SELF-UPDATE
+
+#### Trust Model Overview
+
+The self-update feature establishes a transitive trust chain:
+
+**mTLS enrollment → GPG public key → package signatures**
+
+1. **mTLS enrollment** — The agent enrolls with the manager over a mutually-authenticated TLS connection. This is the root of trust for self-update.
+2. **GPG public key delivery** — The GPG public key is delivered inside the mTLS-authenticated enrollment bundle (`PkiBundle.repo_config`). The agent trusts this key because it trusts the mTLS channel.
+3. **Package signature verification** — Package signatures are verified by the native package manager (apt/dnf/apk/pacman) using the GPG key installed during enrollment. The agent performs **no manual signature checks** — delegation to the native package manager is a security feature, not a gap.
+
+#### Transitive Trust
+
+If enrollment (mTLS) is compromised, package trust is compromised transitively:
+- An attacker who compromises the enrollment channel can substitute their own GPG public key
+- All agents trusting that key can be fed malicious packages
+- The trust chain is only as strong as its weakest link (mTLS enrollment)
+
+#### Signature Verification Delegation
+
+The agent deliberately does **not** perform manual GPG signature verification. Instead:
+- The GPG public key is written to the distro-appropriate keyring path during enrollment
+- The package manager's native signature verification (e.g., apt's `signed-by`, dnf's `gpgcheck`) is used
+- This is a security feature — the native package managers have battle-tested signature verification that is more robust than any custom implementation
+- The agent's role is limited to: delivering the key to the keyring, configuring the repo source, and invoking the package manager
+
+#### Threat: Compromised GPG Private Key
+
+| Threat | Impact | Mitigation |
+|--------|--------|------------|
+| Manager's GPG private key compromised | All agents trusting that key can be fed malicious packages | GPG key stored in Vaultwarden (access-controlled), 2-year expiry enforced, rotation procedure documented in `tasks/self-update-runbook.md` |
+| Enrollment channel compromised | Attacker can substitute GPG key during enrollment | mTLS with internal CA, certificate pinning, enrollment is one-time operation with audit logging |
+| GPG key not rotated | Stale key increases compromise window | 2-year maximum expiry, rotation procedure documented |
+
+#### GPG Key Rotation Procedure
+
+1. Generate a new GPG keypair on the manager host
+2. Re-sign all packages in the manager-hosted repository with the new key
+3. Distribute the new public key via re-enrollment (new agents get it in PkiBundle) or via `GET /api/v1/pki/repo-config` (legacy agents)
+4. Revoke the old GPG key
+5. Verify all agents have transitioned to the new key
+6. Detailed procedure: see `tasks/self-update-runbook.md`
+
+---
+
 ## Missing or Incomplete Mitigations
 
 ### Medium Priority

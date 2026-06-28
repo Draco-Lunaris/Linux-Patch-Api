@@ -3,8 +3,8 @@
 ## Project Overview
 **Title:** Linux_Patch_API  
 **Description:** API service for secure remote management of patching processes and software add/removal  
-**Version:** 1.2.0  
-**Status:** Draft  
+**Version:** 2.0.0  
+**Status:** Active  
 
 ## Scope
 
@@ -256,6 +256,52 @@ The enrollment flow runs and **exits after completion** — it does NOT start th
 - **Target Paths:** Configured via TLS settings or defaults (`/etc/linux_patch_api/certs/{ca,server,server.key}.pem`)
 - **Whitelist Auto-Append:** Manager IP resolved (hostname → DNS or direct IP) and appended to `/etc/linux_patch_api/whitelist.yaml`
 - **Completion:** For auto-enrollment: daemon transitions to standard mTLS listening mode without requiring service restart. For `--enroll`: daemon exits with code 0.
+
+## Self-Update via Manager-Hosted Package Repository
+
+The agent self-updates from a manager-hosted package repository instead of downloading release artifacts from GitHub Releases. The manager serves apt/dnf/apk/pacman repositories over HTTPS with GPG-signed packages; the agent's `self-update.sh` is reduced to native package-manager commands.
+
+### Repository Provisioning During Enrollment
+
+- The manager's enrollment approval response extends `PkiBundle` with an optional `repo_config` field:
+  - `gpg_public_key` — ASCII-armored GPG public key used to verify repo metadata and packages
+  - `sources_config` — distro-specific repo configuration (apt sources.list line, dnf repo file, apk repository URL, pacman include)
+  - `distro_id` — `ubuntu` / `debian` / `fedora` / `rhel` / `alpine` / `arch`
+  - `keyring_path` — target path where the GPG key is written (e.g., `/etc/apt/keyrings/lpa-repo.gpg`)
+- During PKI provisioning, the agent writes the GPG key to `keyring_path` (file mode `0644`) and writes the sources config to the distro-specific path (apt: `/etc/apt/sources.list.d/lpa.list`; dnf: `/etc/yum.repos.d/lpa.repo`; apk: appended to `/etc/apk/repositories`; pacman: `/etc/pacman.d/lpa-repo`)
+- If `repo_config` is absent from the bundle (older enrollment), the agent fetches it on demand from `GET /api/v1/pki/repo-config`
+
+### Self-Update Flow
+
+1. Manager invokes `POST /api/v1/system/update` on the agent (optionally with `target_version`)
+2. Agent writes a request file and triggers `self-update.sh` (via the update service unit)
+3. `self-update.sh` reads `target_version`, detects the package manager (apt/dnf/yum/apk/pacman), refreshes repo metadata, and runs the native upgrade command
+4. On success, the agent records `previous_version` and `new_version` to `/var/lib/linux_patch_api/last_self_update.json`
+5. On package-manager failure, the agent writes a failure marker and exits non-zero
+
+### GPG Signature Verification
+
+- All packages and repo metadata (`Release`, `repomd.xml`, `APKINDEX.tar.gz`, `lpa-repo.db`) are signed by the manager's GPG key
+- Verification is delegated to the native package manager — the agent performs no manual signature checks
+- Agent trusts the GPG public key because it was delivered inside the mTLS-authenticated enrollment bundle (existing trust root)
+
+### Post-Upgrade Health Check and Auto-Rollback
+
+- After a successful package install, `self-update.sh` waits up to 60 seconds for `linux-patch-api.service` to report active (systemd `is-active` or OpenRC `rc-service ... status`)
+- If the service does not become active within the timeout, the agent installs the previously recorded `previous_version` using the same package manager (apt `--allow-downgrades`, dnf/yum `--`, apk `=`, pacman `-U` from cache) and records a failure marker
+
+### Manager-Initiated Downgrade
+
+- The manager can roll back a host by calling `POST /api/v1/system/update` with `target_version` set to the previous known-good version
+- The package manager permits the version decrease (`apt-get install --allow-downgrades`, `dnf install --`, etc.)
+- Prerequisite: the target version remains in the manager repo (reprepro retains all published versions by default)
+
+### Removed Mechanisms
+
+- The previous GitHub Releases download path (`curl` + GitHub API parsing + asset pattern matching) is removed from `self-update.sh`
+- The manager no longer publishes to GitHub Releases once all agents are migrated (GitHub Releases may remain as a read-only archive during the migration window)
+
+See `tasks/manager-hosted-repo-design.md` for the full design, including threat model and migration phases.
 
 ## Audit Logging
 
