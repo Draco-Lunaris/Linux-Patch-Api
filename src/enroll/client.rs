@@ -34,6 +34,7 @@ pub struct EnrollmentResponse {
 /// The manager uses a JSON-tagged enum with the `status` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
+#[allow(clippy::large_enum_variant)]
 pub enum EnrollmentStatusResponse {
     Pending,
     Approved {
