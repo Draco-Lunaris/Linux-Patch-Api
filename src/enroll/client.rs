@@ -44,9 +44,35 @@ pub enum EnrollmentStatusResponse {
         server_key: String,
         #[serde(default)]
         crl_pem: String,
+        /// Optional package repository configuration from the manager.
+        /// Absent when the manager doesn't support manager-hosted repos yet.
+        #[serde(default)]
+        repo_config: Option<RepoConfig>,
     },
     Denied,
     NotFound,
+}
+
+/// Package repository configuration delivered via the enrollment bundle.
+///
+/// The manager includes this in the `Approved` response so the agent can
+/// configure its local package manager to pull updates from the manager-hosted
+/// repo instead of GitHub Releases. The GPG public key is trusted because it
+/// was delivered inside the mTLS-authenticated enrollment bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoConfig {
+    /// ASCII-armored GPG public key for verifying repo metadata and package signatures.
+    pub gpg_public_key: String,
+    /// Distro-specific repository configuration text.
+    /// For apt: contents of /etc/apt/sources.list.d/lpa.list
+    /// For dnf: contents of /etc/yum.repos.d/lpa.repo
+    /// For apk: repository URL line for /etc/apk/repositories
+    /// For pacman: pacman.conf include file content
+    pub sources_config: String,
+    /// Distro identifier (e.g., "ubuntu", "debian", "fedora", "alpine", "arch")
+    pub distro_id: String,
+    /// Target path where the GPG key should be written (e.g., /etc/apt/keyrings/lpa-repo.gpg)
+    pub keyring_path: String,
 }
 
 /// PEM-encoded PKI bundle extracted from an `Approved` status response.
@@ -57,6 +83,11 @@ pub struct PkiBundle {
     pub server_crt: String,
     pub server_key: String,
     pub crl_pem: String,
+    /// Optional package repository configuration from the manager.
+    /// Present when the manager supports manager-hosted repo provisioning.
+    /// Absent for older enrollment responses (agent fetches via fallback).
+    #[serde(default)]
+    pub repo_config: Option<RepoConfig>,
 }
 
 impl From<EnrollmentStatusResponse> for Option<PkiBundle> {
@@ -68,12 +99,14 @@ impl From<EnrollmentStatusResponse> for Option<PkiBundle> {
                 server_crt,
                 server_key,
                 crl_pem,
+                repo_config,
             } => Some(PkiBundle {
                 ca_crt,
                 ca_chain,
                 server_crt,
                 server_key,
                 crl_pem,
+                repo_config,
             }),
             _ => None,
         }
@@ -465,6 +498,7 @@ impl EnrollmentClient {
                     server_crt,
                     server_key,
                     crl_pem,
+                    repo_config,
                 } => {
                     tracing::info!(
                         elapsed_seconds = start.elapsed().as_secs(),
@@ -477,6 +511,7 @@ impl EnrollmentClient {
                         server_crt,
                         server_key,
                         crl_pem,
+                        repo_config,
                     });
                 }
                 EnrollmentStatusResponse::Denied => {
@@ -510,6 +545,57 @@ impl EnrollmentClient {
             effective_max,
             effective_max
         ))
+    }
+
+    /// Fetch repo configuration from the manager's fallback endpoint.
+    ///
+    /// Called when the enrollment bundle did not include `repo_config` (older
+    /// manager that doesn't embed it in the Approved response). Performs
+    /// `GET /api/v1/pki/repo-config` on the manager URL and deserializes the
+    /// response body into a [`RepoConfig`].
+    ///
+    /// # Returns
+    /// - `Ok(RepoConfig)` on HTTP 200 with a valid JSON body
+    /// - `Err` on network error, non-200 status, or malformed JSON
+    pub async fn fetch_repo_config(&self) -> Result<RepoConfig> {
+        let url = format!("{}/api/v1/pki/repo-config", self.manager_url);
+        tracing::info!(url = %url, "Fetching repo config from manager fallback endpoint");
+
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .context("Network error — failed to reach repo-config endpoint")?;
+
+        match response.status().as_u16() {
+            200 => {
+                let body = response
+                    .text()
+                    .await
+                    .context("Failed to read repo-config response body")?;
+                let config: RepoConfig = serde_json::from_str(&body)
+                    .context("Invalid repo-config response — malformed JSON from manager")?;
+                tracing::info!("Repo config fetched successfully from fallback endpoint");
+                Ok(config)
+            }
+            status if status >= 500 => {
+                let body = response.text().await.ok();
+                Err(anyhow!(
+                    "Server error fetching repo-config (HTTP {}) — {}",
+                    status,
+                    body.as_deref().unwrap_or("no details")
+                ))
+            }
+            other => {
+                let body = response.text().await.ok();
+                Err(anyhow!(
+                    "Unexpected HTTP {} fetching repo-config — {}",
+                    other,
+                    body.as_deref().unwrap_or("no details")
+                ))
+            }
+        }
     }
 
     /// Create a SIGINT (Ctrl+C) signal receiver.
@@ -584,11 +670,13 @@ mod tests {
             server_crt: "crt".into(),
             server_key: "key".into(),
             crl_pem: String::new(),
+            repo_config: None,
         };
         let bundle: Option<PkiBundle> = status.into();
         assert!(bundle.is_some());
         let bundle = bundle.unwrap();
         assert_eq!(bundle.ca_crt, "ca");
+        assert!(bundle.repo_config.is_none());
     }
 
     #[test]

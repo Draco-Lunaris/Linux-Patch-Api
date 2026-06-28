@@ -132,7 +132,8 @@ ssh_run() {
 # Copy file to target
 scp_to() {
     local src="$1" dest="$2"
-    scp -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$src" "${TARGET_USER}@${TARGET_HOST}:${dest}"
+    # Use cat|ssh pipe instead of scp (more reliable across OpenSSH versions)
+    cat "$src" | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${TARGET_USER}@${TARGET_HOST}" "cat > '${dest}'"
 }
 
 # Copy file from target
@@ -145,7 +146,7 @@ scp_from() {
 api_get() {
     local path="$1"
     ssh_run "curl -s --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} \
-        https://localhost:${API_PORT}${path}"
+        https://192.168.3.140:${API_PORT}${path}"
 }
 
 # Make mTLS API POST request on target
@@ -154,11 +155,11 @@ api_post() {
     if [ -n "$body" ]; then
         ssh_run "curl -s --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} \
             -X POST -H 'Content-Type: application/json' -d '${body}' \
-            https://localhost:${API_PORT}${path}"
+            https://192.168.3.140:${API_PORT}${path}"
     else
         ssh_run "curl -s --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} \
             -X POST -H 'Content-Type: application/json' \
-            https://localhost:${API_PORT}${path}"
+            https://192.168.3.140:${API_PORT}${path}"
     fi
 }
 
@@ -257,12 +258,12 @@ read_current_version() {
 # Build a .deb package at the current Cargo.toml version
 build_deb() {
     local label="$1"
-    log_step "Building ${label} package"
+    log_step "Building ${label} package" >&2
     cd "${PROJECT_ROOT}"
     # Clean previous build artifacts
     rm -f "${PROJECT_ROOT}"/*.deb 2>/dev/null || true
     # Build
-    bash scripts/build-package.sh 2>&1 | tail -5
+    bash scripts/build-package.sh 2>&1 | tail -5 >&2
     # Find the built .deb
     local deb_file
     deb_file=$(ls -t "${PROJECT_ROOT}"/*.deb 2>/dev/null | head -1)
@@ -270,7 +271,12 @@ build_deb() {
         log_error "Failed to build ${label} .deb package"
         exit 1
     fi
-    echo "$deb_file"
+    # Copy .deb to work directory to prevent deletion by next build_deb() call
+    mkdir -p "${WORK_DIR}"
+    local deb_name
+    deb_name=$(basename "$deb_file")
+    cp "$deb_file" "${WORK_DIR}/${deb_name}"
+    echo "${WORK_DIR}/${deb_name}"
 }
 
 # =============================================================================
@@ -419,7 +425,7 @@ test_upgrade_with_restart() {
     # --- Trigger self-update ---
     log_test "Triggering POST /api/v1/system/update"
     local update_resp http_code
-    update_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    update_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
     http_code=$(echo "$update_resp" | tail -1)
     if [ "$http_code" != "202" ]; then
         # Get full response for diagnostics
@@ -548,7 +554,7 @@ test_same_version() {
     # --- Trigger self-update with current version ---
     log_test "Triggering POST /api/v1/system/update with target_version=${pre_version}"
     local update_resp http_code
-    update_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"${pre_version}\"}' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    update_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"${pre_version}\"}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
     http_code=$(echo "$update_resp" | tail -1)
 
     # Accept 202 (started) or 200 (already at version)
@@ -622,13 +628,13 @@ test_restart_false() {
 
     # Check if the API accepts the restart field
     local test_resp
-    test_resp=$(ssh_run "curl -s --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"restart\":false}' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null || echo '{}")
+    test_resp=$(ssh_run "curl -s --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"restart\":false}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null || echo '{}')
     local test_code
     test_code=$(echo "$test_resp" | python3 -c "import sys; print('ok')" 2>/dev/null || echo "parse_error")
 
     # If the API rejects the restart field, skip this test
     local http_code
-    http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"restart\":false}' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"restart\":false}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
 
     if [ "$http_code" = "400" ]; then
         skip "$test_name (restart field not yet implemented in API)"
@@ -659,7 +665,7 @@ test_restart_false() {
     local update_resp
     update_resp=$(api_post "/api/v1/system/update" '{"restart":false}')
     local http_code_resp
-    http_code_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"restart\":false}' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    http_code_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"restart\":false}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
 
     if [ "$http_code_resp" != "202" ]; then
         fail "$test_name" "Expected HTTP 202, got ${http_code_resp}"
@@ -816,7 +822,7 @@ test_validation_rejection() {
         local escaped_injection
         escaped_injection=$(echo "$injection" | sed 's/"/\"/g')
         local http_code
-        http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"${escaped_injection}\"}' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+        http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"${escaped_injection}\"}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
         if [ "$http_code" = "400" ]; then
             log_info "Rejected injection attempt (HTTP 400): ${injection}"
         elif [ "$http_code" = "202" ] || [ "$http_code" = "200" ]; then
@@ -832,7 +838,7 @@ test_validation_rejection() {
 
     # Test empty string (should be 400)
     local http_code_empty
-    http_code_empty=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"\"}' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    http_code_empty=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"\"}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
     if [ "$http_code_empty" = "400" ]; then
         pass "empty_version_rejected"
     else
@@ -841,7 +847,7 @@ test_validation_rejection() {
 
     # Test valid version (should be 202)
     local http_code_valid
-    http_code_valid=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"1.0.0\"}' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    http_code_valid=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' -d '{\"target_version\":\"1.0.0\"}' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
     if [ "$http_code_valid" = "202" ]; then
         pass "valid_version_accepted"
         # Clean up the self-update request that was triggered
@@ -867,7 +873,7 @@ test_update_status_endpoint() {
     # Test when no update has occurred (should return 404)
     clean_markers
     local no_marker_resp
-    no_marker_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} https://localhost:${API_PORT}/api/v1/system/update/status" 2>/dev/null)
+    no_marker_resp=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} https://192.168.3.140:${API_PORT}/api/v1/system/update/status" 2>/dev/null)
     if [ "$no_marker_resp" = "404" ]; then
         pass "status_returns_404_when_no_update"
     else
@@ -879,7 +885,7 @@ test_update_status_endpoint() {
     local update_resp
     update_resp=$(api_post "/api/v1/system/update")
     local http_code
-    http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
 
     if [ "$http_code" = "202" ]; then
         # Wait for marker
@@ -938,7 +944,7 @@ test_concurrent_update_rejection() {
 
     # Trigger a self-update
     local http_code
-    http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
 
     if [ "$http_code" != "202" ]; then
         skip "$test_name (could not trigger initial self-update, got HTTP ${http_code})"
@@ -952,7 +958,7 @@ test_concurrent_update_rejection() {
     # - Return 409 (conflict) — acceptable
     # - Return 500 (error) — may indicate the request file already exists
     local second_http_code
-    second_http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' https://localhost:${API_PORT}/api/v1/system/update" 2>/dev/null)
+    second_http_code=$(ssh_run "curl -s -o /dev/null -w '%{http_code}' --cacert ${CA_CERT} --cert ${CLIENT_CERT} --key ${CLIENT_KEY} -X POST -H 'Content-Type: application/json' https://192.168.3.140:${API_PORT}/api/v1/system/update" 2>/dev/null)
 
     log_info "Second self-update request returned HTTP ${second_http_code}"
 
@@ -978,7 +984,7 @@ build_test_packages() {
     # Parse version for bumping
     # Handle versions like 1.5.0-dev1, 1.4.3, etc.
     local base_version dev_suffix
-    if echo "$ORIGINAL_VERSION" | grep -qE '-dev[0-9]+$'; then
+    if echo "$ORIGINAL_VERSION" | grep -qE -- '-dev[0-9]+$'; then
         base_version=$(echo "$ORIGINAL_VERSION" | sed 's/-dev[0-9]*$//')
         dev_suffix=$(echo "$ORIGINAL_VERSION" | grep -oE 'dev[0-9]*$')
         local dev_num
@@ -1140,15 +1146,15 @@ main() {
     # Deploy vN and set up local repo with vN+1
     deploy_vn_and_repo
 
-    # Run test cases
-    test_update_service_survives
-    test_validation_rejection
-    test_update_status_endpoint
-    test_upgrade_with_restart
-    test_same_version
-    test_restart_false
-    test_crl_cert_preservation
-    test_concurrent_update_rejection
+    # Run test cases (each wrapped with || true so set -e doesn't kill the script)
+    test_update_service_survives || true
+    test_validation_rejection || true
+    test_update_status_endpoint || true
+    test_upgrade_with_restart || true
+    test_same_version || true
+    test_restart_false || true
+    test_crl_cert_preservation || true
+    test_concurrent_update_rejection || true
 
     # Clean up
     cleanup

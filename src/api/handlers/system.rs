@@ -76,11 +76,21 @@ pub struct RebootRequest {
 }
 
 /// Self-update request
+fn default_true() -> bool { true }
+fn default_restart_delay() -> u64 { 5 }
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct SelfUpdateRequest {
     /// Pin to an exact package version. None = upgrade to latest available.
     #[serde(default)]
     pub target_version: Option<String>,
+    /// Restart the service after a successful upgrade so the new binary runs.
+    #[serde(default = "default_true")]
+    pub restart: bool,
+    /// Seconds to wait before the decoupled restart fires.
+    /// Clamped to max 300 (5 minutes) in the handler.
+    #[serde(default = "default_restart_delay")]
+    pub restart_delay_seconds: u64,
 }
 
 /// Get system information
@@ -390,7 +400,28 @@ pub async fn get_service_status(
     }
 }
 
-/// Self-update the agent via detached systemd unit
+/// Self-update the agent via detached systemd unit.
+///
+/// # Architecture Note: Why This Handler Does Not Use JobManager
+///
+/// Every other async operation (reboot, install, update, remove, patch) uses
+/// `JobManager::create_job()` for concurrency control and status tracking.
+/// This handler deliberately does NOT use JobManager, for two reasons:
+///
+/// 1. **Cross-restart persistence**: The upgrade kills the agent process (dpkg
+///    prerm runs `systemctl stop`). `JobManager` is in-memory — all job state
+///    is destroyed on process restart. The marker file
+///    (`/var/lib/linux_patch_api/last_self_update.json`) IS the job state,
+///    persisted to disk so the new agent instance can report results via
+///    `GET /system/update/status`.
+///
+/// 2. **Concurrency guard**: Instead of JobManager capacity limits, this handler
+///    uses two explicit guards: (a) `systemctl is-active linux-patch-api-update.service`
+///    checks if an update is running, and (b) request file existence checks if
+///    one is pending. These survive process restarts; JobManager would not.
+///
+/// Do NOT "fix" this by routing through JobManager — it would break cross-restart
+/// visibility. See `tasks/self-update-design.md` §1.9 for full rationale.
 pub async fn update_self(body: web::Json<SelfUpdateRequest>, _req: HttpRequest) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
 
@@ -409,9 +440,15 @@ pub async fn update_self(body: web::Json<SelfUpdateRequest>, _req: HttpRequest) 
 
     let target_version = body.target_version.clone();
 
+    // Clamp restart_delay_seconds to max 300 (5 minutes)
+    let restart_delay_seconds = body.restart_delay_seconds.clamp(1, packages::MAX_RESTART_DELAY_SECONDS);
+    let restart = body.restart;
+
     info!(
         request_id = %request_id,
         target_version = ?target_version,
+        restart = restart,
+        restart_delay_seconds = restart_delay_seconds,
         "Initiating self-update"
     );
 
@@ -478,6 +515,8 @@ pub async fn update_self(body: web::Json<SelfUpdateRequest>, _req: HttpRequest) 
             let response = ApiResponse::success(serde_json::json!({
                 "status": "pending",
                 "target_version": target_version,
+                "restart": restart,
+                "restart_delay_seconds": restart_delay_seconds,
                 "message": "Self-update initiated; agent will restart with new version",
             }));
             HttpResponse::Accepted().json(response)

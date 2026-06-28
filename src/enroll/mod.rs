@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 /// Re-export key types for ergonomic access from parent modules.
 pub use client::{
     EnrollmentClient, EnrollmentRequest, EnrollmentResponse, EnrollmentStatusResponse, PkiBundle,
+    RepoConfig,
 };
 /// Re-export identity extraction functions.
 pub use identity::{
@@ -168,6 +169,36 @@ pub async fn run_enrollment(
     )
     .await?;
     tracing::info!("PKI bundle written to disk");
+
+    // Provision package repository configuration if present in the bundle.
+    // This writes the GPG key and sources config so the agent can self-update
+    // from the manager-hosted repo using native package manager commands.
+    // If repo_config is absent (older enrollment), the agent will fetch it
+    // on demand from GET /api/v1/pki/repo-config on first self-update.
+    if let Some(ref repo) = pki_bundle.repo_config {
+        provision::provision_repo_config(repo).await?;
+        tracing::info!("Package repository configured from enrollment bundle");
+    } else {
+        tracing::info!("No repo_config in enrollment bundle — fetching from fallback endpoint");
+        match client.fetch_repo_config().await {
+            Ok(repo) => {
+                if let Err(e) = provision::provision_repo_config(&repo).await {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to provision repo config from fallback — enrollment continues"
+                    );
+                } else {
+                    tracing::info!("Package repository configured from fallback fetch");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to fetch repo config from fallback endpoint — enrollment continues without repo provisioning"
+                );
+            }
+        }
+    }
 
     // Resolve manager hostname to IP and append to whitelist
     let manager_ip = client

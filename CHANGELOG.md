@@ -25,6 +25,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.0] - 2026-06-27
+
+### Added
+
+#### Self-Update Architecture
+- **Self-update script rewritten** from GitHub Releases to native package manager commands (apt/dnf/apk/pacman)
+- **RepoConfig** added to enrollment PkiBundle for manager-hosted repo provisioning
+- **Fallback `GET /api/v1/pki/repo-config`** endpoint for pre-repo agents (legacy migration path)
+- **Post-upgrade health check** with auto-rollback (60-second timeout)
+- **Signal trap** (SIGTERM/SIGINT/SIGHUP) in `self-update.sh` for graceful interruption
+- **Pacman `-U` from cache** for version pinning on Arch Linux
+- **SelfUpdateRequest** fields: `restart` (default: `true`), `restart_delay_seconds` (default: `5`, max: `300`)
+- Handler clamping for `restart_delay_seconds` to `MAX_RESTART_DELAY_SECONDS`
+- **CI job: `publish-to-manager-repo`** — signs and publishes packages to manager-hosted repository
+- **21 unit tests** for self-update (`validate_version_string`, `SelfUpdateRequest`, marker file)
+- **3 integration tests** for enrollment repo provisioning
+- **Handler architecture comment** explaining why JobManager is not used for self-update
+
+#### Documentation
+- **tasks/migration-guide.md** — migration from GitHub Releases to manager-hosted repo
+- **tasks/self-update-runbook.md** — operational runbook for self-update and GPG key rotation
+- **tasks/self-update-gap-analysis.md** — gap analysis for self-update feature
+
+### Changed
+
+- Updated **SPEC.md** to v2.0.0 Active
+- Updated **E2E test harness** for manager-hosted repo flow (GPG-signed local apt repo)
+
+### Security
+
+- **Removed `eval` from `self-update.sh`** — replaced with direct `case`/`esac` execution (prevents command injection)
+- GPG signature verification delegated to native package manager (security feature, not gap)
+
+---
+
 ## [1.0.0] - 2026-07-17
 
 ### Added

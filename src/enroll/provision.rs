@@ -201,6 +201,85 @@ pub async fn provision_pki_bundle(
     Ok(())
 }
 
+/// Provision the package repository configuration from the enrollment bundle.
+///
+/// Writes the GPG public key to the keyring path and the sources config to the
+/// distro-specific path. This enables the agent to self-update from the
+/// manager-hosted repo using native package manager commands.
+///
+/// # Trust Model
+/// The GPG key is trusted because it was delivered inside the mTLS-authenticated
+/// enrollment bundle. If the enrollment is compromised, package trust is compromised.
+/// This transitive trust chain is documented in THREAT_MODEL_VALIDATION.md.
+pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<()> {
+    // 1. Write GPG public key to keyring path (mode 0644)
+    let keyring_dir = std::path::Path::new(&repo.keyring_path)
+        .parent()
+        .context("Invalid keyring path — no parent directory")?;
+
+    if !keyring_dir.exists() {
+        fs::create_dir_all(keyring_dir)
+            .context("Failed to create keyring directory")?;
+        // Set directory permissions to 0755
+        let mut perms = fs::metadata(keyring_dir)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            fs::set_permissions(keyring_dir, perms)?;
+        }
+    }
+
+    write_pem_file(&repo.keyring_path, &repo.gpg_public_key, false)
+        .context("Failed to write repo GPG key")?;
+    tracing::info!(keyring = %repo.keyring_path, "Repo GPG public key written");
+
+    // 2. Write sources config to distro-specific path
+    let sources_path = match repo.distro_id.as_str() {
+        "ubuntu" | "debian" => "/etc/apt/sources.list.d/lpa.list".to_string(),
+        "fedora" | "rhel" | "almalinux" | "centos" | "rocky" => {
+            // Ensure /etc/yum.repos.d exists
+            fs::create_dir_all("/etc/yum.repos.d").ok();
+            "/etc/yum.repos.d/lpa.repo".to_string()
+        }
+        "alpine" => {
+            // apk: append to /etc/apk/repositories (don't overwrite)
+            let existing = fs::read_to_string("/etc/apk/repositories").unwrap_or_default();
+            if existing.contains(&repo.sources_config) {
+                tracing::info!("Repo URL already in /etc/apk/repositories — skipping");
+                return Ok(());
+            }
+            let new_content = format!("{}\n{}\n", existing.trim_end(), repo.sources_config);
+            fs::write("/etc/apk/repositories", new_content)
+                .context("Failed to append to /etc/apk/repositories")?;
+            tracing::info!("Repo URL appended to /etc/apk/repositories");
+            return Ok(());
+        }
+        "arch" | "manjaro" => {
+            // pacman: write include file
+            fs::create_dir_all("/etc/pacman.d").ok();
+            "/etc/pacman.d/lpa-repo".to_string()
+        }
+        _ => {
+            bail!(
+                "Unknown distro for repo config: {} — cannot determine sources path",
+                repo.distro_id
+            );
+        }
+    };
+
+    fs::write(&sources_path, &repo.sources_config)
+        .with_context(|| format!("Failed to write sources config to {}", sources_path))?;
+    tracing::info!(
+        distro = %repo.distro_id,
+        sources = %sources_path,
+        keyring = %repo.keyring_path,
+        "Package repository configured from enrollment bundle"
+    );
+
+    Ok(())
+}
+
 /// Append the manager IP to the whitelist after successful enrollment.
 ///
 /// Creates or loads a `WhitelistManager` and calls `append_entry()` with the

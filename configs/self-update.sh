@@ -1,35 +1,36 @@
 #!/bin/bash
-# Linux Patch API — Self-Update Script
+# Linux Patch API — Self-Update Script (v2: Manager-Hosted Repo)
+#
 # Runs in its own systemd unit (linux-patch-api-update.service),
 # in its own cgroup under system.slice. The agent process will be
 # killed by dpkg's prerm during the upgrade; this script survives.
 #
-# Downloads the correct package from GitHub Releases and installs
-# it via the native package manager.
+# Uses native package manager commands against the manager-hosted repo.
+# No GitHub Releases, no curl downloads, no API parsing.
+# Package signatures are verified by the native package manager using
+# the GPG key provisioned during enrollment.
 #
-# Failure handling:
-#   - 3 retry attempts for download and install (10s, 30s, 60s backoff)
-#   - On final failure: attempts to fix broken dependencies and revert
-#   - Always cleans up the request file (trap-based, all exit paths)
-#   - Writes failure marker with error cause for manager health reporting
+# Security: No eval, no sh -c with interpolated values.
+# Version queries use direct commands. Upgrade commands use case/esac
+# branches that execute directly — no string interpolation into shell.
 
 set -uo pipefail
 
 MARKER_PATH="/var/lib/linux_patch_api/last_self_update.json"
 REQUEST_PATH="/var/lib/linux_patch_api/self-update.request"
 PKG_NAME="linux-patch-api"
-GITHUB_OWNER="Draco-Lunaris"
-GITHUB_REPO="Linux-Patch-Api"
-MAX_ATTEMPTS=3
-BACKOFF_SECONDS=(10 30 60)
+SERVICE_NAME="linux-patch-api"
+HEALTH_CHECK_TIMEOUT=60  # seconds
+HEALTH_CHECK_INTERVAL=5   # seconds
 
-# --- Cleanup trap: always remove request file on exit ---
-# This prevents the agent from being permanently locked (409 Conflict)
-# after a failed update attempt.
-cleanup() {
+# --- Signal handling: write failure marker on kill ---
+cleanup_on_signal() {
+    write_failure_marker "$PREV_VERSION" "$PREV_VERSION" \
+        "Self-update interrupted by signal during upgrade"
     rm -f "$REQUEST_PATH"
+    exit 1
 }
-trap cleanup EXIT
+trap cleanup_on_signal TERM INT HUP
 
 # --- Helper: write failure marker ---
 write_failure_marker() {
@@ -65,72 +66,19 @@ write_success_marker() {
         "$escaped_prev" "$escaped_new" "$changed" "$timestamp" > "$MARKER_PATH"
 }
 
-# --- Helper: fix broken dependencies (pre-install) ---
-# Mirrors the pattern used by the agent's apt backend (mod.rs:538):
-#   apt-get -f install -y   (fix broken/unmet deps)
-#   dpkg --configure -a     (finish interrupted package config)
-fix_broken_dependencies() {
-    case "$PKG_MGR" in
-        apt)
-            echo "Fixing broken dependencies (apt)..."
-            apt-get -f install -y 2>&1 || true
-            dpkg --configure -a 2>&1 || true
-            ;;
-        dnf|yum)
-            echo "Fixing broken dependencies (dnf/yum)..."
-            $PKG_MGR reinstall -y "$PKG_NAME" 2>&1 || true
-            ;;
-        apk)
-            echo "Fixing broken dependencies (apk)..."
-            apk fix 2>&1 || true
-            ;;
-        pacman)
-            echo "Fixing broken dependencies (pacman)..."
-            pacman -Syu --noconfirm 2>&1 || true
-            ;;
-    esac
-}
-
-# --- Helper: revert to previous version ---
-# Attempts to reinstall the previous package version from cache or repo.
-# If revert fails, writes a critical failure marker and exits.
-revert_to_previous() {
-    local prev_ver="$1"
-    echo "Attempting to revert to previous version: $prev_ver" >&2
-
-    case "$PKG_MGR" in
-        apt)
-            # Try to reinstall from apt cache or repo
-            apt-get install -y --allow-downgrades "${PKG_NAME}=${prev_ver}" 2>&1 || true
-            # If that fails, try fixing broken state
-            apt-get -f install -y 2>&1 || true
-            dpkg --configure -a 2>&1 || true
-            ;;
-        dnf|yum)
-            $PKG_MGR downgrade -y "$PKG_NAME" 2>&1 || true
-            ;;
-        apk)
-            apk add --allow-untrusted "${PKG_NAME}=${prev_ver}" 2>&1 || true
-            ;;
-        pacman)
-            pacman -U --noconfirm "/var/cache/pacman/pkg/${PKG_NAME}-${prev_ver}-*.pkg.tar.zst" 2>&1 || true
-            ;;
-    esac
-
-    # Verify the current version after revert attempt
-    local current_ver
-    current_ver=$(dpkg-query -W -f='${Version}' "$PKG_NAME" 2>/dev/null || rpm -q --qf '%{VERSION}-%{RELEASE}' "$PKG_NAME" 2>/dev/null || pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || apk info -v "$PKG_NAME" 2>/dev/null | head -1 || echo "unknown")
-
-    if [ "$current_ver" = "$prev_ver" ]; then
-        echo "Revert successful: now on $current_ver" >&2
-        write_failure_marker "$prev_ver" "$prev_ver" "Update failed and reverted to previous version"
-    else
-        echo "Revert may have failed: current=$current_ver, expected=$prev_ver" >&2
-        write_failure_marker "$prev_ver" "$current_ver" "Update failed and revert attempt may not have restored previous version"
-    fi
+# --- Helper: get installed version ---
+get_installed_version() {
+    local ver
+    ver=$(dpkg-query -W -f='${Version}' "$PKG_NAME" 2>/dev/null) && echo "$ver" && return
+    ver=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$PKG_NAME" 2>/dev/null) && echo "$ver" && return
+    ver=$(pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}') && echo "$ver" && return
+    ver=$(apk info -v "$PKG_NAME" 2>/dev/null | head -1) && echo "$ver" && return
+    echo "unknown"
 }
 
 # --- Read request ---
+PREV_VERSION="unknown"
+
 if [ ! -f "$REQUEST_PATH" ]; then
     echo "No self-update request file found" >&2
     write_failure_marker "unknown" "unknown" "No request file"
@@ -138,8 +86,9 @@ if [ ! -f "$REQUEST_PATH" ]; then
 fi
 
 # Read target_version from JSON request file
-# Fail loudly if python3 is unavailable or parse fails
-TARGET_VERSION=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('target_version') or '')" "$REQUEST_PATH" 2>&1)
+TARGET_VERSION=$(python3 -c \
+    'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("target_version") or "")' \
+    "$REQUEST_PATH" 2>&1)
 if [ $? -ne 0 ]; then
     echo "Failed to parse request file: $TARGET_VERSION" >&2
     write_failure_marker "unknown" "unknown" "Failed to parse request file"
@@ -156,9 +105,9 @@ if [ -n "$TARGET_VERSION" ]; then
 fi
 
 # --- Record previous version ---
-PREV_VERSION=$(dpkg-query -W -f='${Version}' "$PKG_NAME" 2>/dev/null || rpm -q --qf '%{VERSION}-%{RELEASE}' "$PKG_NAME" 2>/dev/null || pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || apk info -v "$PKG_NAME" 2>/dev/null | head -1 || echo "unknown")
+PREV_VERSION=$(get_installed_version)
 
-# --- Detect package manager and distro ---
+# --- Detect package manager ---
 if command -v apt-get >/dev/null 2>&1; then
     PKG_MGR="apt"
 elif command -v dnf >/dev/null 2>&1; then
@@ -174,238 +123,136 @@ else
     exit 1
 fi
 
-# --- Pre-install: fix any existing broken dependencies ---
-fix_broken_dependencies
+echo "Detected: pkg_mgr=$PKG_MGR prev_version=$PREV_VERSION target=$TARGET_VERSION"
 
-# --- Detect distro ID and version ---
-DISTRO_ID=""
-DISTRO_VERSION=""
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    DISTRO_ID="$ID"
-    DISTRO_VERSION="${VERSION_ID:-}"
-fi
-
-# --- Determine asset pattern based on distro ---
-ASSET_PATTERN=""
-case "$DISTRO_ID" in
-    ubuntu)
-        case "$DISTRO_VERSION" in
-            24.04) ASSET_PATTERN="*_u2404_amd64.deb" ;;
-            22.04) ASSET_PATTERN="*_u2204_amd64.deb" ;;
-            *) ASSET_PATTERN="*_u*_amd64.deb" ;;
-        esac
+# --- Refresh repo metadata (non-fatal: log warning on failure) ---
+case "$PKG_MGR" in
+    apt)
+        apt-get update -qq 2>&1 || echo "WARNING: apt-get update failed — continuing with cached metadata"
         ;;
-    debian)
-        case "$DISTRO_VERSION" in
-            13) ASSET_PATTERN="*_debian13_amd64.deb" ;;
-            12) ASSET_PATTERN="*_debian12_amd64.deb" ;;
-            *) ASSET_PATTERN="*_debian*_amd64.deb" ;;
-        esac
+    dnf|yum)
+        $PKG_MGR makecache 2>&1 || echo "WARNING: $PKG_MGR makecache failed — continuing with cached metadata"
         ;;
-    fedora)
-        ASSET_PATTERN="*.fc*.x86_64.rpm"
+    apk)
+        apk update 2>&1 || echo "WARNING: apk update failed — continuing with cached metadata"
         ;;
-    almalinux|rhel|centos|rocky|almalinux)
-        ASSET_PATTERN="*.el*.x86_64.rpm"
-        ;;
-    alpine)
-        ASSET_PATTERN="*_r*.apk"
-        ;;
-    arch|manjaro|garuda)
-        ASSET_PATTERN="*.pkg.tar.zst"
-        ;;
-    *)
-        # Fallback: infer from package manager
-        case "$PKG_MGR" in
-            apt) ASSET_PATTERN="*_amd64.deb" ;;
-            dnf|yum) ASSET_PATTERN="*.x86_64.rpm" ;;
-            apk) ASSET_PATTERN="*.apk" ;;
-            pacman) ASSET_PATTERN="*.pkg.tar.zst" ;;
-        esac
+    pacman)
+        pacman -Sy 2>&1 || echo "WARNING: pacman -Sy failed — continuing with cached metadata"
         ;;
 esac
 
-echo "Detected: distro=$DISTRO_ID version=$DISTRO_VERSION pkg_mgr=$PKG_MGR pattern=$ASSET_PATTERN"
-
-# --- Determine GitHub API URL ---
-if [ -n "$TARGET_VERSION" ]; then
-    GH_TAG="v${TARGET_VERSION}"
-    API_URL="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${GH_TAG}"
-else
-    GH_TAG=""
-    API_URL="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest"
-fi
-
-# --- Query GitHub Releases API with retry ---
-API_RESPONSE=""
-API_RC=1
-for attempt in 1 2 3; do
-    echo "Querying GitHub API (attempt $attempt): $API_URL"
-    API_RESPONSE=$(curl -sL -H "Accept: application/vnd.github+json" "$API_URL" 2>&1)
-    API_RC=$?
-    if [ $API_RC -eq 0 ]; then
-        # Check for rate limit error
-        if echo "$API_RESPONSE" | grep -q '"rate limit"' 2>/dev/null; then
-            echo "GitHub API rate limited, will retry..." >&2
-            if [ $attempt -lt 3 ]; then
-                sleep 2
-                continue
-            fi
-        elif echo "$API_RESPONSE" | grep -q '"assets"' 2>/dev/null; then
-            break
+# --- Execute upgrade (direct commands, NO eval) ---
+UPGRADE_RC=0
+case "$PKG_MGR" in
+    apt)
+        if [ -n "$TARGET_VERSION" ]; then
+            apt-get install -y --allow-downgrades -- "${PKG_NAME}=${TARGET_VERSION}" 2>&1 || UPGRADE_RC=$?
+        else
+            apt-get install -y --only-upgrade -- "$PKG_NAME" 2>&1 || UPGRADE_RC=$?
         fi
-    fi
-    if [ $attempt -lt 3 ]; then
-        sleep 2
-    fi
-done
+        ;;
+    dnf|yum)
+        if [ -n "$TARGET_VERSION" ]; then
+            $PKG_MGR install -y -- "${PKG_NAME}-${TARGET_VERSION}" 2>&1 || UPGRADE_RC=$?
+        else
+            $PKG_MGR upgrade -y -- "$PKG_NAME" 2>&1 || UPGRADE_RC=$?
+        fi
+        ;;
+    apk)
+        if [ -n "$TARGET_VERSION" ]; then
+            apk add -- "${PKG_NAME}=${TARGET_VERSION}" 2>&1 || UPGRADE_RC=$?
+        else
+            apk upgrade -- "$PKG_NAME" 2>&1 || UPGRADE_RC=$?
+        fi
+        ;;
+    pacman)
+        if [ -n "$TARGET_VERSION" ]; then
+            # Pacman does not support = syntax for version pinning.
+            # Try to find the specific version in cache or repo.
+            # If not available, this will fail gracefully.
+            CACHED_PKG=$(find /var/cache/pacman/pkg/ -name "${PKG_NAME}-${TARGET_VERSION}-"*.pkg.tar.zst 2>/dev/null | head -1)
+            if [ -n "$CACHED_PKG" ]; then
+                pacman -U --noconfirm -- "$CACHED_PKG" 2>&1 || UPGRADE_RC=$?
+            else
+                echo "WARNING: Pacman version pinning requires the package in cache. Attempting repo install..." >&2
+                pacman -S --noconfirm -- "$PKG_NAME" 2>&1 || UPGRADE_RC=$?
+            fi
+        else
+            pacman -Su --noconfirm -- "$PKG_NAME" 2>&1 || UPGRADE_RC=$?
+        fi
+        ;;
+esac
 
-# --- Parse asset URL from API response or fall back to direct URL ---
-ASSET_URL=""
-ASSET_NAME=""
-
-if echo "$API_RESPONSE" | grep -q '"assets"' 2>/dev/null; then
-    # Parse assets array with python3
-    ASSET_JSON=$(python3 -c "
-import json, sys, fnmatch
-data = json.loads(sys.stdin.read())
-pattern = sys.argv[1]
-for asset in data.get('assets', []):
-    name = asset.get('name', '')
-    if fnmatch.fnmatch(name, pattern):
-        # For Arch, skip debug packages
-        if '-debug-' in name:
-            continue
-        print(asset.get('browser_download_url', ''))
-        print(name)
-        break
-" "$ASSET_PATTERN" <<< "$API_RESPONSE" 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$ASSET_JSON" ]; then
-        ASSET_URL=$(echo "$ASSET_JSON" | head -1)
-        ASSET_NAME=$(echo "$ASSET_JSON" | tail -1)
+if [ $UPGRADE_RC -ne 0 ]; then
+    echo "Package upgrade failed (rc=$UPGRADE_RC)" >&2
+    # Classify the failure for actionable error messages
+    ERROR_CLASS="upgrade_failed"
+    if echo "$UPGRADE_OUTPUT" | grep -qiE "unmet dependencies|held broken|unresolvable|depends.*but it is not"; then
+        ERROR_CLASS="dependency_resolution_failed"
+    elif echo "$UPGRADE_OUTPUT" | grep -qiE "No space left|disk full|out of space"; then
+        ERROR_CLASS="disk_full"
+    elif echo "$UPGRADE_OUTPUT" | grep -qiE "Unable to locate package|not found|no package"; then
+        ERROR_CLASS="package_not_found"
+    elif echo "$UPGRADE_OUTPUT" | grep -qiE "Permission denied|not authorized"; then
+        ERROR_CLASS="permission_denied"
+    elif echo "$UPGRADE_OUTPUT" | grep -qiE "locked|lock|another process"; then
+        ERROR_CLASS="package_manager_locked"
+    elif echo "$UPGRADE_OUTPUT" | grep -qiE "hash sum mismatch|checksum|signature"; then
+        ERROR_CLASS="package_integrity_failure"
     fi
-fi
-
-# Fall back to constructing download URL directly
-if [ -z "$ASSET_URL" ]; then
-    echo "Could not find asset via API, falling back to direct URL construction..." >&2
-    # We need the tag for the direct URL
-    if [ -z "$GH_TAG" ]; then
-        # Try to get tag name from API response
-        GH_TAG=$(python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('tag_name',''))" <<< "$API_RESPONSE" 2>/dev/null)
-    fi
-    if [ -z "$GH_TAG" ]; then
-        echo "Cannot determine release tag for fallback URL" >&2
-        write_failure_marker "$PREV_VERSION" "$PREV_VERSION" "Could not find release asset or tag"
-        exit 1
-    fi
-    # Try to list assets from API response to find the matching filename
-    ASSET_NAME=$(python3 -c "
-import json, sys, fnmatch
-data = json.loads(sys.stdin.read())
-pattern = sys.argv[1]
-for asset in data.get('assets', []):
-    name = asset.get('name', '')
-    if fnmatch.fnmatch(name, pattern):
-        if '-debug-' in name:
-            continue
-        print(name)
-        break
-" "$ASSET_PATTERN" <<< "$API_RESPONSE" 2>/dev/null)
-    if [ -z "$ASSET_NAME" ]; then
-        echo "Could not find matching asset name in release" >&2
-        write_failure_marker "$PREV_VERSION" "$PREV_VERSION" "No matching package asset found"
-        exit 1
-    fi
-    ASSET_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${GH_TAG}/${ASSET_NAME}"
-fi
-
-if [ -z "$ASSET_URL" ] || [ -z "$ASSET_NAME" ]; then
-    echo "Failed to determine asset URL or name" >&2
-    write_failure_marker "$PREV_VERSION" "$PREV_VERSION" "Failed to find download asset"
+    write_failure_marker "$PREV_VERSION" "$PREV_VERSION" \
+        "Package upgrade failed (rc=$UPGRADE_RC, class=$ERROR_CLASS)"
     exit 1
 fi
 
-echo "Downloading: $ASSET_URL"
-echo "Asset: $ASSET_NAME"
-
-# --- Download and install with retry ---
-DOWNLOAD_PATH="/tmp/${ASSET_NAME}"
-INSTALL_SUCCESS=false
-LAST_ERROR=""
-
-for attempt in 1 2 3; do
-    echo "=== Attempt $attempt/$MAX_ATTEMPTS ==="
-
-    # --- Download package to /tmp ---
-    rm -f "$DOWNLOAD_PATH"
-    curl -sL -o "$DOWNLOAD_PATH" "$ASSET_URL" 2>&1
-    CURL_RC=$?
-    if [ $CURL_RC -ne 0 ] || [ ! -s "$DOWNLOAD_PATH" ]; then
-        LAST_ERROR="Download failed (curl rc=$CURL_RC)"
-        echo "$LAST_ERROR" >&2
-        if [ $attempt -lt $MAX_ATTEMPTS ]; then
-            echo "Retrying in ${BACKOFF_SECONDS[$((attempt-1))]}s..."
-            sleep ${BACKOFF_SECONDS[$((attempt-1))]}
-        fi
-        continue
+# --- Post-upgrade health check ---
+# Wait for the service to become active (up to 60 seconds).
+# The package postinst may have already started it, or the systemd
+# unit may need a moment to initialize.
+HEALTHY=false
+for i in $(seq 1 $((HEALTH_CHECK_TIMEOUT / HEALTH_CHECK_INTERVAL))); do
+    if systemctl is-active --quiet "$SERVICE_NAME.service" 2>/dev/null \
+       || rc-service "$SERVICE_NAME" status >/dev/null 2>&1; then
+        HEALTHY=true
+        break
     fi
-
-    echo "Downloaded to: $DOWNLOAD_PATH ($(stat -c%s "$DOWNLOAD_PATH" 2>/dev/null || echo 'unknown') bytes)"
-
-    # --- Fix broken dependencies before install ---
-    fix_broken_dependencies
-
-    # --- Install via native package manager ---
-    UPGRADE_OUTPUT=""
-    UPGRADE_RC=0
-    case "$PKG_MGR" in
-        apt)
-            UPGRADE_OUTPUT=$(apt-get install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-            ;;
-        dnf)
-            UPGRADE_OUTPUT=$(dnf install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-            ;;
-        yum)
-            UPGRADE_OUTPUT=$(yum install -y "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-            ;;
-        apk)
-            UPGRADE_OUTPUT=$(apk add --allow-untrusted "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-            ;;
-        pacman)
-            UPGRADE_OUTPUT=$(pacman -U --noconfirm "$DOWNLOAD_PATH" 2>&1) || UPGRADE_RC=$?
-            ;;
-    esac
-
-    if [ $UPGRADE_RC -ne 0 ]; then
-        LAST_ERROR="Package install failed (rc=$UPGRADE_RC): ${UPGRADE_OUTPUT:0:500}"
-        echo "$LAST_ERROR" >&2
-        # Fix broken deps after failed install
-        fix_broken_dependencies
-        if [ $attempt -lt $MAX_ATTEMPTS ]; then
-            echo "Retrying in ${BACKOFF_SECONDS[$((attempt-1))]}s..."
-            sleep ${BACKOFF_SECONDS[$((attempt-1))]}
-        fi
-        continue
-    fi
-
-    INSTALL_SUCCESS=true
-    break
+    sleep $HEALTH_CHECK_INTERVAL
 done
 
-# --- Clean up downloaded package ---
-rm -f "$DOWNLOAD_PATH"
-
-# --- Handle final failure: revert and report ---
-if [ "$INSTALL_SUCCESS" != "true" ]; then
-    echo "All $MAX_ATTEMPTS attempts failed. Last error: $LAST_ERROR" >&2
-    revert_to_previous "$PREV_VERSION"
+if [ "$HEALTHY" = false ]; then
+    echo "Service failed to start within ${HEALTH_CHECK_TIMEOUT}s — rolling back to $PREV_VERSION" >&2
+    # --- Auto-rollback to previous version ---
+    ROLLBACK_RC=0
+    case "$PKG_MGR" in
+        apt)
+            apt-get install -y --allow-downgrades -- "${PKG_NAME}=${PREV_VERSION}" 2>&1 || ROLLBACK_RC=$?
+            ;;
+        dnf|yum)
+            $PKG_MGR install -y -- "${PKG_NAME}-${PREV_VERSION}" 2>&1 || ROLLBACK_RC=$?
+            ;;
+        apk)
+            apk add -- "${PKG_NAME}=${PREV_VERSION}" 2>&1 || ROLLBACK_RC=$?
+            ;;
+        pacman)
+            CACHED_PKG=$(find /var/cache/pacman/pkg/ -name "${PKG_NAME}-${PREV_VERSION}-"*.pkg.tar.zst 2>/dev/null | head -1)
+            if [ -n "$CACHED_PKG" ]; then
+                pacman -U --noconfirm -- "$CACHED_PKG" 2>&1 || ROLLBACK_RC=$?
+            else
+                echo "WARNING: Cannot rollback — previous version not in pacman cache" >&2
+                ROLLBACK_RC=1
+            fi
+            ;;
+    esac
+    if [ $ROLLBACK_RC -ne 0 ]; then
+        echo "WARNING: Rollback failed (rc=$ROLLBACK_RC) — manual intervention required" >&2
+    fi
+    write_failure_marker "$PREV_VERSION" "$PREV_VERSION" \
+        "Post-upgrade health check failed — rolled back to $PREV_VERSION (rollback rc=$ROLLBACK_RC)"
     exit 1
 fi
 
 # --- Record new version ---
-NEW_VERSION=$(dpkg-query -W -f='${Version}' "$PKG_NAME" 2>/dev/null || rpm -q --qf '%{VERSION}-%{RELEASE}' "$PKG_NAME" 2>/dev/null || pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || apk info -v "$PKG_NAME" 2>/dev/null | head -1 || echo "unknown")
+NEW_VERSION=$(get_installed_version)
 
 # --- Determine if version changed ---
 CHANGED=false
@@ -415,6 +262,9 @@ fi
 
 # --- Write success marker ---
 write_success_marker "$PREV_VERSION" "$NEW_VERSION" "$CHANGED"
+
+# --- Clean up request file ---
+rm -f "$REQUEST_PATH"
 
 echo "Self-update complete: $PREV_VERSION -> $NEW_VERSION (changed=$CHANGED)"
 exit 0
