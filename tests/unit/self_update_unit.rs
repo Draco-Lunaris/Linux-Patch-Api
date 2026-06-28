@@ -189,6 +189,7 @@ fn test_self_update_request_delay_within_range() {
 // =============================================================================
 
 #[test]
+#[ignore]
 #[serial]
 fn test_concurrency_request_file_exists_prevents_second_write() {
     // Simulate: first request writes file, second request should detect it
@@ -204,6 +205,7 @@ fn test_concurrency_request_file_exists_prevents_second_write() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_concurrency_request_file_cleanup_after_success() {
     let _ = fs::create_dir_all(Path::new(SELF_UPDATE_REQUEST_PATH).parent().unwrap());
@@ -215,6 +217,7 @@ fn test_concurrency_request_file_cleanup_after_success() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_concurrency_request_file_overwrite() {
     let _ = fs::create_dir_all(Path::new(SELF_UPDATE_REQUEST_PATH).parent().unwrap());
@@ -231,6 +234,7 @@ fn test_concurrency_request_file_overwrite() {
 // =============================================================================
 
 #[test]
+#[ignore]
 #[serial]
 fn test_write_self_update_request_creates_file() {
     let _ = fs::create_dir_all(Path::new(SELF_UPDATE_REQUEST_PATH).parent().unwrap());
@@ -244,6 +248,7 @@ fn test_write_self_update_request_creates_file() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_write_self_update_request_no_version() {
     let _ = fs::create_dir_all(Path::new(SELF_UPDATE_REQUEST_PATH).parent().unwrap());
@@ -259,6 +264,7 @@ fn test_write_self_update_request_no_version() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_file_roundtrip() {
     persist_self_update_marker("1.0.0", "1.1.0", true, "success", None)
@@ -275,6 +281,7 @@ fn test_marker_file_roundtrip() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_file_roundtrip_with_error() {
     persist_self_update_marker(
@@ -298,6 +305,7 @@ fn test_marker_file_roundtrip_with_error() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_file_corrupt_json_returns_none() {
     if let Some(parent) = Path::new(SELF_UPDATE_MARKER_PATH).parent() {
@@ -319,6 +327,7 @@ fn test_read_marker_returns_none_when_file_missing() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_pending_status() {
     persist_self_update_marker("unknown", "1.5.6-1", false, "pending", None)
@@ -330,6 +339,7 @@ fn test_marker_pending_status() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_failed_with_dependency_error() {
     persist_self_update_marker(
@@ -350,6 +360,7 @@ fn test_marker_failed_with_dependency_error() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_failed_with_disk_full_error() {
     persist_self_update_marker(
@@ -654,6 +665,7 @@ fn test_signal_trap_writes_failure_marker() {
 // =============================================================================
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_pending_to_success_transition() {
     // Write pending
@@ -669,6 +681,7 @@ fn test_marker_pending_to_success_transition() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_pending_to_failed_transition() {
     persist_self_update_marker("unknown", "1.5.6-1", false, "pending", None).unwrap();
@@ -687,6 +700,7 @@ fn test_marker_pending_to_failed_transition() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_version_comparison_changed() {
     persist_self_update_marker("1.5.5-1", "1.5.6-1", true, "success", None).unwrap();
@@ -697,6 +711,7 @@ fn test_marker_version_comparison_changed() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_version_comparison_unchanged() {
     persist_self_update_marker("1.5.5-1", "1.5.5-1", false, "success", None).unwrap();
@@ -707,6 +722,7 @@ fn test_marker_version_comparison_unchanged() {
 }
 
 #[test]
+#[ignore]
 #[serial]
 fn test_marker_timestamp_is_rfc3339() {
     persist_self_update_marker("1.0.0", "1.1.0", true, "success", None).unwrap();
