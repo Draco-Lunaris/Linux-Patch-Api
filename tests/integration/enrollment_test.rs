@@ -683,8 +683,8 @@ async fn test_provision_repo_config_writes_gpg_key_and_sources() {
         .expect("provision_repo_config should succeed for ubuntu");
 
     // 1. Verify GPG key written to keyring_path
-    let key_content = std::fs::read_to_string(&keyring_path)
-        .expect("GPG key file should exist at keyring_path");
+    let key_content =
+        std::fs::read_to_string(&keyring_path).expect("GPG key file should exist at keyring_path");
     assert!(
         key_content.contains("-----BEGIN PGP PUBLIC KEY BLOCK-----"),
         "GPG key file should contain the public key data"
@@ -710,7 +710,9 @@ async fn test_provision_repo_config_apk_append_behavior() {
     let keyring_path = keyring_dir.path().join("lpa-repo.gpg");
 
     let repo = RepoConfig {
-        gpg_public_key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE_GPG_KEY\n-----END PGP PUBLIC KEY BLOCK-----".to_string(),
+        gpg_public_key:
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nFAKE_GPG_KEY\n-----END PGP PUBLIC KEY BLOCK-----"
+                .to_string(),
         sources_config: "https://manager.example.com/repo/alpine/main".to_string(),
         distro_id: "alpine".to_string(),
         keyring_path: keyring_path.to_str().unwrap().to_string(),
@@ -731,8 +733,7 @@ async fn test_provision_repo_config_apk_append_behavior() {
         .expect("provision_repo_config should succeed for alpine");
 
     // 1. Verify GPG key written
-    let key_content = std::fs::read_to_string(&keyring_path)
-        .expect("GPG key file should exist");
+    let key_content = std::fs::read_to_string(&keyring_path).expect("GPG key file should exist");
     assert!(key_content.contains("FAKE_GPG_KEY"));
 
     // 2. Verify repo URL was appended to /etc/apk/repositories
@@ -749,7 +750,9 @@ async fn test_provision_repo_config_apk_append_behavior() {
         .expect("Second provision_repo_config should succeed (idempotent)");
     let apk_content2 = std::fs::read_to_string("/etc/apk/repositories")
         .expect("/etc/apk/repositories should still exist");
-    let count = apk_content2.matches("https://manager.example.com/repo/alpine/main").count();
+    let count = apk_content2
+        .matches("https://manager.example.com/repo/alpine/main")
+        .count();
     assert_eq!(
         count, 1,
         "Repo URL should appear exactly once after duplicate provisioning (idempotent append)"

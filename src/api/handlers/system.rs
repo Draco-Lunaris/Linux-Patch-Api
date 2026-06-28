@@ -76,8 +76,12 @@ pub struct RebootRequest {
 }
 
 /// Self-update request
-fn default_true() -> bool { true }
-fn default_restart_delay() -> u64 { 5 }
+fn default_true() -> bool {
+    true
+}
+fn default_restart_delay() -> u64 {
+    5
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SelfUpdateRequest {
@@ -441,7 +445,9 @@ pub async fn update_self(body: web::Json<SelfUpdateRequest>, _req: HttpRequest) 
     let target_version = body.target_version.clone();
 
     // Clamp restart_delay_seconds to max 300 (5 minutes)
-    let restart_delay_seconds = body.restart_delay_seconds.clamp(1, packages::MAX_RESTART_DELAY_SECONDS);
+    let restart_delay_seconds = body
+        .restart_delay_seconds
+        .clamp(1, packages::MAX_RESTART_DELAY_SECONDS);
     let restart = body.restart;
 
     info!(

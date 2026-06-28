@@ -218,8 +218,7 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
         .context("Invalid keyring path — no parent directory")?;
 
     if !keyring_dir.exists() {
-        fs::create_dir_all(keyring_dir)
-            .context("Failed to create keyring directory")?;
+        fs::create_dir_all(keyring_dir).context("Failed to create keyring directory")?;
         // Set directory permissions to 0755
         let mut perms = fs::metadata(keyring_dir)?.permissions();
         #[cfg(unix)]

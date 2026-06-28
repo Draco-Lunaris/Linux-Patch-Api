@@ -10,13 +10,12 @@
 //!   Stage 7: Marker File State Transitions (5 tests)
 //!   Stage 8: Edge Cases (6 tests)
 
+use linux_patch_api::api::handlers::system::SelfUpdateRequest;
 use linux_patch_api::packages::{
     persist_self_update_marker, read_self_update_marker, validate_version_string,
-    write_self_update_request, SelfUpdateStatusData, SELF_UPDATE_MARKER_PATH,
-    SELF_UPDATE_REQUEST_PATH, SELF_PACKAGE_NAME, SELF_SERVICE_NAME,
-    MAX_RESTART_DELAY_SECONDS,
+    write_self_update_request, SelfUpdateStatusData, MAX_RESTART_DELAY_SECONDS, SELF_PACKAGE_NAME,
+    SELF_SERVICE_NAME, SELF_UPDATE_MARKER_PATH, SELF_UPDATE_REQUEST_PATH,
 };
-use linux_patch_api::api::handlers::system::SelfUpdateRequest;
 use serial_test::serial;
 use std::fs;
 use std::path::Path;
@@ -97,8 +96,8 @@ fn test_validate_version_string_valid_versions_still_pass() {
 #[test]
 fn test_self_update_request_empty_body() {
     let json = "{}";
-    let req: SelfUpdateRequest = serde_json::from_str(json)
-        .expect("Empty body should deserialize with defaults");
+    let req: SelfUpdateRequest =
+        serde_json::from_str(json).expect("Empty body should deserialize with defaults");
     assert!(req.target_version.is_none(), "Empty body should yield None");
     assert!(req.restart, "restart should default to true");
     assert_eq!(req.restart_delay_seconds, 5, "delay should default to 5");
@@ -107,8 +106,8 @@ fn test_self_update_request_empty_body() {
 #[test]
 fn test_self_update_request_full_body() {
     let json = r#"{"target_version": "1.5.0", "restart": false, "restart_delay_seconds": 30}"#;
-    let req: SelfUpdateRequest = serde_json::from_str(json)
-        .expect("Full body should deserialize successfully");
+    let req: SelfUpdateRequest =
+        serde_json::from_str(json).expect("Full body should deserialize successfully");
     assert_eq!(req.target_version.as_deref(), Some("1.5.0"));
     assert!(!req.restart, "restart should be false");
     assert_eq!(req.restart_delay_seconds, 30);
@@ -117,17 +116,20 @@ fn test_self_update_request_full_body() {
 #[test]
 fn test_self_update_request_partial_body_null_version() {
     let json = r#"{"target_version": null}"#;
-    let req: SelfUpdateRequest = serde_json::from_str(json)
-        .expect("Partial body with null should deserialize");
-    assert!(req.target_version.is_none(), "null target_version should yield None");
+    let req: SelfUpdateRequest =
+        serde_json::from_str(json).expect("Partial body with null should deserialize");
+    assert!(
+        req.target_version.is_none(),
+        "null target_version should yield None"
+    );
     assert!(req.restart, "restart should default to true");
 }
 
 #[test]
 fn test_self_update_request_extra_fields_ignored() {
     let json = r#"{"target_version": "2.0.0", "extra": "ignored", "restart": false}"#;
-    let req: SelfUpdateRequest = serde_json::from_str(json)
-        .expect("Extra fields should be ignored by serde");
+    let req: SelfUpdateRequest =
+        serde_json::from_str(json).expect("Extra fields should be ignored by serde");
     assert_eq!(req.target_version.as_deref(), Some("2.0.0"));
     assert!(!req.restart);
 }
@@ -155,7 +157,9 @@ fn test_self_update_request_delay_clamped_min() {
     let json = r#"{"restart_delay_seconds": 0}"#;
     let req: SelfUpdateRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.restart_delay_seconds, 0); // raw value
-    let clamped = req.restart_delay_seconds.clamp(1, MAX_RESTART_DELAY_SECONDS);
+    let clamped = req
+        .restart_delay_seconds
+        .clamp(1, MAX_RESTART_DELAY_SECONDS);
     assert_eq!(clamped, 1, "delay=0 should clamp to 1");
 }
 
@@ -164,7 +168,9 @@ fn test_self_update_request_delay_clamped_max() {
     let json = r#"{"restart_delay_seconds": 999}"#;
     let req: SelfUpdateRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.restart_delay_seconds, 999); // raw value
-    let clamped = req.restart_delay_seconds.clamp(1, MAX_RESTART_DELAY_SECONDS);
+    let clamped = req
+        .restart_delay_seconds
+        .clamp(1, MAX_RESTART_DELAY_SECONDS);
     assert_eq!(clamped, 300, "delay=999 should clamp to 300");
 }
 
@@ -172,7 +178,9 @@ fn test_self_update_request_delay_clamped_max() {
 fn test_self_update_request_delay_within_range() {
     let json = r#"{"restart_delay_seconds": 60}"#;
     let req: SelfUpdateRequest = serde_json::from_str(json).unwrap();
-    let clamped = req.restart_delay_seconds.clamp(1, MAX_RESTART_DELAY_SECONDS);
+    let clamped = req
+        .restart_delay_seconds
+        .clamp(1, MAX_RESTART_DELAY_SECONDS);
     assert_eq!(clamped, 60, "delay=60 should pass through unchanged");
 }
 
@@ -186,7 +194,10 @@ fn test_concurrency_request_file_exists_prevents_second_write() {
     // Simulate: first request writes file, second request should detect it
     let _ = fs::create_dir_all(Path::new(SELF_UPDATE_REQUEST_PATH).parent().unwrap());
     write_self_update_request(Some("1.0.0")).expect("First write should succeed");
-    assert!(Path::new(SELF_UPDATE_REQUEST_PATH).exists(), "Request file should exist");
+    assert!(
+        Path::new(SELF_UPDATE_REQUEST_PATH).exists(),
+        "Request file should exist"
+    );
     // Second write should succeed (overwrites) but handler checks existence first
     // This test verifies the file persistence mechanism
     let _ = fs::remove_file(SELF_UPDATE_REQUEST_PATH);
@@ -240,8 +251,10 @@ fn test_write_self_update_request_no_version() {
     write_self_update_request(None).expect("Write with no version should succeed");
     let content = fs::read_to_string(SELF_UPDATE_REQUEST_PATH).unwrap();
     // Should contain null or empty target_version
-    assert!(content.contains("null") || content.contains("\"\""),
-        "Should have null or empty target_version");
+    assert!(
+        content.contains("null") || content.contains("\"\""),
+        "Should have null or empty target_version"
+    );
     let _ = fs::remove_file(SELF_UPDATE_REQUEST_PATH);
 }
 
@@ -250,8 +263,8 @@ fn test_write_self_update_request_no_version() {
 fn test_marker_file_roundtrip() {
     persist_self_update_marker("1.0.0", "1.1.0", true, "success", None)
         .expect("Failed to persist marker");
-    let marker = read_self_update_marker()
-        .expect("Failed to read marker — file should exist after persist");
+    let marker =
+        read_self_update_marker().expect("Failed to read marker — file should exist after persist");
     assert_eq!(marker.previous_version, "1.0.0");
     assert_eq!(marker.new_version, "1.1.0");
     assert!(marker.changed);
@@ -264,16 +277,23 @@ fn test_marker_file_roundtrip() {
 #[test]
 #[serial]
 fn test_marker_file_roundtrip_with_error() {
-    persist_self_update_marker("2.0.0", "2.0.0", false, "failed",
-        Some("apt update failed: 404 Not Found"))
-        .expect("Failed to persist marker with error");
-    let marker = read_self_update_marker()
-        .expect("Failed to read marker");
+    persist_self_update_marker(
+        "2.0.0",
+        "2.0.0",
+        false,
+        "failed",
+        Some("apt update failed: 404 Not Found"),
+    )
+    .expect("Failed to persist marker with error");
+    let marker = read_self_update_marker().expect("Failed to read marker");
     assert_eq!(marker.previous_version, "2.0.0");
     assert_eq!(marker.new_version, "2.0.0");
     assert!(!marker.changed);
     assert_eq!(marker.status, "failed");
-    assert_eq!(marker.error.as_deref(), Some("apt update failed: 404 Not Found"));
+    assert_eq!(
+        marker.error.as_deref(),
+        Some("apt update failed: 404 Not Found")
+    );
     let _ = fs::remove_file(SELF_UPDATE_MARKER_PATH);
 }
 
@@ -312,21 +332,34 @@ fn test_marker_pending_status() {
 #[test]
 #[serial]
 fn test_marker_failed_with_dependency_error() {
-    persist_self_update_marker("1.5.5-1", "1.5.5-1", false, "failed",
-        Some("Package upgrade failed (rc=100, class=dependency_resolution_failed)"))
-        .expect("Failed to persist");
+    persist_self_update_marker(
+        "1.5.5-1",
+        "1.5.5-1",
+        false,
+        "failed",
+        Some("Package upgrade failed (rc=100, class=dependency_resolution_failed)"),
+    )
+    .expect("Failed to persist");
     let marker = read_self_update_marker().unwrap();
     assert_eq!(marker.status, "failed");
-    assert!(marker.error.unwrap().contains("dependency_resolution_failed"));
+    assert!(marker
+        .error
+        .unwrap()
+        .contains("dependency_resolution_failed"));
     let _ = fs::remove_file(SELF_UPDATE_MARKER_PATH);
 }
 
 #[test]
 #[serial]
 fn test_marker_failed_with_disk_full_error() {
-    persist_self_update_marker("1.5.5-1", "1.5.5-1", false, "failed",
-        Some("Package upgrade failed (rc=1, class=disk_full)"))
-        .expect("Failed to persist");
+    persist_self_update_marker(
+        "1.5.5-1",
+        "1.5.5-1",
+        false,
+        "failed",
+        Some("Package upgrade failed (rc=1, class=disk_full)"),
+    )
+    .expect("Failed to persist");
     let marker = read_self_update_marker().unwrap();
     assert!(marker.error.unwrap().contains("disk_full"));
     let _ = fs::remove_file(SELF_UPDATE_MARKER_PATH);
@@ -339,7 +372,7 @@ fn test_marker_failed_with_disk_full_error() {
 #[test]
 fn test_systemctl_command_construction() {
     // Verify the command that would be executed
-    let args = vec!["start", "--no-block", "linux-patch-api-update.service"];
+    let args = ["start", "--no-block", "linux-patch-api-update.service"];
     assert_eq!(args[0], "start");
     assert_eq!(args[1], "--no-block");
     assert_eq!(args[2], "linux-patch-api-update.service");
@@ -367,7 +400,7 @@ fn test_agent_service_name_constant() {
 fn test_script_package_manager_detection_order() {
     // The script checks in order: apt-get, dnf, yum, apk, pacman
     // This test verifies the detection logic is correct
-    let managers = vec!["apt-get", "dnf", "yum", "apk", "pacman"];
+    let managers = ["apt-get", "dnf", "yum", "apk", "pacman"];
     assert_eq!(managers[0], "apt-get", "apt should be checked first");
     assert_eq!(managers[1], "dnf");
     assert_eq!(managers[2], "yum");
@@ -401,7 +434,10 @@ fn test_script_upgrade_command_apt_latest() {
 fn test_script_upgrade_command_apt_pinned() {
     let pkg = "linux-patch-api";
     let version = "1.5.6-1";
-    let cmd = format!("apt-get install -y --allow-downgrades -- {}={}", pkg, version);
+    let cmd = format!(
+        "apt-get install -y --allow-downgrades -- {}={}",
+        pkg, version
+    );
     assert!(cmd.contains("--allow-downgrades"));
     assert!(cmd.contains("1.5.6-1"));
     assert!(!cmd.contains("eval"));
@@ -453,7 +489,10 @@ fn test_script_upgrade_command_pacman_latest() {
 fn test_script_upgrade_command_pacman_from_cache() {
     let pkg = "linux-patch-api";
     let version = "1.5.6-1";
-    let cache_path = format!("/var/cache/pacman/pkg/{}-{}-x86_64.pkg.tar.zst", pkg, version);
+    let cache_path = format!(
+        "/var/cache/pacman/pkg/{}-{}-x86_64.pkg.tar.zst",
+        pkg, version
+    );
     let cmd = format!("pacman -U --noconfirm -- {}", cache_path);
     assert!(cmd.contains("-U"));
     assert!(cmd.contains("1.5.6-1"));
@@ -470,8 +509,16 @@ fn test_script_no_eval_in_commands() {
         "pacman -Su --noconfirm -- linux-patch-api",
     ];
     for cmd in &commands {
-        assert!(!cmd.contains("eval"), "Command should not contain eval: {}", cmd);
-        assert!(!cmd.contains("sh -c"), "Command should not contain sh -c: {}", cmd);
+        assert!(
+            !cmd.contains("eval"),
+            "Command should not contain eval: {}",
+            cmd
+        );
+        assert!(
+            !cmd.contains("sh -c"),
+            "Command should not contain sh -c: {}",
+            cmd
+        );
     }
 }
 
@@ -494,7 +541,9 @@ fn test_script_disk_full_classification() {
 #[test]
 fn test_script_package_not_found_classification() {
     let apt_output = "E: Unable to locate package linux-patch-api";
-    let is_not_found = apt_output.to_lowercase().contains("unable to locate package");
+    let is_not_found = apt_output
+        .to_lowercase()
+        .contains("unable to locate package");
     assert!(is_not_found, "Should detect package not found");
 }
 
@@ -530,7 +579,10 @@ fn test_health_check_openrc_fallback() {
 fn test_rollback_command_apt() {
     let pkg = "linux-patch-api";
     let prev_version = "1.5.5-1";
-    let cmd = format!("apt-get install -y --allow-downgrades -- {}={}", pkg, prev_version);
+    let cmd = format!(
+        "apt-get install -y --allow-downgrades -- {}={}",
+        pkg, prev_version
+    );
     assert!(cmd.contains("--allow-downgrades"));
     assert!(cmd.contains(prev_version));
 }
@@ -557,7 +609,10 @@ fn test_rollback_command_apk() {
 fn test_rollback_command_pacman_from_cache() {
     let pkg = "linux-patch-api";
     let prev_version = "1.5.5-1";
-    let cache_path = format!("/var/cache/pacman/pkg/{}-{}-x86_64.pkg.tar.zst", pkg, prev_version);
+    let cache_path = format!(
+        "/var/cache/pacman/pkg/{}-{}-x86_64.pkg.tar.zst",
+        pkg, prev_version
+    );
     let cmd = format!("pacman -U --noconfirm -- {}", cache_path);
     assert!(cmd.contains("-U"));
     assert!(cmd.contains(prev_version));
@@ -579,7 +634,7 @@ fn test_rollback_failure_marker_message() {
 #[test]
 fn test_signal_trap_registered() {
     // The script registers: trap cleanup_on_signal TERM INT HUP
-    let signals = vec!["TERM", "INT", "HUP"];
+    let signals = ["TERM", "INT", "HUP"];
     assert_eq!(signals.len(), 3);
     assert!(signals.contains(&"TERM"));
     assert!(signals.contains(&"INT"));
@@ -617,8 +672,14 @@ fn test_marker_pending_to_success_transition() {
 #[serial]
 fn test_marker_pending_to_failed_transition() {
     persist_self_update_marker("unknown", "1.5.6-1", false, "pending", None).unwrap();
-    persist_self_update_marker("1.5.5-1", "1.5.5-1", false, "failed",
-        Some("upgrade failed")).unwrap();
+    persist_self_update_marker(
+        "1.5.5-1",
+        "1.5.5-1",
+        false,
+        "failed",
+        Some("upgrade failed"),
+    )
+    .unwrap();
     let m = read_self_update_marker().unwrap();
     assert_eq!(m.status, "failed");
     assert!(!m.changed);
@@ -652,8 +713,10 @@ fn test_marker_timestamp_is_rfc3339() {
     let m = read_self_update_marker().unwrap();
     // RFC3339 timestamps contain T and either Z or timezone offset
     assert!(m.at.contains('T'), "Timestamp should contain T separator");
-    assert!(m.at.contains('Z') || m.at.contains('+') || m.at.contains('-'),
-        "Timestamp should have timezone");
+    assert!(
+        m.at.contains('Z') || m.at.contains('+') || m.at.contains('-'),
+        "Timestamp should have timezone"
+    );
     let _ = fs::remove_file(SELF_UPDATE_MARKER_PATH);
 }
 
@@ -690,12 +753,18 @@ fn test_max_restart_delay_constant() {
 
 #[test]
 fn test_self_update_marker_path_constant() {
-    assert_eq!(SELF_UPDATE_MARKER_PATH, "/var/lib/linux_patch_api/last_self_update.json");
+    assert_eq!(
+        SELF_UPDATE_MARKER_PATH,
+        "/var/lib/linux_patch_api/last_self_update.json"
+    );
 }
 
 #[test]
 fn test_self_update_request_path_constant() {
-    assert_eq!(SELF_UPDATE_REQUEST_PATH, "/var/lib/linux_patch_api/self-update.request");
+    assert_eq!(
+        SELF_UPDATE_REQUEST_PATH,
+        "/var/lib/linux_patch_api/self-update.request"
+    );
 }
 
 #[test]
@@ -736,11 +805,16 @@ fn test_self_update_status_data_with_error_serde() {
         new_version: "1.5.5-1".to_string(),
         changed: false,
         status: "failed".to_string(),
-        error: Some("Package upgrade failed (rc=100, class=dependency_resolution_failed)".to_string()),
+        error: Some(
+            "Package upgrade failed (rc=100, class=dependency_resolution_failed)".to_string(),
+        ),
         at: "2026-06-27T14:00:00Z".to_string(),
     };
     let json = serde_json::to_string(&data).unwrap();
     let parsed: SelfUpdateStatusData = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.status, "failed");
-    assert!(parsed.error.unwrap().contains("dependency_resolution_failed"));
+    assert!(parsed
+        .error
+        .unwrap()
+        .contains("dependency_resolution_failed"));
 }
