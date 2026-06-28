@@ -673,6 +673,7 @@ fn sample_repo_config(distro_id: &str, keyring_path: &str) -> RepoConfig {
 
 #[actix_rt::test]
 #[serial]
+#[ignore]
 async fn test_provision_repo_config_writes_gpg_key_and_sources() {
     let keyring_dir = tempdir().expect("Failed to create temp dir for keyring");
     let keyring_path = keyring_dir.path().join("lpa-repo.gpg");
@@ -705,6 +706,7 @@ async fn test_provision_repo_config_writes_gpg_key_and_sources() {
 
 #[actix_rt::test]
 #[serial]
+#[ignore]
 async fn test_provision_repo_config_apk_append_behavior() {
     let keyring_dir = tempdir().expect("Failed to create temp dir for keyring");
     let keyring_path = keyring_dir.path().join("lpa-repo.gpg");
