@@ -107,7 +107,7 @@ Agent health endpoint (`GET /health`) reports:
 ## Related Repositories
 
 - **Manager:** `Draco-Lunaris/Linux-Patch-Manager` — The server that manages hosts and hosts the package repo
-- **Shared Spec:** `SPEC.md` in the manager repo defines the manager-agent contract
+- **Shared Contract:** `INTERFACE_CONTRACT.md` in the manager repo is the canonical manager-agent interface contract. The agent's SPEC.md and API_SPEC.md define agent-internal behavior; cross-repo interface is in the contract.
 
 ---
 
