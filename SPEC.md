@@ -253,7 +253,7 @@ The enrollment flow runs and **exits after completion** — it does NOT start th
 - **Atomic Writes:** Temp file → set permissions → atomic rename pattern prevents partial writes
 - **File Permissions:** Keys at `0600`, certificates at `0644`, directories at `0755`
 - **Backup Strategy:** Existing certificate files renamed to `.bak` before overwrite
-- **Target Paths:** Configured via TLS settings or defaults (`/etc/linux_patch_api/certs/{ca,server,server.key}.pem`)
+- **Target Paths:** Configured via TLS settings or defaults (`/etc/linux_patch_api/certs/ca.pem`, `/etc/linux_patch_api/certs/server.pem`, `/etc/linux_patch_api/certs/server.key.pem`, `/etc/linux_patch_api/certs/crl.pem`)
 - **Whitelist Auto-Append:** Manager IP resolved (hostname → DNS or direct IP) and appended to `/etc/linux_patch_api/whitelist.yaml`
 - **Completion:** For auto-enrollment: daemon transitions to standard mTLS listening mode without requiring service restart. For `--enroll`: daemon exits with code 0.
 
