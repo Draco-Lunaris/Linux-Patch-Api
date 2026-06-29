@@ -1,6 +1,6 @@
 # Self-Update Operational Runbook
 
-**Date:** 2026-06-27
+**Date:** 2026-06-29
 **Applies to:** Linux Patch API v2.0.0+
 
 ---
@@ -175,48 +175,6 @@ rm -f /var/lib/linux_patch_api/last_self_update.json
 - Package cache: is the previous version still available?
 - Repo: is the repo reachable and signed correctly?
 - Service: does the binary segfault on startup?
-
-## GPG Key Lifecycle
-
-### Key Generation
-
-```bash
-# Generate GPG signing key (done once, stored in Vaultwarden)
-gpg --batch --gen-key <<EOF
-%no-protection
-Key-Type: RSA
-Key-Length: 4096
-Key-Usage: sign
-Name-Real: Linux Patch API Repo
-Name-Email: lpa-repo@moon-dragon.us
-Expire-Date: 2y
-%commit
-EOF
-
-# Export public key (distributed via enrollment)
-gpg --armor --export LPA-REPO-SIGNING-KEY > lpa-repo-public-key.asc
-
-# Export private key (stored in Vaultwarden + CI secrets)
-gpg --armor --export-secret-keys LPA-REPO-SIGNING-KEY > lpa-repo-private-key.asc
-```
-
-### Storage
-
-- **Public key:** Distributed via enrollment `PkiBundle.repo_config.gpg_public_key`
-- **Private key:** Stored in:
-  - Vaultwarden (authoritative source, under `lpa-repo` collection)
-  - CI secrets: `LPA_REPO_GPG_KEY` (GitHub Actions and Gitea Actions)
-
-### Rotation Procedure
-
-1. Generate new GPG key (2-year expiry)
-2. Add new key to manager's GPG keyring
-3. Re-sign repo metadata with new key
-4. Distribute new public key via next enrollment/re-enrollment cycle
-5. After all agents have new key: revoke old key
-6. Old key auto-expires (2-year safety net)
-
-Rotation is rare (every 2 years) and handled by re-enrollment.
 
 ## Log Locations
 

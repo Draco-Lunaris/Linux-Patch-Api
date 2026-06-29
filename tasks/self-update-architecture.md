@@ -1,9 +1,9 @@
-# Self-Update Architecture — Authoritative Reference
+# Self-Update Architecture — Agent-Side Reference
 
 **Version:** 2.0.0
-**Date:** 2026-06-27
+**Date:** 2026-06-29
 **Status:** Active
-**Supersedes:** `tasks/self-update-design.md` (implementation details), `tasks/manager-hosted-repo-design.md` (repo infrastructure)
+**Supersedes:** `tasks/self-update-design.md` (implementation details)
 
 ---
 
@@ -14,9 +14,13 @@ The self-update system enables the Linux Patch API agent to upgrade itself from 
 ### Key Design Principles
 1. **Detached execution** — upgrade runs in a separate systemd unit with its own cgroup
 2. **Native package manager** — no GitHub Releases, no curl downloads, no API parsing
-3. **GPG trust chain** — packages signed by manager's GPG key, delivered via mTLS enrollment
+3. **GPG trust chain** — packages signed by the manager's own GPG key, delivered via mTLS enrollment
 4. **Auto-rollback** — health check after upgrade; if service fails, reinstall previous version
 5. **Cross-restart visibility** — marker file on disk survives agent process restart
+
+### Manager Pull Model
+
+The manager pulls packages from GitHub Releases via standard HTTP, signs them with its own unique GPG key, and hosts them in a local package repository. The agent receives the GPG public key and repo configuration during enrollment. This model requires no CI push, no embedded credentials, and no shared secrets — each manager is self-contained.
 
 ---
 
@@ -29,22 +33,22 @@ The self-update system enables the Linux Patch API agent to upgrade itself from 
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐   │
 │  │ Patch Manager │  │ Repo Server  │  │ GPG Key Management           │   │
 │  │ (Rust API)    │  │ (axum        │  │                              │   │
-│  │               │  │  ServeDir)   │  │ Key creation: CI pipeline    │   │
-│  │ Enrollments   │  │              │  │ Key storage: Vaultwarden     │   │
+│  │               │  │  ServeDir)   │  │ Key generation: manager init │   │
+│  │ Enrollments   │  │              │  │ Key storage: alongside CA    │   │
 │  │ CRL issuance  │  │ /apt/        │  │ Key distribution: enrollment │   │
 │  │ Upgrade API   │  │ /dnf/        │  │                              │   │
-│  │ Health polls  │  │ /apk/        │  │ Repo signing: CI pipeline    │   │
+│  │ Health polls  │  │ /apk/        │  │ Repo signing: manager        │   │
 │  │               │  │ /pacman/     │  │                              │   │
 │  └──────────────┘  └──────────────┘  └──────────────────────────────┘   │
 │         │                  ▲                                              │
 │         │                  │                                              │
 │  ┌──────┴───────┐    ┌─────┴──────┐                                      │
-│  │ Enrollment   │    │ CI Pipeline │                                      │
-│  │ Response     │    │ (pushes     │                                      │
-│  │ + repo config│    │  packages)  │                                      │
-│  │ + GPG key    │    └────────────┘                                      │
-│  └──────────────┘                                                          │
-│         │                                                                  │
+│  │ Enrollment   │    │ Package    │                                      │
+│  │ Response     │    │ Sync       │                                      │
+│  │ + repo config│    │ Worker     │                                      │
+│  │ + GPG key    │    │ (pulls from│                                      │
+│  └──────────────┘    │  GitHub)   │                                      │
+│         │            └────────────┘                                      │
 └─────────┼──────────────────────────────────────────────────────────────────┘
           │ mTLS enrollment
           ▼
@@ -55,7 +59,7 @@ The self-update system enables the Linux Patch API agent to upgrade itself from 
 │  │ sources.list.d   │  │ GPG keyring      │  │ self-update.sh       │    │
 │  │ /lpa.list         │  │ /etc/apt/        │  │ (simplified)          │    │
 │  │                   │  │ trusted.gpg.d    │  │                      │    │
-│  │ deb https://      │  │ lpa-repo.gpg     │  │ apt-get update       │    │
+│  │ deb http://       │  │ lpa-repo.gpg     │  │ apt-get update       │    │
 │  │ manager...        │  │                  │  │ apt-get install      │    │
 │  │                   │  │ (dnf: /etc/pki/  │  │   --only-upgrade     │    │
 │  │                   │  │  rpm-gpg/...)    │  │   linux-patch-api    │    │
@@ -92,23 +96,7 @@ The self-update system enables the Linux Patch API agent to upgrade itself from 
 
 ## 3. Phase Breakdown
 
-### Phase 1: Repository Publishing (CI → Manager)
-
-**Who:** CI pipeline (GitHub Actions + Gitea Actions)
-**When:** On every tagged release
-
-1. CI builds per-distro packages (.deb, .rpm, .apk, .pkg.tar.zst)
-2. `publish-to-manager-repo` job:
-   - Imports GPG signing key from `LPA_REPO_GPG_KEY` secret
-   - Signs each package with the repo's GPG key
-   - Pushes to manager via SSH:
-     - `.deb` → `reprepro includedeb <codename>`
-     - `.rpm` → `createrepo_c` + sign repomd.xml
-     - `.apk` → `apk index` + `abuild-sign`
-     - Arch → `repo-add` + gpg detach-sign
-3. Manager serves the repo over HTTPS at `/apt/`, `/dnf/`, `/apk/`, `/pacman/`
-
-### Phase 2: Enrollment (Agent ↔ Manager)
+### Phase 1: Enrollment (Agent ↔ Manager)
 
 **Who:** Agent (first boot or `--enroll`)
 **Channel:** mTLS-disabled initial connection → manager approval workflow
@@ -126,7 +114,7 @@ The self-update system enables the Linux Patch API agent to upgrade itself from 
    - **pacman**: include file → `/etc/pacman.d/lpa-repo`
 6. Fallback: if `repo_config` absent → agent fetches `GET /api/v1/pki/repo-config` on demand
 
-### Phase 3: Normal Operation (Steady State)
+### Phase 2: Normal Operation (Steady State)
 
 **Who:** Agent daemon
 **Listens on:** mTLS port 12443
@@ -136,7 +124,7 @@ The self-update system enables the Linux Patch API agent to upgrade itself from 
 - `systemd` unit `linux-patch-api.service` runs the agent
 - Separate unit `linux-patch-api-update.service` is **disabled by default**, only started on demand
 
-### Phase 4: Self-Update Trigger (Manager → Agent)
+### Phase 3: Self-Update Trigger (Manager → Agent)
 
 **Endpoint:** `POST /api/v1/system/update`
 
@@ -156,7 +144,7 @@ Handler logic (`update_self`):
 6. Start detached unit: `systemctl start --no-block linux-patch-api-update.service`
 7. Return HTTP 202
 
-### Phase 5: Upgrade Execution (Detached Unit)
+### Phase 4: Upgrade Execution (Detached Unit)
 
 **Critical design:** The upgrade runs in `linux-patch-api-update.service`, which is in its **own cgroup under `system.slice`** — **not** the agent's cgroup.
 
@@ -175,7 +163,7 @@ Flow:
 5. Run upgrade directly via `case/esac` branches — **no eval, no shell interpolation**
 6. Pacman version pinning: search `/var/cache/pacman/pkg/` for cached `.pkg.tar.zst`, use `pacman -U`
 
-### Phase 6: Health Check + Auto-Rollback
+### Phase 5: Health Check + Auto-Rollback
 
 **60-second timeout, 5-second polling interval**
 
@@ -187,7 +175,7 @@ After package install:
    - Write **failure marker** with rollback status
 4. **Signal trap** (`TERM`/`INT`/`HUP`): if script is killed mid-upgrade, write failure marker before exit
 
-### Phase 7: Completion + Visibility
+### Phase 6: Completion + Visibility
 
 **Marker file:** `/var/lib/linux_patch_api/last_self_update.json`
 
@@ -309,13 +297,19 @@ Manager (pm-worker)                    Agent (linux-patch-api)           Update 
 ## 6. Trust Chain (End-to-End)
 
 ```
-Manager TLS Cert (mTLS)  →  GPG Private Key (Vaultwarden)
-        ↓                            ↓
-  Agent identity              Signs packages
-        ↓                            ↓
-  PkiBundle.repo_config       →  Repo metadata + .deb/.rpm signatures
-        ↓                            ↓
-  Native pkg manager (apt/dnf) verifies GPG sig before install
+Manager generates own GPG key (alongside CA)
+        ↓
+  GPG public key delivered via mTLS enrollment (PkiBundle.repo_config)
+        ↓
+  Agent provisions GPG key to native package manager keyring
+        ↓
+  Manager pulls packages from GitHub Releases via HTTP
+        ↓
+  Manager signs packages with its own GPG key
+        ↓
+  Manager hosts signed packages in local repo (HTTP, port 80)
+        ↓
+  Agent's native package manager (apt/dnf/apk/pacman) verifies GPG signature before install
 ```
 
 If enrollment is compromised → package trust is compromised. This transitive chain is documented in `THREAT_MODEL_VALIDATION.md` §7.
@@ -326,7 +320,7 @@ If enrollment is compromised → package trust is compromised. This transitive c
 
 | Trust Boundary | Key Threat | Mitigation |
 |----------------|-----------|------------|
-| CI → Manager Repo | GPG private key leaked | Vaultwarden storage, 2-year expiry, rotation procedure |
+| GitHub Releases → Manager | Package tampering in transit | GPG signing by manager after download; GitHub TLS |
 | Manager → Agent (enrollment) | MITM during enrollment | TLS encryption, manager approval workflow, one-time short window |
 | Agent → Package Repo | Repo server compromised | GPG-signed packages, key delivered via separate mTLS channel |
 | Agent → Self-Update Execution | Shell injection via target_version | `validate_version_string` regex (Rust + bash), no eval, no shell interpolation |
@@ -381,13 +375,6 @@ Full threat model: `THREAT_MODEL_VALIDATION.md` §7
 | `tests/integration/enrollment_test.rs` | 3 integration tests (repo provisioning) |
 | `tests/e2e/test_self_update.sh` | E2E harness (1161 lines, GPG-signed local repo) |
 
-### CI Files
-
-| File | Purpose |
-|------|---------|
-| `.github/workflows/ci.yml` | `publish-to-manager-repo` job (GitHub Actions) |
-| `.gitea/workflows/ci.yml` | `publish-to-manager-repo` job (Gitea Actions) |
-
 ### Documentation Files
 
 | File | Purpose |
@@ -396,10 +383,8 @@ Full threat model: `THREAT_MODEL_VALIDATION.md` §7
 | `API_SPEC.md` | Endpoint documentation (POST /system/update, GET /system/update/status, GET /pki/repo-config) |
 | `THREAT_MODEL_VALIDATION.md` | §7: GPG trust chain for manager-hosted repo |
 | `CHANGELOG.md` | v2.0.0 entry documenting all self-update changes |
-| `tasks/self-update-architecture.md` | This document — authoritative reference |
+| `tasks/self-update-architecture.md` | This document — agent-side authoritative reference |
 | `tasks/self-update-design.md` | Implementation design details (502 lines) |
-| `tasks/manager-hosted-repo-design.md` | Repo infrastructure design (1000 lines) |
-| `tasks/self-update-gap-analysis.md` | Gap analysis (170 lines) |
 | `tasks/migration-guide.md` | Migration guide for existing agents (101 lines) |
 | `tasks/self-update-runbook.md` | Operational runbook (230 lines) |
 
@@ -409,9 +394,7 @@ Full threat model: `THREAT_MODEL_VALIDATION.md` §7
 
 - **Specification:** `SPEC.md` §260-304 (Self-Update via Manager-Hosted Package Repository)
 - **Implementation Design:** `tasks/self-update-design.md`
-- **Repo Infrastructure:** `tasks/manager-hosted-repo-design.md`
 - **Threat Model:** `THREAT_MODEL_VALIDATION.md` §7
 - **API Documentation:** `API_SPEC.md`
 - **Operational Runbook:** `tasks/self-update-runbook.md`
 - **Migration Guide:** `tasks/migration-guide.md`
-- **Gap Analysis:** `tasks/self-update-gap-analysis.md`

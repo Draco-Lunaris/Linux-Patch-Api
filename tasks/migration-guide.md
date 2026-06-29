@@ -1,6 +1,6 @@
 # Migration Guide: Manager-Hosted Repo for Existing Agents
 
-**Date:** 2026-06-27
+**Date:** 2026-06-29
 **Applies to:** Agents enrolled before the manager-hosted repo feature (v2.0.0)
 
 ---
@@ -10,7 +10,6 @@
 Agents enrolled before v2.0.0 received only PKI certificates (CA, server cert, server key, CRL) during enrollment. They have no package repository configured and rely on the old GitHub Releases download path in `self-update.sh`.
 
 Starting with v2.0.0, the enrollment `PkiBundle` includes an optional `repo_config` field with a GPG public key and distro-specific sources configuration. This enables agents to self-update from a manager-hosted package repository using native package manager commands.
-
 The old GitHub Releases download path has been **removed** from `self-update.sh`.
 
 ## Migration Options
@@ -21,7 +20,7 @@ Re-run enrollment to get the full `PkiBundle` with `repo_config`:
 
 ```bash
 # Manual re-enrollment
-linux-patch-api --enroll https://manager.moon-dragon.us
+linux-patch-api --enroll https://<manager-host>
 
 # Or trigger auto-enrollment by expiring certs
 linux-patch-api --renew-certs
@@ -60,7 +59,7 @@ Manually configure the repo on each agent:
 cp lpa-repo-public-key.asc /etc/apt/keyrings/lpa-repo.gpg
 chmod 644 /etc/apt/keyrings/lpa-repo.gpg
 # 2. Add sources list
-echo 'deb [signed-by=/etc/apt/keyrings/lpa-repo.gpg] https://manager.moon-dragon.us/apt/ ./' > /etc/apt/sources.list.d/lpa.list
+echo 'deb [signed-by=/etc/apt/keyrings/lpa-repo.gpg] http://<manager-host>/apt/ ./' > /etc/apt/sources.list.d/lpa.list
 # 3. Update
 apt-get update
 ```
@@ -73,14 +72,6 @@ apt-get update
 1. **Phase 1 (v2.0.0 release):** Manager updated, new enrollments get `repo_config`. GitHub Releases remains as read-only archive.
 2. **Phase 2 (rolling):** Existing agents re-enroll or use fallback fetch. GitHub Releases stays as fallback.
 3. **Phase 3 (complete):** All agents migrated. GitHub Releases deprecated (read-only archive may remain).
-
-## Manager-Side Requirements
-
-The manager must:
-1. Add `repo_config` to the `EnrollmentStatusResponse::Approved` payload
-2. Implement `GET /api/v1/pki/repo-config` endpoint for fallback fetch
-3. Host the package repository (apt/dnf/apk/pacman) with GPG-signed packages
-4. Distribute the GPG public key via enrollment bundle
 
 ## Verification
 
