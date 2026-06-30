@@ -126,10 +126,6 @@ path = "tests/integration/auth_test.rs"
 name = "rate_limit_test"
 path = "tests/unit/rate_limit_test.rs"
 
-[[test]]
-name = "self_update_unit"
-path = "tests/unit/self_update_unit.rs"
-
 [[bench]]
 name = "api_benchmarks"
 harness = false

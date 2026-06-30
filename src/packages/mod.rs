@@ -18,9 +18,6 @@ pub const MAX_NAME_LENGTH: usize = 256;
 pub const SELF_PACKAGE_NAME: &str = env!("CARGO_PKG_NAME"); // "linux-patch-api"
 pub const SELF_SERVICE_NAME: &str = "linux-patch-api";
 pub const MAX_RESTART_DELAY_SECONDS: u64 = 300;
-pub const SELF_UPDATE_MARKER_PATH: &str = "/var/lib/linux_patch_api/last_self_update.json";
-pub const SELF_UPDATE_REQUEST_PATH: &str = "/var/lib/linux_patch_api/self-update.request";
-
 /// Validate a package name against a strict allowlist pattern.
 /// Prevents argument injection by blocking shell metacharacters,
 /// path separators, whitespace, and leading hyphens.
@@ -191,17 +188,6 @@ pub struct ServiceStatus {
     pub enabled_state: String,
     pub main_pid: Option<u32>,
     pub healthy: bool,
-}
-
-/// Self-update status data (marker file format and GET endpoint response)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelfUpdateStatusData {
-    pub previous_version: String,
-    pub new_version: String,
-    pub changed: bool,
-    pub status: String, // "pending" | "success" | "failed"
-    pub error: Option<String>,
-    pub at: String, // RFC3339
 }
 
 /// Package manager backend trait
@@ -2963,52 +2949,6 @@ pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
     } else {
         Err(anyhow::anyhow!("No supported package manager found"))
     }
-}
-
-/// Persist self-update marker to disk
-pub fn persist_self_update_marker(
-    previous: &str,
-    new: &str,
-    changed: bool,
-    status: &str,
-    error: Option<&str>,
-) -> std::io::Result<()> {
-    let marker = SelfUpdateStatusData {
-        previous_version: previous.to_string(),
-        new_version: new.to_string(),
-        changed,
-        status: status.to_string(),
-        error: error.map(String::from),
-        at: chrono::Utc::now().to_rfc3339(),
-    };
-    let json = serde_json::to_string_pretty(&marker)?;
-    let path = std::path::Path::new(SELF_UPDATE_MARKER_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, json)?;
-    Ok(())
-}
-
-/// Read self-update marker from disk
-pub fn read_self_update_marker() -> Option<SelfUpdateStatusData> {
-    let content = std::fs::read_to_string(SELF_UPDATE_MARKER_PATH).ok()?;
-    serde_json::from_str(&content).ok()
-}
-
-/// Write the self-update request file for the update service to read
-pub fn write_self_update_request(target_version: Option<&str>) -> anyhow::Result<()> {
-    let request = serde_json::json!({
-        "target_version": target_version,
-        "package": SELF_PACKAGE_NAME,
-        "service": SELF_SERVICE_NAME,
-    });
-    let path = std::path::Path::new(SELF_UPDATE_REQUEST_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(&request)?)?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -80,12 +80,8 @@ cp target/x86_64-unknown-linux-musl/release/linux-patch-api "$PKGDIR"/usr/bin/
 cp configs/linux-patch-api-openrc "$PKGDIR"/etc/init.d/linux-patch-api
 chmod 755 "$PKGDIR"/etc/init.d/linux-patch-api
 
-# Copy self-update files
 mkdir -p "$PKGDIR"/usr/lib/linux-patch-api
-cp configs/self-update.sh "$PKGDIR"/usr/lib/linux-patch-api/
-chmod 755 "$PKGDIR"/usr/lib/linux-patch-api/self-update.sh
 mkdir -p "$PKGDIR"/usr/lib/systemd/system
-cp configs/linux-patch-api-update.service "$PKGDIR"/usr/lib/systemd/system/
 
 # Copy example configs (as .example files - install script creates live configs)
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml.example
@@ -106,6 +102,7 @@ cp configs/linux-patch-api.pre-install "$WORKSPACE_DIR"/linux-patch-api.pre-inst
 cp configs/linux-patch-api.post-install "$WORKSPACE_DIR"/linux-patch-api.post-install
 cp configs/linux-patch-api.pre-deinstall "$WORKSPACE_DIR"/linux-patch-api.pre-deinstall
 cp configs/linux-patch-api.post-deinstall "$WORKSPACE_DIR"/linux-patch-api.post-deinstall
+cp configs/linux-patch-api.post-upgrade "$WORKSPACE_DIR"/linux-patch-api.post-upgrade
 
 # Create APKBUILD in workspace directory (co-located with install scripts)
 echo "Creating APKBUILD..."
@@ -119,7 +116,7 @@ arch="x86_64"
 license="MIT"
 makedepends=""
 depends="openrc"
-install="linux-patch-api.pre-install linux-patch-api.post-install linux-patch-api.pre-deinstall linux-patch-api.post-deinstall"
+install="linux-patch-api.pre-install linux-patch-api.post-install linux-patch-api.pre-deinstall linux-patch-api.post-deinstall linux-patch-api.post-upgrade"
 subpackages=""
 source=""
 
@@ -137,8 +134,6 @@ package() {
 
     install -d "\$pkgdir"/usr/lib/linux-patch-api
     install -d "\$pkgdir"/usr/lib/systemd/system
-    install -Dm755 "\$startdir"/apk-package/usr/lib/linux-patch-api/self-update.sh "\$pkgdir"/usr/lib/linux-patch-api/self-update.sh
-    install -Dm644 "\$startdir"/apk-package/usr/lib/systemd/system/linux-patch-api-update.service "\$pkgdir"/usr/lib/systemd/system/linux-patch-api-update.service
 }
 EOF
 

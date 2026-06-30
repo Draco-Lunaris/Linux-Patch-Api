@@ -43,11 +43,7 @@ cp target/release/linux-patch-api "$PKGDIR"/usr/bin/
 # Copy systemd service
 cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
 
-# Copy self-update files
 mkdir -p "$PKGDIR"/usr/lib/linux-patch-api
-cp configs/self-update.sh "$PKGDIR"/usr/lib/linux-patch-api/
-chmod 755 "$PKGDIR"/usr/lib/linux-patch-api/self-update.sh
-cp configs/linux-patch-api-update.service "$PKGDIR"/usr/lib/systemd/system/
 
 # Copy example configs (as .example files - install script creates live configs)
 cp configs/config.yaml.example "$PKGDIR"/etc/linux_patch_api/config.yaml.example

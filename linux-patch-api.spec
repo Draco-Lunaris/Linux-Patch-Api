@@ -67,13 +67,8 @@ chmod 755 %{buildroot}/usr/bin/linux-patch-api
 cp configs/linux-patch-api.service %{buildroot}/lib/systemd/system/
 chmod 644 %{buildroot}/lib/systemd/system/linux-patch-api.service
 
-# Install self-update files
 mkdir -p %{buildroot}/usr/lib/linux-patch-api
 mkdir -p %{buildroot}/usr/lib/systemd/system
-cp configs/self-update.sh %{buildroot}/usr/lib/linux-patch-api/
-chmod 755 %{buildroot}/usr/lib/linux-patch-api/self-update.sh
-cp configs/linux-patch-api-update.service %{buildroot}/usr/lib/systemd/system/
-chmod 644 %{buildroot}/usr/lib/systemd/system/linux-patch-api-update.service
 
 # Install example configs
 cp configs/config.yaml.example %{buildroot}/etc/linux_patch_api/config.yaml.example
@@ -175,8 +170,6 @@ fi
 %defattr(-,root,root,-)
 /usr/bin/linux-patch-api
 /lib/systemd/system/linux-patch-api.service
-/usr/lib/linux-patch-api/self-update.sh
-/usr/lib/systemd/system/linux-patch-api-update.service
 %config(noreplace) /etc/linux_patch_api/config.yaml.example
 %config(noreplace) /etc/linux_patch_api/whitelist.yaml.example
 %ghost %config(noreplace) /etc/linux_patch_api/config.yaml

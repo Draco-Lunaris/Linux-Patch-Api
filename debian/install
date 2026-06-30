@@ -13,6 +13,4 @@ etc/linux_patch_api/whitelist.yaml etc/linux_patch_api/
 # var/lib/linux_patch_api/
 # etc/linux_patch_api/certs/
 
-# Self-update support
-usr/lib/linux-patch-api/self-update.sh usr/lib/linux-patch-api/
-lib/systemd/system/linux-patch-api-update.service lib/systemd/system/
+
