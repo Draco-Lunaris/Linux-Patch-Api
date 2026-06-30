@@ -1,0 +1,8 @@
+#!/bin/sh
+# Alpine Linux post-upgrade script for linux-patch-api
+# Runs after the new package version is installed during an upgrade.
+# Schedules a 300s delayed restart so the running process (old binary)
+# keeps serving while the new binary is already on disk.
+
+nohup sh -c 'sleep 300 && rc-service linux-patch-api restart' >/dev/null 2>&1 &
+echo "Upgrade complete — scheduled 300s delayed restart via OpenRC"

@@ -101,7 +101,7 @@ chmod 755 /var/log/linux_patch_api
 # Post-installation script - copy configs, enable service (matches Debian postinst)
 %post
 # Upgrade-aware: on upgrade ($1 > 1), skip CRL/cert/config operations
-# and do NOT restart the service (the self-update endpoint owns the restart).
+# and schedule a 300s delayed restart via systemd-run.
 if [ $1 -eq 1 ]; then
     # Fresh install: full setup
     # Copy example configs if they don't exist
