@@ -4,9 +4,12 @@
 
 set -e
 
-# Stop the service before removal or upgrade
-if [ "$1" = "remove" ] || [ "$1" = "upgrade" ]; then
-    echo "Stopping linux-patch-api service..."
+# Stop the service before removal only — NOT on upgrade.
+# On upgrade, the service keeps running the old binary in memory while
+# dpkg replaces files on disk. The postinst schedules a 300s delayed
+# restart so the new binary loads after a grace period.
+if [ "$1" = "remove" ]; then
+    echo "Stopping linux-patch-api service for removal..."
     
     if systemctl is-active --quiet linux-patch-api.service; then
         systemctl stop linux-patch-api.service

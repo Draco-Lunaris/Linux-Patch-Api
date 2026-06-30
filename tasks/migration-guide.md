@@ -1,6 +1,8 @@
 # Migration Guide: Manager-Hosted Repo for Existing Agents
 
-**Date:** 2026-06-29
+> **⚠ DEPRECATED — 2026-06-29:** This document references the rejected CI-push / Vaultwarden GPG storage / publish-to-manager-repo design model. The canonical design is the **Manager Pull model** per AGENTS.md Rules 1-2 and INTERFACE_CONTRACT.md in the Linux-Patch-Manager repo. GPG keys are stored per-manager at `/etc/patch-manager/ca/`, NEVER in Vaultwarden or CI secrets. Treat all CI-push, publish-to-manager-repo, and Vaultwarden references below as historical artifacts, not current design.
+
+**Date:** 2026-06-27
 **Applies to:** Agents enrolled before the manager-hosted repo feature (v2.0.0)
 
 ---

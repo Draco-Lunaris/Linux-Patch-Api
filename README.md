@@ -1,6 +1,6 @@
 # Linux Patch API
 
-**Version:** 1.0.0  
+**Version:** 2.0.0  
 **Status:** Production Ready  
 **License:** [Apache 2.0](LICENSE)  
 

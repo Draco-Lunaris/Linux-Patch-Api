@@ -359,7 +359,7 @@ All API responses use this standard structure:
   "data": {
     "status": "healthy",
     "uptime_seconds": 12345,
-    "version": "0.0.1"
+    "version": "2.0.0"
   },
   "error": null
 }
@@ -413,98 +413,19 @@ All API responses use this standard structure:
 
 ---
 
-#### POST /api/v1/system/update
+#### POST /api/v1/system/update — DEPRECATED
 
-**Description:** Trigger agent self-update from the manager-hosted package repository (not GitHub Releases). When `target_version` is omitted, installs the latest available version; when supplied, performs an upgrade or downgrade to that exact version. The agent writes the request to `/var/lib/linux_patch_api/self-update.request` and the update service unit invokes `self-update.sh`, which delegates to the native package manager (apt/dnf/yum/apk/pacman) and performs a post-upgrade health check with auto-rollback on failure.
+**Status:** Deprecated — use `PUT /api/v1/packages/{name}` (standard package update endpoint) instead.
 
-**Request Body:**
-```json
-{
-  "target_version": "1.5.6-1",
-  "restart": true,
-  "restart_delay_seconds": 5
-}
-```
+Self-updating the agent is a standard package update. The Manager calls `PUT /api/v1/packages/linux-patch-api` and the native package manager handles the upgrade. The prerm does NOT stop the service on upgrade; the postinst schedules a 300s delayed restart. No custom scripts, detached systemd units, or marker files are needed.
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `target_version` | string | No | — | Specific package version to install (e.g., `"1.5.6-1"`). If omitted, installs the latest available version from the manager repo. Used for manager-initiated downgrade (rollback) by passing a previously known-good version. |
-| `restart` | boolean | No | `true` | Whether to restart the agent service after a successful upgrade. If `false`, the manager must restart the agent manually. |
-| `restart_delay_seconds` | integer | No | `5` | Delay in seconds before restarting the agent after upgrade. Clamped to `MAX_RESTART_DELAY_SECONDS` (300). Values above 300 are silently clamped. |
-
-**Response (202 Accepted):**
-```json
-{
-  "success": true,
-  "request_id": "uuid",
-  "timestamp": "2026-04-09T13:04:02Z",
-  "data": {
-    "job_id": "uuid",
-    "status": "pending",
-    "operation": "self_update",
-    "target_version": "1.5.6-1",
-    "restart": true,
-    "restart_delay_seconds": 5,
-    "source": "manager_repo"
-  },
-  "error": null
-}
-```
-
-**Error Responses:**
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| `INVALID_VERSION` | 400 | The specified `target_version` does not match the package version format or is not available in the manager repo |
-| `UPDATE_IN_PROGRESS` | 409 | A self-update is already in progress; only one concurrent self-update is allowed |
-| `UPDATE_SERVICE_START_ERROR` | 500 | The self-update systemd service unit failed to start |
-| `AUTH_INVALID_CERT` | 401 | mTLS certificate validation failed |
-
-**Notes:**
-- Upgrade source is the manager-hosted apt/dnf/apk/pacman repository configured at enrollment time (not GitHub Releases)
-- GPG signature verification is performed by the native package manager against the key delivered in the enrollment bundle
-- A post-upgrade health check verifies the service becomes active within 60 seconds; on failure, the agent automatically rolls back to `previous_version`
-- Job status is observable via `GET /api/v1/jobs/{id}` and the WebSocket stream
-- The handler writes the request to `/var/lib/linux_patch_api/self-update.request` and delegates execution to the `linux-patch-api-update.service` systemd unit — JobManager is intentionally not used (see handler architecture comment in `src/api/handlers/system.rs`)
+This endpoint may still exist in the codebase for backward compatibility but should be removed in a future cleanup pass.
 
 ---
 
-#### GET /api/v1/system/update/status
+#### GET /api/v1/system/update/status — DEPRECATED
 
-**Description:** Retrieve the result of the most recent self-update operation. Returns the previous version, new version, whether the agent package changed, the outcome status, and any error message. If no self-update has ever been performed, returns a 404.
-
-**Response (200 OK):**
-```json
-{
-  "success": true,
-  "request_id": "uuid",
-  "timestamp": "2026-04-09T13:04:02Z",
-  "data": {
-    "previous_version": "1.4.3-1",
-    "new_version": "1.5.6-1",
-    "changed": true,
-    "status": "success",
-    "error": null,
-    "at": "2026-06-27T14:03:12Z"
-  },
-  "error": null
-}
-```
-
-**Response Fields (SelfUpdateStatusData):**
-| Field | Type | Description |
-|-------|------|-------------|
-| `previous_version` | string \| null | Agent version before the update (null if first install) |
-| `new_version` | string \| null | Agent version after the update (null if update failed before install) |
-| `changed` | boolean | `true` if the package version changed; `false` if already at target version |
-| `status` | string | Outcome: `success`, `rollback`, `failed`, `health_check_timeout` |
-| `error` | string \| null | Error message if status is not `success`; otherwise `null` |
-| `at` | ISO 8601 \| null | Timestamp when the self-update completed (null if never run) |
-
-**Error Responses:**
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| `NO_SELF_UPDATE_RECORD` | 404 | No self-update has been performed on this agent |
-| `AUTH_INVALID_CERT` | 401 | mTLS certificate validation failed |
+**Status:** Deprecated — use `GET /api/v1/jobs/{id}` (standard job status endpoint) instead.
 
 ---
 

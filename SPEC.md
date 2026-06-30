@@ -259,49 +259,49 @@ The enrollment flow runs and **exits after completion** — it does NOT start th
 
 ## Self-Update via Manager-Hosted Package Repository
 
-The agent self-updates from a manager-hosted package repository instead of downloading release artifacts from GitHub Releases. The manager serves apt/dnf/apk/pacman repositories over HTTPS with GPG-signed packages; the agent's `self-update.sh` is reduced to native package-manager commands.
+The agent self-updates from a manager-hosted package repository. The manager serves apt/dnf/apk/pacman repositories over HTTP (port 80) with GPG-signed repo metadata; the agent's native package manager handles the upgrade. Self-updating the agent is a standard package update — no custom scripts, detached systemd units, or marker files are needed.
 
 ### Repository Provisioning During Enrollment
 
 - The manager's enrollment approval response extends `PkiBundle` with an optional `repo_config` field:
-  - `gpg_public_key` — ASCII-armored GPG public key used to verify repo metadata and packages
+  - `gpg_public_key` — ASCII-armored GPG public key used to verify repo metadata
   - `sources_config` — distro-specific repo configuration (apt sources.list line, dnf repo file, apk repository URL, pacman include)
-  - `distro_id` — `ubuntu` / `debian` / `fedora` / `rhel` / `alpine` / `arch`
+  - `distro_id` — bare distro name (e.g., `ubuntu`, `debian`, `fedora`, `almalinux`, `alpine`, `arch`)
   - `keyring_path` — target path where the GPG key is written (e.g., `/etc/apt/keyrings/lpa-repo.gpg`)
 - During PKI provisioning, the agent writes the GPG key to `keyring_path` (file mode `0644`) and writes the sources config to the distro-specific path (apt: `/etc/apt/sources.list.d/lpa.list`; dnf: `/etc/yum.repos.d/lpa.repo`; apk: appended to `/etc/apk/repositories`; pacman: `/etc/pacman.d/lpa-repo`)
 - If `repo_config` is absent from the bundle (older enrollment), the agent fetches it on demand from `GET /api/v1/pki/repo-config`
 
 ### Self-Update Flow
 
-1. Manager invokes `POST /api/v1/system/update` on the agent (optionally with `target_version`)
-2. Agent writes a request file and triggers `self-update.sh` (via the update service unit)
-3. `self-update.sh` reads `target_version`, detects the package manager (apt/dnf/yum/apk/pacman), refreshes repo metadata, and runs the native upgrade command
-4. On success, the agent records `previous_version` and `new_version` to `/var/lib/linux_patch_api/last_self_update.json`
-5. On package-manager failure, the agent writes a failure marker and exits non-zero
+Self-updating the agent is a standard package update — no different from updating any other package on the system:
+
+1. Manager invokes `PUT /api/v1/packages/linux-patch-api` on the agent (standard package update endpoint)
+2. The agent's package update handler runs the native package manager upgrade command
+3. dpkg/apk/pacman replaces the files on disk — the prerm does NOT stop the service on upgrade
+4. The postinst schedules a 300s delayed service restart (`systemd-run --on-active=300s` on systemd distros, `nohup sleep 300` on Alpine)
+5. The agent keeps serving requests on the old binary in memory for 300s
+6. After 300s, the service restarts and the new binary loads
 
 ### GPG Signature Verification
 
-- All packages and repo metadata (`Release`, `repomd.xml`, `APKINDEX.tar.gz`, `lpa-repo.db`) are signed by the manager's GPG key
+- Repo metadata is signed by the manager's GPG key
 - Verification is delegated to the native package manager — the agent performs no manual signature checks
 - Agent trusts the GPG public key because it was delivered inside the mTLS-authenticated enrollment bundle (existing trust root)
 
-### Post-Upgrade Health Check and Auto-Rollback
+### Delayed Restart Rationale
 
-- After a successful package install, `self-update.sh` waits up to 60 seconds for `linux-patch-api.service` to report active (systemd `is-active` or OpenRC `rc-service ... status`)
-- If the service does not become active within the timeout, the agent installs the previously recorded `previous_version` using the same package manager (apt `--allow-downgrades`, dnf/yum `--`, apk `=`, pacman `-U` from cache) and records a failure marker
-
-### Manager-Initiated Downgrade
-
-- The manager can roll back a host by calling `POST /api/v1/system/update` with `target_version` set to the previous known-good version
-- The package manager permits the version decrease (`apt-get install --allow-downgrades`, `dnf install --`, etc.)
-- Prerequisite: the target version remains in the manager repo (reprepro retains all published versions by default)
+The service is NOT stopped during upgrade. The running process keeps serving requests on the old binary while dpkg replaces files on disk. After 300s, the service restarts and loads the new binary. This:
+- Avoids interrupting in-flight requests during the upgrade
+- Lets any concurrent package operations finish
+- Eliminates the need for detached systemd units, custom scripts, health check loops, auto-rollback, marker files, and signal traps
+- Works across all distros (systemd-run on systemd distros, nohup sleep on Alpine/OpenRC)
 
 ### Removed Mechanisms
 
-- The previous GitHub Releases download path (`curl` + GitHub API parsing + asset pattern matching) is removed from `self-update.sh`
-- The manager no longer publishes to GitHub Releases once all agents are migrated (GitHub Releases may remain as a read-only archive during the migration window)
-
-See `tasks/manager-hosted-repo-design.md` for the full design, including threat model and migration phases.
+- `self-update.sh` and `linux-patch-api-update.service` are no longer needed — the native package manager and standard maintainer scripts handle everything
+- `POST /api/v1/system/update` and `GET /api/v1/system/update/status` endpoints are deprecated — use `PUT /api/v1/packages/{name}` and `GET /api/v1/jobs/{id}` instead
+- Marker files (`/var/lib/linux_patch_api/last_self_update.json`, `self-update.request`) are no longer used
+- The previous GitHub Releases download path is removed
 
 ## Audit Logging
 

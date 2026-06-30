@@ -8,10 +8,10 @@ if rc-service linux-patch-api status >/dev/null 2>&1; then
     # Upgrade: preserve everything
     echo "Upgrading linux-patch-api ..."
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
-    # Restart the service with the new binary after upgrade.
-    # Use restart (not start) to ensure the new binary is loaded
-    # even if pre-deinstall didn't stop the old process.
-    rc-service linux-patch-api restart || true
+    # Schedule a 300s delayed restart — the running process keeps
+    # serving on the old binary while files are replaced on disk.
+    # After 300s, OpenRC restarts the service and the new binary loads.
+    nohup sh -c 'sleep 300 && rc-service linux-patch-api restart' >/dev/null 2>&1 &
 else
     # Fresh install: full setup
     # Copy example configs if they don't exist

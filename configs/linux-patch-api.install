@@ -53,10 +53,10 @@ post_upgrade() {
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
-    # Restart the service with the new binary after upgrade.
-    # Use restart (not start) to ensure the new binary is loaded
-    # even if prerm didn't stop the old process.
-    systemctl restart linux-patch-api.service || true
+    # Schedule a 300s delayed restart — the running process keeps
+    # serving on the old binary while files are replaced on disk.
+    # After 300s, systemd restarts the service and the new binary loads.
+    systemd-run --on-active=300s systemctl restart linux-patch-api.service
 }
 
 pre_remove() {
