@@ -130,7 +130,7 @@ The Linux_Patch_API is a secure, single-host API service that enables remote pac
 /etc/linux_patch_api/certs/
 ├── ca.pem       (644) - CA certificate
 ├── server.pem   (644) - Server certificate
-└── server.key   (600) - Server private key (restricted)
+└── server.key.pem (600) - Server private key (restricted)
 ```
 
 **Rationale:**
@@ -149,7 +149,8 @@ The Linux_Patch_API is a secure, single-host API service that enables remote pac
 └── certs/
     ├── ca.pem          # CA certificate (or server.p12)
     ├── server.pem      # Server certificate
-    └── server.key      # Server private key
+    ├── server.key.pem  # Server private key
+    └── crl.pem         # Certificate Revocation List
 
 /var/lib/linux_patch_api/
 ├── jobs/               # Job storage (cleared on restart)
