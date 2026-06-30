@@ -1,15 +1,13 @@
 #!/bin/sh
 # Alpine Linux pre-deinstall script for linux-patch-api
-# Runs before package files are removed
-# Matches Debian prerm behavior: stop and disable service
+# Runs before package files are removed (both upgrade and removal).
+#
+# On upgrade: do NOT stop or disable the service. The running process
+# keeps serving on the old binary while apk replaces files on disk.
+# The post-install script schedules a 300s delayed restart.
+#
+# On removal: the post-deinstall script handles stopping and disabling.
+# We cannot distinguish upgrade from removal here (apk passes no
+# argument), so we do nothing in pre-deinstall.
 
-# Stop the service if running
-if rc-service linux-patch-api status >/dev/null 2>&1; then
-    rc-service linux-patch-api stop
-    echo "Service stopped"
-else
-    echo "Service was not running"
-fi
-
-# Disable the service
-rc-update del linux-patch-api default 2>/dev/null || true
+echo "linux-patch-api pre-deinstall: service left running (delayed restart on upgrade, stop on removal)"

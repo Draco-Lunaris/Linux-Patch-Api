@@ -99,11 +99,12 @@ if [ "$1" = "configure" ]; then
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
         systemctl daemon-reload
         
-        # Ensure self-update script is executable after upgrade
-        if [ -f /usr/lib/linux-patch-api/self-update.sh ]; then
-            chmod 755 /usr/lib/linux-patch-api/self-update.sh
-        fi
-        systemctl start linux-patch-api.service
+        # Schedule a 300s delayed restart — the running process keeps
+        # serving on the old binary while dpkg has already placed the new
+        # one on disk. After 300s, systemd restarts the service and the
+        # new binary loads. This avoids interrupting in-flight requests
+        # and lets any concurrent package operations finish.
+        systemd-run --on-active=300s systemctl restart linux-patch-api.service
     fi
 fi
 

@@ -71,9 +71,9 @@ This is an open-source project. Agents may number in the thousands. **NEVER embe
 
 ### 4. Self-Update via Native Package Manager
 
-The agent self-updates using the host's native package manager (apt, dnf, apk, pacman). The update runs in a detached systemd unit (`linux-patch-api-update.service`) with its own cgroup to survive the agent being killed by dpkg prerm.
+The agent self-updates using the host's native package manager (apt, dnf, apk, pacman). Self-updating is a standard package update — the prerm does NOT stop the service on upgrade, and the postinst schedules a 300s delayed restart. No custom scripts, detached systemd units, or marker files are needed.
 
-**NEVER run `apt-get install` in the agent's own process.** Always use the detached systemd unit.
+**NEVER stop the service during package upgrade.** The running process keeps serving on the old binary; the postinst schedules a delayed restart.
 
 ### 5. Enrollment Protocol
 

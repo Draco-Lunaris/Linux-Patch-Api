@@ -1,10 +1,17 @@
 #!/bin/sh
 # Alpine Linux post-deinstall script for linux-patch-api
-# Runs after package files are removed
-# Matches Debian postrm behavior: clean up empty directories
+# Runs after old package files are removed (both upgrade and removal).
+#
+# On upgrade: the new binary is already installed — do NOT stop.
+# On removal: the binary is gone — stop and disable the service.
+# We detect removal by checking if the binary still exists.
 
-# Remove directories only if empty (preserve user data on reinstall)
-rmdir /var/lib/linux_patch_api 2>/dev/null || true
-rmdir /var/log/linux_patch_api 2>/dev/null || true
-
-echo "linux-patch-api removed"
+if [ ! -f /usr/bin/linux-patch-api ]; then
+    # Actual removal (not upgrade) — binary is gone
+    rc-service linux-patch-api stop 2>/dev/null || true
+    rc-update del linux-patch-api default 2>/dev/null || true
+    echo "Service stopped and disabled for removal"
+else
+    # Upgrade — new binary already installed, service still running old binary
+    echo "Upgrade in progress — service left running (delayed restart scheduled by post-install)"
+fi
