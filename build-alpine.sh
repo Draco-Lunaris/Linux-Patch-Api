@@ -102,6 +102,7 @@ cp configs/linux-patch-api.pre-install "$WORKSPACE_DIR"/linux-patch-api.pre-inst
 cp configs/linux-patch-api.post-install "$WORKSPACE_DIR"/linux-patch-api.post-install
 cp configs/linux-patch-api.pre-deinstall "$WORKSPACE_DIR"/linux-patch-api.pre-deinstall
 cp configs/linux-patch-api.post-deinstall "$WORKSPACE_DIR"/linux-patch-api.post-deinstall
+cp configs/linux-patch-api.post-upgrade "$WORKSPACE_DIR"/linux-patch-api.post-upgrade
 
 # Create APKBUILD in workspace directory (co-located with install scripts)
 echo "Creating APKBUILD..."
@@ -115,7 +116,7 @@ arch="x86_64"
 license="MIT"
 makedepends=""
 depends="openrc"
-install="linux-patch-api.pre-install linux-patch-api.post-install linux-patch-api.pre-deinstall linux-patch-api.post-deinstall"
+install="linux-patch-api.pre-install linux-patch-api.post-install linux-patch-api.pre-deinstall linux-patch-api.post-deinstall linux-patch-api.post-upgrade"
 subpackages=""
 source=""
 
