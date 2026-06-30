@@ -31,10 +31,6 @@ if [ "$1" = "configure" ]; then
         # Reload systemd daemon to pick up new service file
         systemctl daemon-reload
         
-        # Ensure self-update script is executable
-        if [ -f /usr/lib/linux-patch-api/self-update.sh ]; then
-            chmod 755 /usr/lib/linux-patch-api/self-update.sh
-        fi
         
         # Enable the service (but don't start automatically - admin should configure first)
         systemctl enable linux-patch-api.service

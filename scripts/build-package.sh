@@ -77,11 +77,7 @@ chmod 755 "${BUILD_DIR}/usr/bin/linux-patch-api"
 # Systemd service
 cp "${PROJECT_ROOT}/configs/linux-patch-api.service" "${BUILD_DIR}/lib/systemd/system/"
 
-# Self-update service unit and script
-cp "${PROJECT_ROOT}/configs/linux-patch-api-update.service" "${BUILD_DIR}/lib/systemd/system/"
 mkdir -p "${BUILD_DIR}/usr/lib/linux-patch-api"
-cp "${PROJECT_ROOT}/configs/self-update.sh" "${BUILD_DIR}/usr/lib/linux-patch-api/"
-chmod 755 "${BUILD_DIR}/usr/lib/linux-patch-api/self-update.sh"
 
 # Configuration files (live configs for admin editing)
 cp "${PROJECT_ROOT}/configs/config.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/config.yaml"

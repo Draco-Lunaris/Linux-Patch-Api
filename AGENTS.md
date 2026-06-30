@@ -20,7 +20,7 @@ The Linux Patch API is the agent-side component of the Linux Patch Management sy
 | `src/enroll/` | Enrollment client (request enrollment, receive PkiBundle, provision repo config) |
 | `src/jobs/` | Async job manager for package operations |
 | `src/packages/` | Package manager abstraction (apt, dnf, apk, pacman) |
-| `configs/` | systemd units, self-update.sh, packaging scripts |
+| `configs/` | systemd units, packaging scripts |
 
 ---
 
@@ -115,5 +115,4 @@ Agent health endpoint (`GET /health`) reports:
 
 1. **CI push hallucination:** Design docs described a CI push model that referenced non-existent servers. Removed and replaced with Manager Pull model.
 2. **Self-update cgroup isolation:** The detached systemd unit MUST have no coupling to the agent service (no `Requires=`, `BindsTo=`, `PartOf=`). This is what allows the update to survive the agent being killed by dpkg prerm.
-3. **Shell injection prevention:** `self-update.sh` uses `case/esac` branches with no `eval` and no shell interpolation of `target_version`. All version strings are validated with regex before use.
 4. **Marker file is authoritative:** After self-update, the marker file (`/var/lib/linux_patch_api/last_self_update.json`) is the source of truth, not the in-memory job state.

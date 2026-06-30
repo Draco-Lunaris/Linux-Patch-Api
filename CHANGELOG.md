@@ -34,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **RepoConfig** added to enrollment PkiBundle for manager-hosted repo provisioning
 - **Fallback `GET /api/v1/pki/repo-config`** endpoint for pre-repo agents (legacy migration path)
 - **Post-upgrade health check** with auto-rollback (60-second timeout)
-- **Signal trap** (SIGTERM/SIGINT/SIGHUP) in `self-update.sh` for graceful interruption
 - **Pacman `-U` from cache** for version pinning on Arch Linux
 - **SelfUpdateRequest** fields: `restart` (default: `true`), `restart_delay_seconds` (default: `5`, max: `300`)
 - Handler clamping for `restart_delay_seconds` to `MAX_RESTART_DELAY_SECONDS`
