@@ -14,7 +14,6 @@ use uuid::Uuid;
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages;
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
