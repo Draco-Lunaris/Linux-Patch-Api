@@ -1,7 +1,7 @@
 #!/bin/sh
 # Alpine Linux post-install script for linux-patch-api
 # Upgrade-aware: on upgrade (service already exists), skip CRL/cert/config operations
-# and do NOT restart the service (the self-update endpoint owns the restart).
+# and schedule a 300s delayed restart via nohup sleep.
 
 # Detect upgrade by checking if the service already exists
 if rc-service linux-patch-api status >/dev/null 2>&1; then
