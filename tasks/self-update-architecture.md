@@ -1,5 +1,7 @@
 # Self-Update Architecture — Agent-Side Reference
 
+> **⚠ DEPRECATED — 2026-06-29:** This document references the rejected CI-push / Vaultwarden GPG storage / publish-to-manager-repo design model. The canonical design is the **Manager Pull model** per AGENTS.md Rules 1-2 and INTERFACE_CONTRACT.md in the Linux-Patch-Manager repo. GPG keys are stored per-manager at `/etc/patch-manager/ca/`, NEVER in Vaultwarden or CI secrets. Treat all CI-push, publish-to-manager-repo, and Vaultwarden references below as historical artifacts, not current design.
+
 **Version:** 2.0.0
 **Date:** 2026-06-29
 **Status:** Active
