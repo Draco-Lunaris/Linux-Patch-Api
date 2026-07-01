@@ -144,6 +144,19 @@ echo "Copying package to releases/..."
 mkdir -p releases
 cp ~/rpmbuild/RPMS/x86_64/*.rpm releases/
 
+# Rename to strip release number from filename (e.g. 2.0.1-1.fc43 -> 2.0.1.fc43)
+echo "Stripping release number from RPM filename..."
+cd releases
+for f in linux-patch-api-*.rpm; do
+    [ -f "$f" ] || continue
+    new=$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\|fc[0-9]\+\)/.\1/')
+    if [ "$f" != "$new" ]; then
+        mv "$f" "$new"
+        echo "Renamed: $f -> $new"
+    fi
+done
+cd ..
+
 echo ""
 echo "=== Build Complete ==="
 echo "Package: releases/linux-patch-api-*.rpm"
