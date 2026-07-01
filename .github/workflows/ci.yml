@@ -214,12 +214,6 @@ jobs:
         run: cargo build --release
       - name: Build RPM package
         run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
-      - name: Rename RPM to strip release number
-        run: |
-          cd releases
-          for f in linux-patch-api-*.rpm; do
-            [ -f "$f" ] && new=$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\|fc[0-9]\+\)/.\1/') && [ "$f" != "$new" ] && mv "$f" "$new" || true
-          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -242,12 +236,6 @@ jobs:
         run: cargo build --release
       - name: Build RPM package
         run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
-      - name: Rename RPM to strip release number
-        run: |
-          cd releases
-          for f in linux-patch-api-*.rpm; do
-            [ -f "$f" ] && new=$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\|fc[0-9]\+\)/.\1/') && [ "$f" != "$new" ] && mv "$f" "$new" || true
-          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
