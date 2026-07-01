@@ -218,7 +218,7 @@ jobs:
         run: |
           cd releases
           for f in linux-patch-api-*.rpm; do
-            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\)/.\1/')"
+            [ -f "$f" ] && new=$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\|fc[0-9]\+\)/.\1/') && [ "$f" != "$new" ] && mv "$f" "$new" || true
           done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
@@ -246,7 +246,7 @@ jobs:
         run: |
           cd releases
           for f in linux-patch-api-*.rpm; do
-            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\)/.\1/')"
+            [ -f "$f" ] && new=$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\|fc[0-9]\+\)/.\1/') && [ "$f" != "$new" ] && mv "$f" "$new" || true
           done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
