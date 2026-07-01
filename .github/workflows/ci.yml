@@ -138,7 +138,7 @@ jobs:
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
           if [ -n "$FILE" ]; then
-            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2404_amd64/')"
+            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2404_amd64/; s/-[0-9]\+_/_/g')"
           fi
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
@@ -164,7 +164,7 @@ jobs:
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
           if [ -n "$FILE" ]; then
-            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2204_amd64/')"
+            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2204_amd64/; s/-[0-9]\+_/_/g')"
           fi
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
@@ -190,7 +190,7 @@ jobs:
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
           if [ -n "$FILE" ]; then
-            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_debian13_amd64/')"
+            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_debian13_amd64/; s/-[0-9]\+_/_/g')"
           fi
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
@@ -214,6 +214,12 @@ jobs:
         run: cargo build --release
       - name: Build RPM package
         run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
+      - name: Rename RPM to strip release number
+        run: |
+          cd releases
+          for f in linux-patch-api-*.rpm; do
+            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\)/.\1/')"
+          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -236,6 +242,12 @@ jobs:
         run: cargo build --release
       - name: Build RPM package
         run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
+      - name: Rename RPM to strip release number
+        run: |
+          cd releases
+          for f in linux-patch-api-*.rpm; do
+            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-[0-9]\+\.\(el[0-9]\+\)/.\1/')"
+          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -258,6 +270,12 @@ jobs:
         run: cargo build --release
       - name: Build Arch package
         run: chmod +x build-arch.sh && SKIP_CARGO_BUILD=1 ./build-arch.sh
+      - name: Rename packages to strip release number
+        run: |
+          cd releases
+          for f in *.pkg.tar.zst; do
+            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-[0-9]\+-/-/')"
+          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -290,6 +308,12 @@ jobs:
         run: |
           chmod +x build-alpine.sh
           SKIP_CARGO_BUILD=1 ./build-alpine.sh
+      - name: Rename APK to strip release number
+        run: |
+          cd releases
+          for f in linux-patch-api-*.apk; do
+            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-r[0-9]\+\.apk/.apk/')"
+          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
