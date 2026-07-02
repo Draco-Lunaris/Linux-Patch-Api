@@ -95,12 +95,21 @@ if [ "$1" = "configure" ]; then
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
         systemctl daemon-reload
         
-        # Schedule a 300s delayed restart — the running process keeps
-        # serving on the old binary while dpkg has already placed the new
-        # one on disk. After 300s, systemd restarts the service and the
-        # new binary loads. This avoids interrupting in-flight requests
-        # and lets any concurrent package operations finish.
-        systemd-run --on-active=300s systemctl restart linux-patch-api.service
+        # Schedule a 300s delayed restart using an installed systemd timer.
+        # The running process keeps serving on the old binary while dpkg has
+        # already placed the new one on disk. After 300s, the timer fires the
+        # one-shot restart service which restarts the agent and removes the
+        # marker file. This avoids interrupting in-flight requests and lets
+        # any concurrent package operations finish.
+        #
+        # NOTE: We use installed unit files (not transient systemd-run units)
+        # because transient units can silently disappear without firing if the
+        # creating process exits. Installed timer units are tracked by systemd
+        # and survive dpkg exit reliably.
+        mkdir -p /var/lib/linux_patch_api
+        touch /var/lib/linux_patch_api/upgrade-pending
+        systemctl daemon-reload
+        systemctl start linux-patch-api-upgrade-restart.timer
     fi
 fi
 
