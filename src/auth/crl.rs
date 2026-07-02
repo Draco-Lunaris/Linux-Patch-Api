@@ -53,6 +53,8 @@ pub struct CrlState {
     pub crl_mtime: Option<SystemTime>,
     /// When this CrlState was loaded into memory.
     pub loaded_at: SystemTime,
+    /// CRL nextUpdate time (if parsed) for runtime expiry re-evaluation.
+    pub next_update: Option<SystemTime>,
 }
 
 impl Default for CrlState {
@@ -62,6 +64,7 @@ impl Default for CrlState {
             status: CrlStatus::Missing,
             crl_mtime: None,
             loaded_at: SystemTime::now(),
+            next_update: None,
         }
     }
 }
@@ -80,6 +83,23 @@ impl CrlState {
                 .ok()
                 .map(|d| d.as_secs())
         })
+    }
+
+    /// Re-evaluate CRL expiry status based on current time.
+    /// This allows health checks to detect staleness without reloading from disk.
+    /// Only upgrades Valid → Expired; never downgrades Invalid/Missing/Degraded.
+    pub fn reevaluate_expiry(&self) -> CrlStatus {
+        match &self.status {
+            CrlStatus::Valid => {
+                if let Some(nu) = self.next_update {
+                    if SystemTime::now() > nu {
+                        return CrlStatus::Expired;
+                    }
+                }
+                CrlStatus::Valid
+            }
+            other => other.clone(),
+        }
     }
 }
 
@@ -127,6 +147,7 @@ pub fn load_crl(crl_path: &Path, ca_cert_der: &[u8]) -> CrlState {
                     crl_mtime: None,
                     loaded_at: SystemTime::now(),
                     revoked_serials: HashSet::new(),
+                    next_update: None,
                 };
             }
             warn!(path = %crl_path.display(), error = %e, "Failed to read CRL file");
@@ -135,6 +156,7 @@ pub fn load_crl(crl_path: &Path, ca_cert_der: &[u8]) -> CrlState {
                 crl_mtime: None,
                 loaded_at: SystemTime::now(),
                 revoked_serials: HashSet::new(),
+                next_update: None,
             };
         }
     };
@@ -181,6 +203,7 @@ pub fn load_crl_from_bytes(
                 crl_mtime,
                 loaded_at: SystemTime::now(),
                 revoked_serials: HashSet::new(),
+                next_update: None,
             };
         }
     };
@@ -204,6 +227,7 @@ pub fn load_crl_from_bytes(
                 crl_mtime,
                 loaded_at: SystemTime::now(),
                 revoked_serials: HashSet::new(),
+                next_update: None,
             };
         }
     };
@@ -217,6 +241,7 @@ pub fn load_crl_from_bytes(
             crl_mtime,
             loaded_at: SystemTime::now(),
             revoked_serials: HashSet::new(),
+            next_update: None,
         };
     }
 
@@ -242,11 +267,17 @@ pub fn load_crl_from_bytes(
         CrlStatus::Valid
     };
 
+    // Convert ASN1Time next_update to SystemTime for runtime re-evaluation
+    let next_update = crl.next_update().map(|nu| {
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(nu.timestamp() as u64)
+    });
+
     CrlState {
         revoked_serials,
         status,
         crl_mtime,
         loaded_at: SystemTime::now(),
+        next_update,
     }
 }
 
@@ -381,10 +412,11 @@ pub async fn refresh_crl(
 
 /// Spawn the CRL refresh background task.
 ///
-/// Runs on a 12-hour interval (CRL validity is 24h, giving a 12h margin).
-/// On fetch failure, retries with exponential backoff (1min → 5min → 15min → 1h)
-/// before resuming the normal interval. This ensures transient failures
-/// don't cascade into CRL expiration.
+/// Performs an immediate fetch on startup, then runs on a 12-hour interval
+/// (CRL validity is 24h, giving a 12h margin). On fetch failure, retries
+/// with exponential backoff (1min → 5min → 15min → 1h) before resuming
+/// the normal interval. This ensures transient failures don't cascade
+/// into CRL expiration.
 pub fn spawn_crl_refresh_task(
     manager_url: String,
     crl_path: PathBuf,
@@ -400,19 +432,27 @@ pub fn spawn_crl_refresh_task(
     ];
 
     tokio::spawn(async move {
-        // Initial small delay to let the server finish binding
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        // Immediate CRL fetch on startup (no delay)
+        let result = refresh_crl(&manager_url, &crl_path, &ca_cert_der, &shared_state).await;
+        match result {
+            Ok(()) => info!("CRL initial refresh completed successfully"),
+            Err(e) => warn!(
+                error = %e,
+                "CRL initial refresh failed -- continuing with current CRL state"
+            ),
+        }
 
         let mut retry_idx: usize = 0;
 
         loop {
+            tokio::time::sleep(interval).await;
+
             let result = refresh_crl(&manager_url, &crl_path, &ca_cert_der, &shared_state).await;
 
             match result {
                 Ok(()) => {
                     info!("CRL background refresh completed successfully");
                     retry_idx = 0;
-                    tokio::time::sleep(interval).await;
                 }
                 Err(e) => {
                     let delay = backoff_schedule[retry_idx.min(backoff_schedule.len() - 1)];
@@ -433,7 +473,48 @@ pub fn spawn_crl_refresh_task(
 
     info!(
         interval_secs = interval.as_secs(),
-        "CRL refresh background task spawned (12h interval, retry with backoff on failure)"
+        "CRL refresh background task spawned (immediate fetch on startup, 12h interval, retry with backoff on failure)"
+    );
+}
+
+/// Spawn a periodic CRL health re-evaluation task.
+/// Reloads CRL from disk every hour to detect status changes (e.g., expiry)
+/// without waiting for the 12-hour full refresh cycle.
+pub fn spawn_crl_health_task(
+    crl_path: PathBuf,
+    ca_cert_der: Vec<u8>,
+    shared_state: SharedCrlState,
+) {
+    let interval = Duration::from_secs(60 * 60); // 1 hour
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+
+            // Reload CRL from disk to re-evaluate status
+            let new_state = load_crl(&crl_path, &ca_cert_der);
+
+            // Only swap if status changed (avoid unnecessary ArcSwap writes)
+            let current = shared_state.load();
+            if current.status != new_state.status {
+                info!(
+                    old_status = %current.status,
+                    new_status = %new_state.status,
+                    "CRL health re-evaluation detected status change"
+                );
+                shared_state.store(Arc::new(new_state));
+            } else {
+                debug!(
+                    status = %new_state.status,
+                    "CRL health re-evaluation: status unchanged"
+                );
+            }
+        }
+    });
+
+    info!(
+        interval_secs = interval.as_secs(),
+        "CRL health re-evaluation task spawned"
     );
 }
 
@@ -751,6 +832,7 @@ mod tests {
             },
             crl_mtime: Some(std::time::SystemTime::now()),
             loaded_at: std::time::SystemTime::now(),
+            next_update: None,
         };
         assert!(valid_state.is_revoked("aabbccdd"));
         assert!(!valid_state.is_revoked("11223344"));
@@ -761,6 +843,7 @@ mod tests {
             revoked_serials: valid_state.revoked_serials.clone(),
             crl_mtime: Some(std::time::SystemTime::now() - std::time::Duration::from_secs(86400)),
             loaded_at: std::time::SystemTime::now(),
+            next_update: None,
         };
         assert!(expired_state.is_revoked("aabbccdd"));
 
@@ -774,6 +857,7 @@ mod tests {
         let invalid_state = CrlState {
             status: CrlStatus::Invalid,
             revoked_serials: HashSet::new(),
+            next_update: None,
             crl_mtime: Some(std::time::SystemTime::now()),
             loaded_at: std::time::SystemTime::now(),
         };

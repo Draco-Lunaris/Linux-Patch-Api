@@ -323,6 +323,7 @@ mod tests {
         let valid_state = CrlState {
             status: CrlStatus::Valid,
             revoked_serials: HashSet::new(),
+            next_update: None,
             crl_mtime: None,
             loaded_at: std::time::SystemTime::now(),
         };
@@ -366,6 +367,7 @@ mod tests {
         let invalid_state = CrlState {
             status: CrlStatus::Invalid,
             revoked_serials: HashSet::new(),
+            next_update: None,
             crl_mtime: None,
             loaded_at: std::time::SystemTime::now(),
         };
@@ -396,6 +398,7 @@ mod tests {
             revoked_serials: revoked,
             crl_mtime: None,
             loaded_at: std::time::SystemTime::now(),
+            next_update: None,
         };
         crl_state.store(Arc::new(valid_with_revoked));
 

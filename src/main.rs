@@ -396,10 +396,49 @@ async fn main() -> Result<()> {
                     revoked = initial_crl.revoked_serials.len(),
                     "CRL loaded from disk"
                 );
+                let was_expired = initial_crl.status == CrlStatus::Expired;
                 shared_crl_state.store(std::sync::Arc::new(initial_crl));
+
+                // If CRL is expired, attempt immediate refresh from manager
+                if was_expired {
+                    if let Some(manager_url) = config.enrollment_manager_url() {
+                        info!("CRL is expired -- attempting immediate refresh from manager");
+                        match crl::refresh_crl(
+                            manager_url,
+                            &crl_path,
+                            &ca_cert_der,
+                            &shared_crl_state,
+                        )
+                        .await
+                        {
+                            Ok(()) => info!("Expired CRL refreshed from manager on startup"),
+                            Err(e) => warn!(
+                                error = %e,
+                                "Failed to refresh expired CRL from manager on startup"
+                            ),
+                        }
+                    }
+                }
             }
             CrlStatus::Missing => {
-                info!("No CRL on disk -- starting in WebPKI-only mode");
+                info!("No CRL on disk -- attempting immediate fetch from manager");
+                if let Some(manager_url) = config.enrollment_manager_url() {
+                    match crl::refresh_crl(manager_url, &crl_path, &ca_cert_der, &shared_crl_state)
+                        .await
+                    {
+                        Ok(()) => {
+                            info!("CRL fetched from manager on startup");
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "CRL fetch from manager failed on startup -- starting in WebPKI-only mode"
+                            );
+                        }
+                    }
+                } else {
+                    info!("No manager URL configured -- starting in WebPKI-only mode");
+                }
             }
             CrlStatus::Degraded => {
                 warn!("CRL load failed -- starting in degraded (WebPKI-only) mode");
@@ -410,13 +449,20 @@ async fn main() -> Result<()> {
         if let Some(manager_url) = config.enrollment_manager_url() {
             crl::spawn_crl_refresh_task(
                 manager_url.to_string(),
-                crl_path,
-                ca_cert_der,
+                crl_path.clone(),
+                ca_cert_der.clone(),
                 shared_crl_state.clone(),
             );
         } else {
             info!("No manager URL configured -- CRL auto-refresh disabled");
         }
+
+        // Spawn periodic CRL health re-evaluation (hourly disk reload)
+        crl::spawn_crl_health_task(
+            crl_path.clone(),
+            ca_cert_der.clone(),
+            shared_crl_state.clone(),
+        );
 
         // ADR: rustls is the authoritative client-auth gate.
         // Client certificate verification happens at the TLS handshake level

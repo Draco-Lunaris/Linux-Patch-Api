@@ -50,6 +50,7 @@ pub struct HealthData {
     pub cache_status: String,              // "fresh", "stale", "unknown", "failed"
     pub crl_status: Option<String>,        // "valid", "expired", "missing", "invalid", "degraded"
     pub crl_age_seconds: Option<u64>,      // age of on-disk CRL file
+    pub crl_next_update: Option<String>,   // RFC3339 timestamp of CRL nextUpdate
 }
 
 /// Service status response data
@@ -165,22 +166,36 @@ pub async fn health_check(
         )
     };
 
-    // CRL status from shared state
+    // CRL status from shared state — re-evaluate expiry at query time
     let crl = crl_state.load();
-    let crl_status_str = match crl.status {
+    let effective_crl_status = crl.reevaluate_expiry();
+    let crl_status_str = match effective_crl_status {
         CrlStatus::Valid
         | CrlStatus::Expired
         | CrlStatus::Missing
         | CrlStatus::Invalid
         | CrlStatus::Degraded => {
             // Downgrade overall health if CRL is invalid
-            if crl.status == CrlStatus::Invalid {
+            if effective_crl_status == CrlStatus::Invalid {
                 status = "degraded".to_string();
             }
-            crl.status.to_string()
+            // Also downgrade if CRL is expired (stale revocation data)
+            if effective_crl_status == CrlStatus::Expired {
+                status = "degraded".to_string();
+            }
+            effective_crl_status.to_string()
         }
     };
     let crl_age = crl.crl_age_seconds();
+
+    // Convert next_update SystemTime to RFC3339 string for health payload
+    let crl_next_update = crl.next_update.and_then(|nu| {
+        use std::time::UNIX_EPOCH;
+        nu.duration_since(UNIX_EPOCH).ok().and_then(|d| {
+            let secs = d.as_secs() as i64;
+            chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
+        })
+    });
 
     let response = ApiResponse::success(HealthData {
         status,
@@ -190,6 +205,7 @@ pub async fn health_check(
         cache_status: cache_status_str,
         crl_status: Some(crl_status_str),
         crl_age_seconds: crl_age,
+        crl_next_update,
     });
 
     HttpResponse::Ok().json(response)
@@ -424,6 +440,7 @@ mod tests {
             cache_status: "fresh".to_string(),
             crl_status: Some("valid".to_string()),
             crl_age_seconds: Some(3600),
+            crl_next_update: Some("2026-05-28T14:00:00+00:00".to_string()),
         };
         let json = serde_json::to_string(&health).unwrap();
         assert!(json.contains("healthy"));
