@@ -1,0 +1,12 @@
+[Unit]
+Description=Linux Patch API - Restart after package upgrade
+ConditionPathExists=/var/lib/linux_patch_api/upgrade-pending
+
+[Service]
+Type=oneshot
+ExecStart=systemctl restart linux-patch-api.service
+ExecStartPost=rm -f /var/lib/linux_patch_api/upgrade-pending
+RemainAfterExit=no
+
+# Decoupled from main service — no Requires=, BindsTo=, PartOf=
+# This unit must survive the agent being stopped/restarted.

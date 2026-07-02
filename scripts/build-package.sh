@@ -76,6 +76,8 @@ chmod 755 "${BUILD_DIR}/usr/bin/linux-patch-api"
 
 # Systemd service
 cp "${PROJECT_ROOT}/configs/linux-patch-api.service" "${BUILD_DIR}/lib/systemd/system/"
+cp "${PROJECT_ROOT}/configs/linux-patch-api-upgrade-restart.service" "${BUILD_DIR}/lib/systemd/system/"
+cp "${PROJECT_ROOT}/configs/linux-patch-api-upgrade-restart.timer" "${BUILD_DIR}/lib/systemd/system/"
 
 mkdir -p "${BUILD_DIR}/usr/lib/linux-patch-api"
 
