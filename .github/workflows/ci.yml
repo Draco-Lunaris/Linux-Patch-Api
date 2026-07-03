@@ -145,6 +145,32 @@ jobs:
         with:
           files: linux-patch-api_*_u2404_amd64.deb
 
+  build-deb-u2604:
+    name: Build .deb (Ubuntu 26.04)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
+    runs-on: [self-hosted, linux, ubuntu-26.04]
+    steps:
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+      - name: Add Rust to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build .deb package
+        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - name: Rename package with distro suffix
+        run: |
+          FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
+          if [ -n "$FILE" ]; then
+            mv "$FILE" "$(echo "$FILE" | sed 's/_amd64/_u2604_amd64/; s/-[0-9]\+_/_/g')"
+          fi
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: linux-patch-api_*_u2604_amd64.deb
+
   build-deb-u2204:
     name: Build .deb (Ubuntu 22.04)
     if: startsWith(github.ref, 'refs/tags/v')
