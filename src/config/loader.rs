@@ -157,6 +157,28 @@ fn default_backend() -> String {
     "auto".to_string()
 }
 
+/// Package cache configuration
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CacheConfig {
+    /// How long before the package index (apt-get update) is considered stale
+    /// and must be refreshed before serving patch/package data. In seconds.
+    /// Default: 900 (15 minutes).
+    #[serde(default = "default_cache_stale_threshold_secs")]
+    pub stale_threshold_secs: u64,
+}
+
+fn default_cache_stale_threshold_secs() -> u64 {
+    900 // 15 minutes
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            stale_threshold_secs: default_cache_stale_threshold_secs(),
+        }
+    }
+}
+
 /// Enrollment polling configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentConfig {
@@ -484,6 +506,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub package_manager: Option<PackageManagerConfig>,
     #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
     pub enrollment: Option<EnrollmentConfig>,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
@@ -694,5 +718,36 @@ enrollment:
         let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
         let migrated = config.migrate_empty_strings();
         assert!(migrated.enrollment.unwrap().manager_url.is_none());
+    }
+
+    #[test]
+    fn test_cache_config_defaults() {
+        let config = CacheConfig::default();
+        assert_eq!(config.stale_threshold_secs, 900); // 15 minutes
+    }
+
+    #[test]
+    fn test_cache_config_custom_threshold() {
+        let yaml = r#"
+stale_threshold_secs: 300
+"#;
+        let config: CacheConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.stale_threshold_secs, 300);
+    }
+
+    #[test]
+    fn test_app_config_cache_default_when_omitted() {
+        let yaml = r#"
+server:
+  port: 12443
+  bind: "0.0.0.0"
+jobs:
+  max_concurrent: 5
+  timeout_minutes: 30
+logging:
+  level: "info"
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.cache.stale_threshold_secs, 900); // 15 min default
     }
 }

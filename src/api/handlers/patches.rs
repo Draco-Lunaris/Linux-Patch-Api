@@ -38,12 +38,21 @@ pub struct PatchApplyRequest {
 /// List available patches
 pub async fn list_patches(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
+    cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
     let _timestamp = Utc::now().to_rfc3339();
 
     info!(request_id = %request_id, "Listing available patches");
+
+    // Refresh package cache if stale so the manager sees current patch data
+    if cache_state.is_stale() {
+        info!(request_id = %request_id, "Package cache stale, refreshing before listing patches");
+        if let Err(e) = backend.refresh_package_cache(&cache_state) {
+            error!(request_id = %request_id, error = ?e, "Cache refresh failed before listing patches — serving potentially stale data");
+        }
+    }
 
     match backend.list_patches() {
         Ok(patches) => {
