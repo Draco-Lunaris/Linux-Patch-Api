@@ -491,13 +491,33 @@ This endpoint may still exist in the codebase for backward compatibility but sho
         "created_at": "2026-04-09T13:00:00Z",
         "completed_at": "2026-04-09T13:02:00Z",
         "packages": ["nginx"]
+      },
+      {
+        "job_id": "uuid",
+        "operation": "install",
+        "status": "failed",
+        "created_at": "2026-04-09T13:03:00Z",
+        "completed_at": "2026-04-09T13:03:30Z",
+        "packages": ["nonexistent"],
+        "error_code": "PKG_NOT_FOUND"
       }
     ],
-    "total": 1
+    "total": 2
   },
   "error": null
 }
 ```
+
+**Job Summary Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_id` | UUID | Job identifier |
+| `operation` | string | `install`, `update`, `remove`, `patch_apply`, `reboot`, `self_update`, `rollback` |
+| `status` | string | `pending`, `running`, `completed`, `failed`, `cancelled`, `timed_out` |
+| `created_at` | ISO 8601 | Job creation timestamp |
+| `completed_at` | ISO 8601 \| null | Job completion timestamp (null if not completed) |
+| `packages` | string[] | Package names involved in the job |
+| `error_code` | string? | Stable error code — present only for failed jobs (see [Job Error Codes](#job-error-codes)) |
 
 ---
 
@@ -514,17 +534,80 @@ This endpoint may still exist in the codebase for backward compatibility but sho
   "data": {
     "job_id": "uuid",
     "operation": "install",
-    "status": "running",
-    "progress": 45,
-    "message": "Downloading package...",
+    "status": "failed",
+    "progress": 0,
+    "message": "Starting installation...",
     "created_at": "2026-04-09T13:00:00Z",
-    "completed_at": null,
-    "packages": ["nginx"],
-    "logs": ["Starting installation...", "Resolving dependencies..."]
+    "completed_at": "2026-04-09T13:00:30Z",
+    "packages": ["nonexistent"],
+    "logs": [
+      "Job started",
+      "Job failed: apt-get failed (exit 100): E: Unable to locate package nonexistent",
+      "Error chain:",
+      "apt-get failed (exit 100): E: Unable to locate package nonexistent",
+      "",
+      "Caused by:",
+      "    Failed to execute apt command",
+      "Command output:",
+      "Command failed (exit 100): apt-get install -y -- nonexistent",
+      "[stderr]",
+      "  E: Unable to locate package nonexistent",
+      "[stdout]",
+      "  (empty)"
+    ],
+    "error": "apt-get failed (exit 100): E: Unable to locate package nonexistent\n\nCaused by:\n    Failed to execute apt command",
+    "error_code": "PKG_NOT_FOUND",
+    "exit_code": 100,
+    "command_stdout": "",
+    "command_stderr": "E: Unable to locate package nonexistent\n",
+    "rollback_job_id": null,
+    "exclusive_mode": false
   },
   "error": null
 }
 ```
+
+**Job Detail Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_id` | UUID | Job identifier |
+| `operation` | string | Operation type |
+| `status` | string | Job status |
+| `progress` | integer | 0-100 progress percentage |
+| `message` | string | Current status message |
+| `created_at` | ISO 8601 | Job creation timestamp |
+| `completed_at` | ISO 8601 \| null | Job completion timestamp |
+| `packages` | string[] | Package names involved |
+| `logs` | string[] | Chronological log lines (includes error chain + captured command output on failure) |
+| `error` | string \| null | Full error chain (all context layers + root cause) — null on success |
+| `error_code` | string? | Stable error code — present only for failed jobs (see [Job Error Codes](#job-error-codes)) |
+| `exit_code` | integer? | Exit code of the underlying package-manager command — present only when a `CommandError` was captured |
+| `command_stdout` | string? | Captured stdout of the underlying command — present only when a `CommandError` was captured |
+| `command_stderr` | string? | Captured stderr of the underlying command — present only when a `CommandError` was captured |
+| `rollback_job_id` | UUID \| null | Rollback job ID if this job is a rollback |
+| `exclusive_mode` | boolean | Whether the job runs in exclusive (rollback) mode |
+
+---
+
+#### Job Error Codes
+
+Stable machine-readable strings used in `JobDetailData.error_code`, `JobSummary.error_code`, and the WebSocket `job_status` event's `error_code` field. The manager can use these to classify and route failures programmatically (e.g. retry on `NETWORK_ERROR`, alert on `GPG_ERROR`).
+
+| Code | Description |
+|------|-------------|
+| `PKG_MANAGER_ERROR` | Package manager command exited non-zero (generic package operation failure) |
+| `COMMAND_NOT_FOUND` | Package manager command could not be spawned (binary not found, permission denied at exec) |
+| `CACHE_REFRESH_ERROR` | Cache refresh failed (apt-get update / dnf check-update / apk update) |
+| `NETWORK_ERROR` | Network/fetch error during package download (404, connection refused, DNS) |
+| `GPG_ERROR` | GPG signature verification failure (untrusted repo, expired key, bad signature) |
+| `PKG_NOT_FOUND` | Package not found in any configured repository |
+| `DEPENDENCY_CONFLICT` | Unmet dependencies or package conflict prevented the operation |
+| `PERMISSION_DENIED` | Permission denied (not root, file permission, locked dpkg frontend) |
+| `REBOOT_ERROR` | System reboot command failed |
+| `TIMEOUT` | Job exceeded the configured timeout |
+| `UNKNOWN_ERROR` | Catch-all for errors that don't match a more specific code |
+
+**Note:** New codes may be added in the future. The manager should treat unknown codes as `UNKNOWN_ERROR`.
 
 ---
 
@@ -587,6 +670,34 @@ This endpoint may still exist in the codebase for backward compatibility but sho
   "message": "Installation complete",
   "timestamp": "2026-04-09T13:04:02Z"
 }
+```
+
+**Server → Client (job failed):**
+```json
+{
+  "event": "job_status",
+  "job_id": "uuid",
+  "status": "failed",
+  "progress": 0,
+  "message": "Job failed: apt-get failed (exit 100): E: Unable to locate package foo",
+  "timestamp": "2026-04-09T13:04:02Z",
+  "error": "apt-get failed (exit 100): E: Unable to locate package foo",
+  "error_code": "PKG_NOT_FOUND"
+}
+```
+
+**WebSocket Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `event` | string | Event type (`job_status`, `job_complete`, `connected`, `subscribed`, `unsubscribed`, `error`) |
+| `job_id` | UUID | Job identifier (empty for connection/subscription events) |
+| `status` | string | Job status or event-specific status |
+| `progress` | integer | 0-100 progress percentage |
+| `message` | string | Status message |
+| `timestamp` | ISO 8601 | Event timestamp |
+| `error` | string? | Error message — present only on failure events (new field, old clients ignore it) |
+| `error_code` | string? | Stable error code — present only on failure events (see [Job Error Codes](#job-error-codes); new field, old clients ignore it) |
+
 ---
 
 ## Rate Limiting

@@ -64,7 +64,7 @@ pub async fn list_patches(
             HttpResponse::Ok().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to list patches");
+            error!(request_id = %request_id, error = ?e, "Failed to list patches");
             let response = ApiResponse::<()>::error(
                 "PKG_MANAGER_ERROR",
                 &format!("Failed to list patches: {}", e),
@@ -178,12 +178,16 @@ pub async fn apply_patches(
                             .await;
                     }
                     Err(e) => {
-                        let err_msg = format!("Package cache refresh failed: {}", e);
-                        error!(job_id = %job_id_clone, error = %e, "Cache refresh failed");
+                        error!(job_id = %job_id_clone, error = ?e, "Cache refresh failed");
                         let _ = job_manager_clone
-                            .add_job_log(&job_id_clone, err_msg.clone())
+                            .add_job_log(
+                                &job_id_clone,
+                                format!("Package cache refresh failed: {}", e),
+                            )
                             .await;
-                        let _ = job_manager_clone.fail_job(&job_id_clone, err_msg).await;
+                        let _ = job_manager_clone
+                            .fail_job_with_diagnostics(&job_id_clone, &e)
+                            .await;
                         return; // Exit the spawned task
                     }
                 }
@@ -247,10 +251,16 @@ pub async fn apply_patches(
                                     .await;
                             }
                             Err(refresh_err) => {
-                                let err_msg =
-                                    format!("Cache refresh on retry failed: {}", refresh_err);
-                                let _ = job_manager_clone.fail_job(&job_id_clone, err_msg).await;
-                                error!(job_id = %job_id_clone, error = %refresh_err, "Cache refresh on retry failed");
+                                error!(job_id = %job_id_clone, error = ?refresh_err, "Cache refresh on retry failed");
+                                let _ = job_manager_clone
+                                    .add_job_log(
+                                        &job_id_clone,
+                                        format!("Cache refresh on retry failed: {}", refresh_err),
+                                    )
+                                    .await;
+                                let _ = job_manager_clone
+                                    .fail_job_with_diagnostics(&job_id_clone, &refresh_err)
+                                    .await;
                                 return;
                             }
                         }
@@ -295,18 +305,18 @@ pub async fn apply_patches(
                             }
                             Err(retry_err) => {
                                 let _ = job_manager_clone
-                                    .fail_job(&job_id_clone, retry_err.to_string())
+                                    .fail_job_with_diagnostics(&job_id_clone, &retry_err)
                                     .await;
-                                error!(job_id = %job_id_clone, error = %retry_err, "Patch application failed after retry");
+                                error!(job_id = %job_id_clone, error = ?retry_err, "Patch application failed after retry");
                             }
                         }
                     }
                     Err(e) => {
                         // Non-fetch error: fail immediately
                         let _ = job_manager_clone
-                            .fail_job(&job_id_clone, e.to_string())
+                            .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
-                        error!(job_id = %job_id_clone, error = %e, "Patch application failed");
+                        error!(job_id = %job_id_clone, error = ?e, "Patch application failed");
                     }
                 }
             });
@@ -322,7 +332,7 @@ pub async fn apply_patches(
             HttpResponse::Accepted().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to create job");
+            error!(request_id = %request_id, error = ?e, "Failed to create job");
             let response = ApiResponse::<()>::error(
                 "JOB_CREATE_ERROR",
                 &format!("Failed to create job: {}", e),

@@ -5,9 +5,11 @@
 //! and pacman (Arch Linux) with pluggable backend architecture.
 
 pub mod cache;
+pub mod error_utils;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use error_utils::{format_error_for_cache, CommandError};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use tracing::info;
@@ -229,35 +231,52 @@ impl AptBackend {
         }
     }
 
-    /// Run apt command and capture output
+    /// Run apt command and capture output.
+    ///
+    /// On failure, returns a [`CommandError`] (wrapped in anyhow) that preserves the
+    /// exit code, stdout, and stderr so the manager receives the same diagnostics the
+    /// local journal would show.
     fn run_apt(&self, args: &[&str]) -> Result<String> {
         // Service runs as root - no sudo needed for apt commands
         let program = "apt-get";
         let cmd_args: Vec<&str> = args.to_vec();
 
-        let output = Command::new(program)
-            .args(&cmd_args)
-            .output()
-            .context("Failed to execute apt command")?;
+        let output = match Command::new(program).args(&cmd_args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute apt command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("apt command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Run dpkg command and capture output
+    /// Run dpkg command and capture output.
     fn run_dpkg(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("dpkg")
-            .args(args)
-            .output()
-            .context("Failed to execute dpkg command")?;
+        let program = "dpkg";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute dpkg command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("dpkg command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -612,18 +631,42 @@ impl PackageManagerBackend for AptBackend {
                 "Scheduling system reboot in {} minutes (requested {} seconds)",
                 delay_minutes, delay_seconds
             );
-            Command::new("shutdown")
-                .args(["-r", &format!("+{}", delay_minutes)])
-                .status()
-                .context("Failed to schedule delayed reboot")?;
+            let program = "shutdown";
+            let args = ["-r", &format!("+{}", delay_minutes)];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to schedule delayed reboot"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot scheduled in {} minutes", delay_minutes);
         } else {
             // Immediate reboot using systemctl
             info!("Initiating immediate system reboot");
-            Command::new("systemctl")
-                .arg("reboot")
-                .status()
-                .context("Failed to execute reboot command")?;
+            let program = "systemctl";
+            let args = ["reboot"];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to execute reboot command"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot initiated");
         }
 
@@ -658,9 +701,9 @@ impl PackageManagerBackend for AptBackend {
                 Ok(())
             }
             Err(e) => {
-                let err_msg = format!("APT cache refresh failed: {}", e);
-                cache_state.update_failure(err_msg.clone());
-                Err(anyhow::anyhow!("{}", err_msg))
+                let err_msg = format!("APT cache refresh failed: {}", format_error_for_cache(&e));
+                cache_state.update_failure(err_msg);
+                Err(e)
             }
         }
     }
@@ -838,17 +881,24 @@ impl ApkBackend {
         }
     }
 
-    /// Run apk command and capture output
+    /// Run apk command and capture output.
     fn run_apk(&self, args: &[&str]) -> Result<String> {
         // Service runs as root on Alpine - no sudo needed for apk commands
-        let output = Command::new("apk")
-            .args(args)
-            .output()
-            .context("Failed to execute apk command")?;
+        let program = "apk";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute apk command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("apk command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -1300,17 +1350,42 @@ impl PackageManagerBackend for ApkBackend {
                 "Scheduling system reboot in {} minutes (requested {} seconds)",
                 delay_minutes, delay_seconds
             );
-            Command::new("shutdown")
-                .args(["-r", &format!("+{}", delay_minutes)])
-                .status()
-                .context("Failed to schedule delayed reboot")?;
+            let program = "shutdown";
+            let args = ["-r", &format!("+{}", delay_minutes)];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to schedule delayed reboot"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot scheduled in {} minutes", delay_minutes);
         } else {
             // Alpine uses `reboot` command, not `systemctl reboot`
             info!("Initiating immediate system reboot");
-            Command::new("reboot")
-                .status()
-                .context("Failed to execute reboot command")?;
+            let program = "reboot";
+            let args: [&str; 0] = [];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to execute reboot command"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot initiated");
         }
 
@@ -1334,9 +1409,9 @@ impl PackageManagerBackend for ApkBackend {
                 Ok(())
             }
             Err(e) => {
-                let err_msg = format!("APK cache refresh failed: {}", e);
-                cache_state.update_failure(err_msg.clone());
-                Err(anyhow::anyhow!("{}", err_msg))
+                let err_msg = format!("APK cache refresh failed: {}", format_error_for_cache(&e));
+                cache_state.update_failure(err_msg);
+                Err(e)
             }
         }
     }
@@ -1364,31 +1439,45 @@ impl DnfBackend {
         }
     }
 
-    /// Run dnf command and capture output
+    /// Run dnf command and capture output.
     fn run_dnf(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("dnf")
-            .args(args)
-            .output()
-            .context("Failed to execute dnf command")?;
+        let program = "dnf";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute dnf command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("dnf command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Run rpm command and capture output
+    /// Run rpm command and capture output.
     fn run_rpm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("rpm")
-            .args(args)
-            .output()
-            .context("Failed to execute rpm command")?;
+        let program = "rpm";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute rpm command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("rpm command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -1706,16 +1795,24 @@ impl PackageManagerBackend for DnfBackend {
     fn list_patches(&self) -> Result<Vec<Patch>> {
         // dnf check-update returns exit code 100 when updates are available,
         // exit code 0 when no updates, and other codes for errors.
-        let output = Command::new("dnf")
-            .args(["check-update", "-q"])
-            .output()
-            .context("Failed to execute dnf check-update")?;
+        let program = "dnf";
+        let args = ["check-update", "-q"];
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, &args, &e))
+                        .context("Failed to execute dnf check-update"),
+                );
+            }
+        };
 
         // Exit code 100 means updates available, 0 means no updates
         let exit_code = output.status.code().unwrap_or(-1);
         if exit_code != 100 && exit_code != 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("dnf check-update failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, &args, &output,
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1876,17 +1973,41 @@ impl PackageManagerBackend for DnfBackend {
                 "Scheduling system reboot in {} minutes (requested {} seconds)",
                 delay_minutes, delay_seconds
             );
-            Command::new("shutdown")
-                .args(["-r", &format!("+{}", delay_minutes)])
-                .status()
-                .context("Failed to schedule delayed reboot")?;
+            let program = "shutdown";
+            let args = ["-r", &format!("+{}", delay_minutes)];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to schedule delayed reboot"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot scheduled in {} minutes", delay_minutes);
         } else {
             info!("Initiating immediate system reboot");
-            Command::new("systemctl")
-                .arg("reboot")
-                .status()
-                .context("Failed to execute reboot command")?;
+            let program = "systemctl";
+            let args = ["reboot"];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to execute reboot command"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot initiated");
         }
 
@@ -1905,11 +2026,21 @@ impl PackageManagerBackend for DnfBackend {
         info!("Refreshing DNF package cache");
         // dnf check-update returns exit code 100 when updates are available (not an error).
         // run_command_with_timeout treats non-zero as failure, so we run directly.
-        let output = std::process::Command::new("dnf")
-            .args(["check-update", "--refresh"])
+        let program = "dnf";
+        let args = ["check-update", "--refresh"];
+        let output = match std::process::Command::new(program)
+            .args(args)
             .env("DEBIAN_FRONTEND", "noninteractive")
             .output()
-            .context("Failed to execute dnf check-update")?;
+        {
+            Ok(o) => o,
+            Err(e) => {
+                let err = anyhow::Error::new(CommandError::from_spawn_error(program, &args, &e))
+                    .context("Failed to execute dnf check-update");
+                cache_state.update_failure(format_error_for_cache(&err));
+                return Err(err);
+            }
+        };
 
         let exit_code = output.status.code().unwrap_or(-1);
         // Exit code 0 = no updates, 100 = updates available — both are success
@@ -1918,10 +2049,9 @@ impl PackageManagerBackend for DnfBackend {
             info!("DNF package cache refreshed successfully");
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let err_msg = format!("DNF cache refresh failed: {}", stderr);
-            cache_state.update_failure(err_msg.clone());
-            Err(anyhow::anyhow!("{}", err_msg))
+            let err = anyhow::Error::new(CommandError::from_output(program, &args, &output));
+            cache_state.update_failure(format_error_for_cache(&err));
+            Err(err)
         }
     }
 
@@ -1948,31 +2078,45 @@ impl YumBackend {
         }
     }
 
-    /// Run yum command and capture output
+    /// Run yum command and capture output.
     fn run_yum(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("yum")
-            .args(args)
-            .output()
-            .context("Failed to execute yum command")?;
+        let program = "yum";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute yum command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("yum command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Run rpm command and capture output
+    /// Run rpm command and capture output.
     fn run_rpm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("rpm")
-            .args(args)
-            .output()
-            .context("Failed to execute rpm command")?;
+        let program = "rpm";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute rpm command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("rpm command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -2267,15 +2411,23 @@ impl PackageManagerBackend for YumBackend {
 
     fn list_patches(&self) -> Result<Vec<Patch>> {
         // yum check-update returns exit code 100 when updates are available
-        let output = Command::new("yum")
-            .args(["check-update", "-q"])
-            .output()
-            .context("Failed to execute yum check-update")?;
+        let program = "yum";
+        let args = ["check-update", "-q"];
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, &args, &e))
+                        .context("Failed to execute yum check-update"),
+                );
+            }
+        };
 
         let exit_code = output.status.code().unwrap_or(-1);
         if exit_code != 100 && exit_code != 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("yum check-update failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, &args, &output,
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2430,17 +2582,41 @@ impl PackageManagerBackend for YumBackend {
                 "Scheduling system reboot in {} minutes (requested {} seconds)",
                 delay_minutes, delay_seconds
             );
-            Command::new("shutdown")
-                .args(["-r", &format!("+{}", delay_minutes)])
-                .status()
-                .context("Failed to schedule delayed reboot")?;
+            let program = "shutdown";
+            let args = ["-r", &format!("+{}", delay_minutes)];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to schedule delayed reboot"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot scheduled in {} minutes", delay_minutes);
         } else {
             info!("Initiating immediate system reboot");
-            Command::new("systemctl")
-                .arg("reboot")
-                .status()
-                .context("Failed to execute reboot command")?;
+            let program = "systemctl";
+            let args = ["reboot"];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to execute reboot command"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot initiated");
         }
 
@@ -2464,9 +2640,9 @@ impl PackageManagerBackend for YumBackend {
                 Ok(())
             }
             Err(e) => {
-                let err_msg = format!("YUM cache refresh failed: {}", e);
-                cache_state.update_failure(err_msg.clone());
-                Err(anyhow::anyhow!("{}", err_msg))
+                let err_msg = format!("YUM cache refresh failed: {}", format_error_for_cache(&e));
+                cache_state.update_failure(err_msg);
+                Err(e)
             }
         }
     }
@@ -2494,16 +2670,23 @@ impl PacmanBackend {
         }
     }
 
-    /// Run pacman command and capture output
+    /// Run pacman command and capture output.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("pacman")
-            .args(args)
-            .output()
-            .context("Failed to execute pacman command")?;
+        let program = "pacman";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute pacman command"),
+                );
+            }
+        };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pacman command failed: {}", stderr));
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -2879,17 +3062,41 @@ impl PackageManagerBackend for PacmanBackend {
                 "Scheduling system reboot in {} minutes (requested {} seconds)",
                 delay_minutes, delay_seconds
             );
-            Command::new("shutdown")
-                .args(["-r", &format!("+{}", delay_minutes)])
-                .status()
-                .context("Failed to schedule delayed reboot")?;
+            let program = "shutdown";
+            let args = ["-r", &format!("+{}", delay_minutes)];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to schedule delayed reboot"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot scheduled in {} minutes", delay_minutes);
         } else {
             info!("Initiating immediate system reboot");
-            Command::new("systemctl")
-                .arg("reboot")
-                .status()
-                .context("Failed to execute reboot command")?;
+            let program = "systemctl";
+            let args = ["reboot"];
+            let output = match Command::new(program).args(args).output() {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, &args, &e,
+                    ))
+                    .context("Failed to execute reboot command"));
+                }
+            };
+            if !output.status.success() {
+                return Err(anyhow::Error::new(CommandError::from_output(
+                    program, &args, &output,
+                )));
+            }
             info!("System reboot initiated");
         }
 
@@ -2913,9 +3120,12 @@ impl PackageManagerBackend for PacmanBackend {
                 Ok(())
             }
             Err(e) => {
-                let err_msg = format!("Pacman cache refresh failed: {}", e);
-                cache_state.update_failure(err_msg.clone());
-                Err(anyhow::anyhow!("{}", err_msg))
+                let err_msg = format!(
+                    "Pacman cache refresh failed: {}",
+                    format_error_for_cache(&e)
+                );
+                cache_state.update_failure(err_msg);
+                Err(e)
             }
         }
     }
