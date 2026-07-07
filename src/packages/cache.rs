@@ -13,8 +13,8 @@ use super::error_utils::CommandError;
 /// State file path for cache persistence
 const CACHE_STATE_PATH: &str = "/var/lib/linux_patch_api/state/cache.json";
 
-/// Stale threshold: 4 hours
-const STALE_THRESHOLD_SECS: u64 = 4 * 60 * 60;
+/// Default stale threshold: 15 minutes
+pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 15 * 60;
 
 /// Cache refresh command timeout: 120 seconds
 #[allow(dead_code)]
@@ -38,6 +38,7 @@ pub struct PackageCacheStatus {
 /// In-memory cache state (thread-safe)
 pub struct PackageCacheState {
     inner: Mutex<CacheStateInner>,
+    stale_threshold_secs: u64,
 }
 
 struct CacheStateInner {
@@ -48,12 +49,17 @@ struct CacheStateInner {
 
 impl Default for PackageCacheState {
     fn default() -> Self {
-        Self::new()
+        Self::with_threshold(DEFAULT_STALE_THRESHOLD_SECS)
     }
 }
 
 impl PackageCacheState {
     pub fn new() -> Self {
+        Self::with_threshold(DEFAULT_STALE_THRESHOLD_SECS)
+    }
+
+    /// Create a cache state with a custom stale threshold (in seconds).
+    pub fn with_threshold(stale_threshold_secs: u64) -> Self {
         // Try to load from state file on startup
         let inner = match Self::load_state_file() {
             Some(state) => CacheStateInner {
@@ -72,6 +78,7 @@ impl PackageCacheState {
         };
         Self {
             inner: Mutex::new(inner),
+            stale_threshold_secs,
         }
     }
 
@@ -89,7 +96,7 @@ impl PackageCacheState {
         match inner.last_update {
             None => true,
             Some(t) => {
-                let threshold = Duration::from_secs(STALE_THRESHOLD_SECS);
+                let threshold = Duration::from_secs(self.stale_threshold_secs);
                 Utc::now() - t
                     > chrono::Duration::from_std(threshold).unwrap_or(chrono::TimeDelta::MAX)
             }

@@ -302,9 +302,14 @@ async fn main() -> Result<()> {
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
 
-    // Initialize package cache state
-    let cache_state = web::Data::new(PackageCacheState::new());
-    info!("Package cache state initialized");
+    // Initialize package cache state with configured stale threshold
+    let cache_state = web::Data::new(PackageCacheState::with_threshold(
+        config.cache.stale_threshold_secs,
+    ));
+    info!(
+        stale_threshold_secs = config.cache.stale_threshold_secs,
+        "Package cache state initialized"
+    );
 
     // Initialize shared CRL state (available even when TLS is off for health reporting)
     let shared_crl_state = crl::new_shared_state();
