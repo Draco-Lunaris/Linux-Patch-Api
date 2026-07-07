@@ -309,6 +309,31 @@ impl AptBackend {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
+    /// Run `apt-cache` for query operations like `policy` and `search`.
+    ///
+    /// `apt-cache` is the scripting-safe tool for package queries. `apt-get` does not
+    /// support `policy` — it's an `apt-cache` operation.
+    fn run_apt_cache(&self, args: &[&str]) -> Result<String> {
+        let program = "apt-cache";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute apt-cache command"),
+                );
+            }
+        };
+
+        if !output.status.success() {
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
     /// Parse package list from `apt list` output.
     ///
     /// Format: `name/repos version arch [status]`
@@ -448,7 +473,7 @@ impl PackageManagerBackend for AptBackend {
             .unwrap_or(false);
 
         let latest_version = if upgradable {
-            self.run_apt(&["policy", name]).ok().and_then(|o| {
+            self.run_apt_cache(&["policy", name]).ok().and_then(|o| {
                 o.lines()
                     .find(|l| l.contains("Candidate"))
                     .and_then(|l| l.split_whitespace().nth(1))
@@ -2412,8 +2437,10 @@ impl PackageManagerBackend for YumBackend {
         let mut args: Vec<String> = vec!["install".to_string(), "-y".to_string()];
 
         if options.no_recommends {
-            // yum uses --setopt for weak deps (older syntax)
-            args.push("--setopt=install_weak_deps=0".to_string());
+            // YUM (CentOS 7) doesn't support --setopt=install_weak_deps=0 (that's dnf-only).
+            // The closest yum equivalent is --setopt=group_package_types=mandatory, but
+            // that only affects group installs. For individual package installs, yum
+            // doesn't have a weak-deps concept, so we skip this option.
         }
 
         // yum doesn't have --allowerasing, skip force option
@@ -2928,7 +2955,7 @@ impl PackageManagerBackend for PacmanBackend {
 
         if options.force {
             args.push("--overwrite".to_string());
-            args.push("'*'".to_string());
+            args.push("*".to_string());
         }
 
         // SECURITY: -- separator prevents argument injection via package names
