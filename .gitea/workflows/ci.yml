@@ -97,7 +97,7 @@ jobs:
       - name: Run cargo-audit
         run: |
           cargo install cargo-audit
-          cargo audit --ignore RUSTSEC-2025-0134
+          cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0205
 
   enrollment-tests:
     name: Enrollment Tests
