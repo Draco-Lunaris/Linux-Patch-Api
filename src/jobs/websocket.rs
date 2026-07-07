@@ -49,6 +49,12 @@ pub struct WsServerMessage {
     pub progress: u8,
     pub message: String,
     pub timestamp: String,
+    /// Error message — only present on failure events. New field; old clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Stable error code — only present on failure events. New field; old clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl WsServerMessage {
@@ -61,6 +67,8 @@ impl WsServerMessage {
             progress: event.progress,
             message: event.message.clone(),
             timestamp: event.timestamp.clone(),
+            error: event.error.clone(),
+            error_code: event.error_code.clone(),
         }
     }
 
@@ -73,6 +81,8 @@ impl WsServerMessage {
             progress: 0,
             message: format!("WebSocket connected: {}", ws_id),
             timestamp: Utc::now().to_rfc3339(),
+            error: None,
+            error_code: None,
         }
     }
 
@@ -86,6 +96,8 @@ impl WsServerMessage {
                 progress: 0,
                 message: format!("Subscribed to job: {}", id),
                 timestamp: Utc::now().to_rfc3339(),
+                error: None,
+                error_code: None,
             },
             None => Self {
                 event: "subscribed".to_string(),
@@ -94,6 +106,8 @@ impl WsServerMessage {
                 progress: 0,
                 message: "Subscribed to all job events".to_string(),
                 timestamp: Utc::now().to_rfc3339(),
+                error: None,
+                error_code: None,
             },
         }
     }
@@ -107,6 +121,8 @@ impl WsServerMessage {
             progress: 0,
             message: format!("Unsubscribed from job: {}", job_id),
             timestamp: Utc::now().to_rfc3339(),
+            error: None,
+            error_code: None,
         }
     }
 
@@ -119,6 +135,8 @@ impl WsServerMessage {
             progress: 0,
             message: message.to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            error: None,
+            error_code: None,
         }
     }
 
@@ -131,6 +149,8 @@ impl WsServerMessage {
             progress,
             message: message.to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            error: None,
+            error_code: None,
         }
     }
 }
@@ -370,11 +390,37 @@ mod tests {
             progress: 50,
             message: "Processing...".to_string(),
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            error: None,
+            error_code: None,
         };
         let msg = WsServerMessage::from_job_status_event(&event);
         assert_eq!(msg.event, "job_status");
         assert_eq!(msg.status, "running");
         assert_eq!(msg.progress, 50);
+        assert!(msg.error.is_none());
+        assert!(msg.error_code.is_none());
+    }
+
+    #[test]
+    fn test_ws_server_message_from_failed_event() {
+        let event = JobStatusEvent {
+            event: "job_status".to_string(),
+            job_id: Uuid::new_v4(),
+            status: "failed".to_string(),
+            progress: 0,
+            message: "Install failed".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            error: Some("apt-get failed (exit 100): E: Unable to locate package foo".to_string()),
+            error_code: Some("PKG_NOT_FOUND".to_string()),
+        };
+        let msg = WsServerMessage::from_job_status_event(&event);
+        assert_eq!(msg.status, "failed");
+        assert!(msg.error.is_some());
+        assert_eq!(msg.error_code.as_deref(), Some("PKG_NOT_FOUND"));
+        // Verify the error/code survive JSON round-trip.
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("PKG_NOT_FOUND"));
+        assert!(json.contains("Unable to locate package"));
     }
 
     #[test]

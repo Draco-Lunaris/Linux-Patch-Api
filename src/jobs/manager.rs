@@ -62,6 +62,23 @@ pub struct Job {
     pub message: String,
     pub logs: Vec<String>,
     pub error: Option<String>,
+    /// Stable machine-readable error code (one of `error_utils::error_code::*`).
+    /// Set on failure, `None` for non-failed jobs. The manager uses this to
+    /// classify and route failures programmatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Exit code of the underlying package-manager command, when available.
+    /// `None` for non-failed jobs or when the command could not be spawned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Captured stdout of the underlying command, when available.
+    /// Truncated to [`error_utils::MAX_OUTPUT_LINES`] lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_stdout: Option<String>,
+    /// Captured stderr of the underlying command, when available.
+    /// Truncated to [`error_utils::MAX_OUTPUT_LINES`] lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_stderr: Option<String>,
     pub rollback_job_id: Option<Uuid>,
     pub exclusive_mode: bool,
 }
@@ -82,6 +99,10 @@ impl Job {
             message: String::from("Job created"),
             logs: Vec::new(),
             error: None,
+            error_code: None,
+            exit_code: None,
+            command_stdout: None,
+            command_stderr: None,
             rollback_job_id: None,
             exclusive_mode: false,
         }
@@ -124,6 +145,41 @@ impl Job {
         self.updated_at = self.completed_at.unwrap();
         self.add_log(format!("Job failed: {}", error));
     }
+
+    /// Mark job as failed with full structured diagnostics.
+    ///
+    /// Populates `error` (full chain), `error_code` (stable classification),
+    /// `exit_code`/`command_stdout`/`command_stderr` (from a `CommandError` in
+    /// the chain, if any), and appends diagnostic log lines.
+    pub fn fail_with_diagnostics(&mut self, error: &anyhow::Error) {
+        use crate::packages::error_utils;
+
+        // Full error chain for the `error` field.
+        let error_chain = error_utils::format_error_chain(error);
+        self.error = Some(error_chain.clone());
+        self.error_code = Some(error_utils::classify_error(error).to_string());
+        self.exit_code = error_utils::extract_exit_code(error);
+        self.command_stdout = error_utils::extract_stdout(error);
+        self.command_stderr = error_utils::extract_stderr(error);
+
+        self.status = JobStatus::Failed;
+        self.completed_at = Some(Utc::now());
+        self.updated_at = self.completed_at.unwrap();
+        self.add_log(format!("Job failed: {}", error_chain));
+
+        // Append diagnostic lines (chain + captured command output) to logs.
+        for line in error_utils::diagnostic_log_lines(error) {
+            self.add_log(line);
+        }
+    }
+}
+
+/// Bundles the error fields for [`JobStatusEvent`] emission, so `emit_event` stays
+/// under clippy's argument-count limit. `None` means "not a failure event".
+#[derive(Debug, Clone)]
+struct EventError {
+    error: String,
+    code: String,
 }
 
 /// Job status event broadcast to WebSocket clients
@@ -135,6 +191,12 @@ pub struct JobStatusEvent {
     pub progress: u8,
     pub message: String,
     pub timestamp: String,
+    /// Error message (full chain) — only present on failure events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Stable error code — only present on failure events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// Job Manager - handles async job queue with limits and WebSocket broadcast
@@ -193,6 +255,7 @@ impl JobManager {
         status: &JobStatus,
         progress: u8,
         message: &str,
+        error_info: Option<EventError>,
     ) {
         let event = JobStatusEvent {
             event: event_type.to_string(),
@@ -201,6 +264,8 @@ impl JobManager {
             progress,
             message: message.to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            error: error_info.as_ref().map(|e| e.error.clone()),
+            error_code: error_info.as_ref().map(|e| e.code.clone()),
         };
         // Ignore send errors (no receivers is fine)
         let _ = self.event_sender.send(event);
@@ -218,7 +283,7 @@ impl JobManager {
         jobs.insert(job_id, job);
         drop(jobs); // Release lock before emitting event
 
-        self.emit_event("job_status", &job_id, &status, progress, &message);
+        self.emit_event("job_status", &job_id, &status, progress, &message, None);
 
         Ok(job_id)
     }
@@ -258,7 +323,7 @@ impl JobManager {
         } // Write lock dropped here
 
         if let Some((status, progress, message)) = event_data {
-            self.emit_event("job_status", job_id, &status, progress, &message);
+            self.emit_event("job_status", job_id, &status, progress, &message, None);
         }
 
         Ok(())
@@ -290,13 +355,13 @@ impl JobManager {
         }
 
         if let Some((status, progress, message)) = event_data {
-            self.emit_event("job_status", job_id, &status, progress, &message);
+            self.emit_event("job_status", job_id, &status, progress, &message, None);
         }
 
         Ok(())
     }
 
-    /// Mark a job as failed
+    /// Mark a job as failed.
     pub async fn fail_job(&self, job_id: &Uuid, error: String) -> Result<()> {
         let event_data;
         {
@@ -311,7 +376,66 @@ impl JobManager {
         }
 
         if let Some((status, progress, message)) = event_data {
-            self.emit_event("job_status", job_id, &status, progress, &message);
+            self.emit_event("job_status", job_id, &status, progress, &message, None);
+        }
+
+        Ok(())
+    }
+
+    /// Mark a job as failed with rich diagnostics.
+    ///
+    /// This is the preferred failure path for async package operations. It:
+    /// - Sets `job.error` to the full anyhow error chain (all `.context()` layers +
+    ///   root cause), so the manager sees the same depth as the local journal.
+    /// - Sets `job.error_code` to a stable classification
+    ///   (one of [`crate::packages::error_utils::error_code`]::*).
+    /// - Sets `job.exit_code`/`command_stdout`/`command_stderr` from a
+    ///   [`crate::packages::error_utils::CommandError`] in the chain, if present.
+    /// - Appends diagnostic log lines to `job.logs`: the error chain plus any captured
+    ///   command output (stdout/stderr with stream prefixes, exit code).
+    /// - Emits a WebSocket `job_status` event with `error` and `error_code` populated,
+    ///   so the manager receives the failure in real time (not just on poll).
+    ///
+    /// The manager retrieves full details via `GET /api/v1/jobs/{id}`. The WebSocket
+    /// event carries the error code + a short error string for real-time alerting.
+    pub async fn fail_job_with_diagnostics(
+        &self,
+        job_id: &Uuid,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        let event_data;
+        {
+            let mut jobs = self.jobs.write().await;
+
+            if let Some(job) = jobs.get_mut(job_id) {
+                // Capture the error code + short message before fail_with_diagnostics
+                // consumes the error reference for the chain/logs.
+                let code = crate::packages::error_utils::classify_error(error).to_string();
+                let short_error = crate::packages::error_utils::format_error_for_cache(error);
+
+                job.fail_with_diagnostics(error);
+
+                event_data = Some((
+                    job.status.clone(),
+                    job.progress,
+                    job.message.clone(),
+                    short_error,
+                    code,
+                ));
+            } else {
+                event_data = None;
+            }
+        }
+
+        if let Some((status, progress, message, err, code)) = event_data {
+            self.emit_event(
+                "job_status",
+                job_id,
+                &status,
+                progress,
+                &message,
+                Some(EventError { error: err, code }),
+            );
         }
 
         Ok(())

@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use super::error_utils::CommandError;
+
 /// State file path for cache persistence
 const CACHE_STATE_PATH: &str = "/var/lib/linux_patch_api/state/cache.json";
 
@@ -171,18 +173,31 @@ where
     }
 }
 
-/// Run a command with timeout for cache refresh operations
+/// Run a command with timeout for cache refresh operations.
+///
+/// On failure, returns a [`CommandError`] (wrapped in anyhow) preserving exit code,
+/// stdout, and stderr so the manager receives the same diagnostics as the local journal.
 pub fn run_command_with_timeout(program: &str, args: &[&str]) -> Result<String> {
     use std::process::Command;
 
-    let output = Command::new(program)
+    let output = match Command::new(program)
         .args(args)
         .env("DEBIAN_FRONTEND", "noninteractive")
-        .output()?;
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                    .context("Cache refresh command failed to start"),
+            );
+        }
+    };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("Cache refresh command failed: {}", stderr));
+        return Err(anyhow::Error::new(CommandError::from_output(
+            program, args, &output,
+        )));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())

@@ -643,26 +643,72 @@ All API responses use this standard JSON envelope:
   "data": {
     "job_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
     "operation": "install",
-    "status": "completed",
-    "progress_percent": 100,
+    "status": "failed",
+    "progress": 0,
+    "message": "Job failed: apt-get failed (exit 100): E: Unable to locate package nonexistent",
     "created_at": "2026-04-09T13:00:00Z",
-    "updated_at": "2026-04-09T13:02:00Z",
-    "completed_at": "2026-04-09T13:02:00Z",
-    "packages": ["nginx"],
-    "result": {
-      "success": true,
-      "packages_installed": ["nginx"],
-      "packages_failed": []
-    },
+    "completed_at": "2026-04-09T13:00:30Z",
+    "packages": ["nonexistent"],
     "logs": [
-      {"timestamp": "2026-04-09T13:00:01Z", "level": "info", "message": "Starting package installation"},
-      {"timestamp": "2026-04-09T13:01:00Z", "level": "info", "message": "Downloading nginx 1.24.0-1"},
-      {"timestamp": "2026-04-09T13:02:00Z", "level": "info", "message": "Installation complete"}
-    ]
+      "Job started",
+      "Job failed: apt-get failed (exit 100): E: Unable to locate package nonexistent",
+      "Error chain:",
+      "apt-get failed (exit 100): E: Unable to locate package nonexistent",
+      "Command output:",
+      "Command failed (exit 100): apt-get install -y -- nonexistent",
+      "[stderr]",
+      "  E: Unable to locate package nonexistent",
+      "[stdout]",
+      "  (empty)"
+    ],
+    "error": "apt-get failed (exit 100): E: Unable to locate package nonexistent\n\nCaused by:\n    Failed to execute apt command",
+    "error_code": "PKG_NOT_FOUND",
+    "exit_code": 100,
+    "command_stdout": "",
+    "command_stderr": "E: Unable to locate package nonexistent\n",
+    "rollback_job_id": null,
+    "exclusive_mode": false
   },
   "error": null
 }
 ```
+
+**Job Detail Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_id` | UUID | Job identifier |
+| `operation` | string | Operation type (`install`, `update`, `remove`, `patch_apply`, `reboot`, `self_update`, `rollback`) |
+| `status` | string | Job status (see below) |
+| `progress` | integer | 0-100 progress percentage |
+| `message` | string | Current status message |
+| `created_at` | ISO 8601 | Job creation timestamp |
+| `completed_at` | ISO 8601 \| null | Job completion timestamp |
+| `packages` | string[] | Package names involved |
+| `logs` | string[] | Chronological log lines (includes error chain + captured command output on failure) |
+| `error` | string \| null | Full error chain (all context layers + root cause) — null on success |
+| `error_code` | string? | Stable error code — present only for failed jobs (see below) |
+| `exit_code` | integer? | Exit code of the underlying package-manager command — present only when captured |
+| `command_stdout` | string? | Captured stdout of the underlying command — present only when captured |
+| `command_stderr` | string? | Captured stderr of the underlying command — present only when captured |
+| `rollback_job_id` | UUID \| null | Rollback job ID if this job is a rollback |
+| `exclusive_mode` | boolean | Whether the job runs in exclusive (rollback) mode |
+
+**Job Error Codes:**
+
+| Code | Description | Retryable? |
+|------|-------------|------------|
+| `PKG_MANAGER_ERROR` | Package manager command exited non-zero (generic) | Yes |
+| `COMMAND_NOT_FOUND` | Package manager binary not found / not executable | No |
+| `CACHE_REFRESH_ERROR` | Cache refresh failed (apt-get update, dnf check-update) | Yes |
+| `NETWORK_ERROR` | Network/fetch error (404, connection refused, DNS) | Yes |
+| `GPG_ERROR` | GPG signature verification failure | No |
+| `PKG_NOT_FOUND` | Package not found in any configured repository | No |
+| `DEPENDENCY_CONFLICT` | Unmet dependencies or package conflict | No |
+| `PERMISSION_DENIED` | Permission denied (not root, locked frontend) | No |
+| `REBOOT_ERROR` | System reboot command failed | Yes |
+| `TIMEOUT` | Job exceeded the configured timeout | Yes |
+| `UNKNOWN_ERROR` | Catch-all for unclassified errors | Unknown |
 
 **Job Status Values:**
 

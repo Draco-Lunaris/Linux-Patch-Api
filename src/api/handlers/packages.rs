@@ -175,7 +175,7 @@ pub async fn list_packages(
             HttpResponse::Ok().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to list packages");
+            error!(request_id = %request_id, error = ?e, "Failed to list packages");
             let response = ApiResponse::<()>::error(
                 "PKG_MANAGER_ERROR",
                 &format!("Failed to list packages: {}", e),
@@ -221,7 +221,7 @@ pub async fn get_package(
             HttpResponse::NotFound().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, package = %package_name, error = %e, "Failed to get package");
+            error!(request_id = %request_id, package = %package_name, error = ?e, "Failed to get package");
             let response = ApiResponse::<()>::error(
                 "PKG_MANAGER_ERROR",
                 &format!("Failed to get package: {}", e),
@@ -301,9 +301,9 @@ pub async fn install_packages(
                     }
                     Err(e) => {
                         let _ = job_manager_clone
-                            .fail_job(&job_id_clone, e.to_string())
+                            .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
-                        error!(job_id = %job_id_clone, error = %e, "Package installation failed");
+                        error!(job_id = %job_id_clone, error = ?e, "Package installation failed");
                     }
                 }
             });
@@ -319,7 +319,7 @@ pub async fn install_packages(
             HttpResponse::Accepted().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to create job");
+            error!(request_id = %request_id, error = ?e, "Failed to create job");
             let response = ApiResponse::<()>::error(
                 "JOB_CREATE_ERROR",
                 &format!("Failed to create job: {}", e),
@@ -398,9 +398,9 @@ pub async fn update_package(
                     }
                     Err(e) => {
                         let _ = job_manager_clone
-                            .fail_job(&job_id_clone, e.to_string())
+                            .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
-                        error!(job_id = %job_id_clone, package = %pkg_name, error = %e, "Package update failed");
+                        error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Package update failed");
                     }
                 }
             });
@@ -416,7 +416,7 @@ pub async fn update_package(
             HttpResponse::Accepted().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to create job");
+            error!(request_id = %request_id, error = ?e, "Failed to create job");
             let response = ApiResponse::<()>::error(
                 "JOB_CREATE_ERROR",
                 &format!("Failed to create job: {}", e),
@@ -494,9 +494,9 @@ pub async fn remove_package(
                     }
                     Err(e) => {
                         let _ = job_manager_clone
-                            .fail_job(&job_id_clone, e.to_string())
+                            .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
-                        error!(job_id = %job_id_clone, package = %pkg_name, error = %e, "Package removal failed");
+                        error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Package removal failed");
                     }
                 }
             });
@@ -512,7 +512,7 @@ pub async fn remove_package(
             HttpResponse::Accepted().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to create job");
+            error!(request_id = %request_id, error = ?e, "Failed to create job");
             let response = ApiResponse::<()>::error(
                 "JOB_CREATE_ERROR",
                 &format!("Failed to create job: {}", e),

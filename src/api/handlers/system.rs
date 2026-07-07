@@ -101,7 +101,7 @@ pub async fn get_system_info(
             HttpResponse::Ok().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to get system info");
+            error!(request_id = %request_id, error = ?e, "Failed to get system info");
             let response = ApiResponse::<()>::error(
                 "SYSTEM_INFO_ERROR",
                 &format!("Failed to get system info: {}", e),
@@ -293,9 +293,9 @@ pub async fn reboot_system(
                     }
                     Err(e) => {
                         let _ = job_manager_clone
-                            .fail_job(&job_id_clone, e.to_string())
+                            .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
-                        error!(job_id = %job_id_clone, error = %e, "System reboot failed");
+                        error!(job_id = %job_id_clone, error = ?e, "System reboot failed");
                     }
                 }
             });
@@ -318,7 +318,7 @@ pub async fn reboot_system(
             HttpResponse::Accepted().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, error = %e, "Failed to create reboot job");
+            error!(request_id = %request_id, error = ?e, "Failed to create reboot job");
             let response = ApiResponse::<()>::error(
                 "JOB_CREATE_ERROR",
                 &format!("Failed to create job: {}", e),
@@ -383,7 +383,7 @@ pub async fn get_service_status(
             error!(
                 request_id = %request_id,
                 service = %service_name,
-                error = %e,
+                error = ?e,
                 "Failed to get service status"
             );
             let response = ApiResponse::<()>::error(

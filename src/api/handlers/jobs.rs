@@ -32,6 +32,9 @@ pub struct JobSummary {
     pub created_at: String,
     pub completed_at: Option<String>,
     pub packages: Vec<String>,
+    /// Stable error code — present only for failed jobs. New field; old clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// Job detail response data
@@ -47,6 +50,18 @@ pub struct JobDetailData {
     pub packages: Vec<String>,
     pub logs: Vec<String>,
     pub error: Option<String>,
+    /// Stable error code — present only for failed jobs. New field; old clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Exit code of the underlying command — present only for failed jobs with a CommandError.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Captured stdout of the underlying command — present only for failed jobs with a CommandError.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_stdout: Option<String>,
+    /// Captured stderr of the underlying command — present only for failed jobs with a CommandError.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_stderr: Option<String>,
     pub rollback_job_id: Option<String>,
     pub exclusive_mode: bool,
 }
@@ -67,6 +82,7 @@ impl JobSummary {
             created_at: job.created_at.to_rfc3339(),
             completed_at: job.completed_at.map(|t| t.to_rfc3339()),
             packages: job.packages.clone(),
+            error_code: job.error_code.clone(),
         }
     }
 }
@@ -84,6 +100,10 @@ impl JobDetailData {
             packages: job.packages.clone(),
             logs: job.logs.clone(),
             error: job.error.clone(),
+            error_code: job.error_code.clone(),
+            exit_code: job.exit_code,
+            command_stdout: job.command_stdout.clone(),
+            command_stderr: job.command_stderr.clone(),
             rollback_job_id: job.rollback_job_id.map(|id| id.to_string()),
             exclusive_mode: job.exclusive_mode,
         }
@@ -247,7 +267,7 @@ pub async fn rollback_job(
             HttpResponse::BadRequest().json(response)
         }
         Err(e) => {
-            error!(request_id = %request_id, job_id = %job_id_str, error = %e, "Failed to create rollback job");
+            error!(request_id = %request_id, job_id = %job_id_str, error = ?e, "Failed to create rollback job");
             let response = ApiResponse::<()>::error(
                 "JOB_CREATE_ERROR",
                 &format!("Failed to create rollback job: {}", e),
@@ -322,7 +342,7 @@ pub async fn delete_job(
             }
         }
         Err(e) => {
-            error!(request_id = %request_id, job_id = %job_id_str, error = %e, "Failed to delete job");
+            error!(request_id = %request_id, job_id = %job_id_str, error = ?e, "Failed to delete job");
             let response = ApiResponse::<()>::error(
                 "JOB_DELETE_ERROR",
                 &format!("Failed to delete job: {}", e),
