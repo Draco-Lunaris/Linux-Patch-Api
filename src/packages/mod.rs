@@ -282,27 +282,66 @@ impl AptBackend {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    /// Parse package list from apt output
+    /// Run `apt` (the user-facing CLI, not apt-get) for list/query operations.
+    ///
+    /// `apt-get` does not support the `list` operation or the `--upgradable` flag.
+    /// Those are `apt`-only features. The `apt` tool prints a stability warning to
+    /// stderr and a "Listing..." header to stdout, both of which are handled by the
+    /// caller. The exit code is 0 on success.
+    fn run_apt_cli(&self, args: &[&str]) -> Result<String> {
+        let program = "apt";
+        let output = match Command::new(program).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                        .context("Failed to execute apt command"),
+                );
+            }
+        };
+
+        if !output.status.success() {
+            return Err(anyhow::Error::new(CommandError::from_output(
+                program, args, &output,
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    /// Parse package list from `apt list` output.
+    ///
+    /// Format: `name/repos version arch [status]`
+    /// e.g.: `curl/noble-updates,now 8.5.0-2ubuntu10.10 amd64 [installed]`
+    /// The "Listing..." header line from `apt` is skipped.
     fn parse_package_list(&self, output: &str) -> Vec<Package> {
         let mut packages = Vec::new();
 
         for line in output.lines() {
+            // Skip the "Listing..." header that `apt` prints
+            if line.starts_with("Listing...") || line.is_empty() {
+                continue;
+            }
+            // Format: name/repos version arch [status]
+            // e.g.: curl/noble-updates,now 8.5.0-2ubuntu10.10 amd64 [installed]
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let name = parts[0].to_string();
-                let status_str = parts[1];
-                let version = parts[2].to_string();
+            if parts.len() >= 3 {
+                // Strip repo suffix from package name (e.g., "curl/noble-updates,now" → "curl")
+                let name = parts[0].split('/').next().unwrap_or(parts[0]).to_string();
+                let version = parts[1].to_string();
 
-                let status = if status_str.starts_with("ii") {
+                // Determine status from the bracketed annotation (parts[2] is arch, parts[3] is [status])
+                let status_str = parts.get(3).unwrap_or(&"");
+                let status = if status_str.contains("installed") {
                     PackageStatus::Installed
-                } else if status_str.starts_with("iU") {
+                } else if status_str.contains("upgradable") {
                     PackageStatus::Upgradable
                 } else {
                     PackageStatus::Available
                 };
 
-                let description = parts[4..].join(" ");
                 let upgradable = status == PackageStatus::Upgradable;
+                let description = String::new();
 
                 packages.push(Package {
                     name,
@@ -325,12 +364,13 @@ impl AptBackend {
 
 impl PackageManagerBackend for AptBackend {
     fn list_packages(&self, filter: Option<&str>) -> Result<Vec<Package>> {
+        // Use `apt list` (not apt-get — apt-get doesn't support the `list` operation)
         let args = match filter {
             Some(f) => vec!["list", f],
             None => vec!["list", "--installed"],
         };
 
-        let output = self.run_apt(&args)?;
+        let output = self.run_apt_cli(&args)?;
         Ok(self.parse_package_list(&output))
     }
 
@@ -340,7 +380,7 @@ impl PackageManagerBackend for AptBackend {
 
         if dpkg_output.is_err() {
             // Package not installed, check if available
-            let list_output = self.run_apt(&["list", name])?;
+            let list_output = self.run_apt_cli(&["list", name])?;
             if list_output.contains(name) {
                 let parts: Vec<&str> = list_output
                     .lines()
@@ -403,7 +443,7 @@ impl PackageManagerBackend for AptBackend {
 
         // Check if upgradable
         let upgradable = self
-            .run_apt(&["list", "--upgradable", name])
+            .run_apt_cli(&["list", "--upgradable", name])
             .map(|o| o.contains(name))
             .unwrap_or(false);
 
@@ -492,10 +532,16 @@ impl PackageManagerBackend for AptBackend {
     }
 
     fn list_patches(&self) -> Result<Vec<Patch>> {
-        let output = self.run_apt(&["list", "--upgradable"])?;
+        // Use `apt list --upgradable` (not apt-get — apt-get doesn't support `list`).
+        // The `apt` CLI prints a "Listing..." header line on stdout which we skip.
+        let output = self.run_apt_cli(&["list", "--upgradable"])?;
         let mut patches = Vec::new();
 
         for line in output.lines() {
+            // Skip the "Listing..." header that `apt` prints
+            if line.starts_with("Listing...") {
+                continue;
+            }
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 {
                 // Strip release suffix from package name (e.g., "pkg/noble-updates,noble-security" → "pkg")
