@@ -24,14 +24,34 @@ start_pre() {
         /var/log/linux_patch_api \
         /var/lib/linux_patch_api \
         /etc/linux_patch_api/certs
-    
+
+    # Fix ownership of log files that may have been created by a non-root user
+    # (e.g. during manual testing or enrollment). The service runs as root, so
+    # log files must be root-owned or tracing-appender will panic with
+    # "Permission denied" when trying to create/append the daily rolling log.
+    for f in /var/log/linux_patch_api/linux-patch-api.log \
+             /var/log/linux_patch_api/linux-patch-api.err; do
+        if [ -f "$f" ]; then
+            chown root:root "$f" 2>/dev/null
+        fi
+    done
+
+    # Remove stale PID file from a previous crash
+    if [ -f "$pidfile" ]; then
+        pid=$(cat "$pidfile" 2>/dev/null)
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            ewarn "Removing stale PID file (PID $pid no longer running)"
+            rm -f "$pidfile"
+        fi
+    fi
+
     # Ensure config files exist
     if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
         eerror "Configuration file missing: /etc/linux_patch_api/config.yaml"
         eerror "Please create config.yaml before starting the service"
         return 1
     fi
-    
+
     if [ ! -f "/etc/linux_patch_api/whitelist.yaml" ]; then
         eerror "Whitelist file missing: /etc/linux_patch_api/whitelist.yaml"
         eerror "Please create whitelist.yaml before starting the service"
