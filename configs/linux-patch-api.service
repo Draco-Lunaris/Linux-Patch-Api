@@ -18,6 +18,13 @@ TimeoutStopSec=30s
 RuntimeDirectory=linux-patch-api
 RuntimeDirectoryMode=0755
 
+# Fix ownership of log/state files that may have been created by a non-root user
+# (e.g. during manual testing or enrollment). The service runs as root, so
+# log files must be root-owned or tracing-appender will panic with
+# "Permission denied" when trying to create/append the daily rolling log.
+ExecStartPre=/bin/chown -R root:root /var/log/linux_patch_api /var/lib/linux_patch_api
+ExecStartPre=/bin/mkdir -p /var/log/linux_patch_api /var/lib/linux_patch_api/state
+
 # Security hardening
 # NOTE: Package management requires extensive system access. The following
 # restrictions have been removed because they block core functionality:
