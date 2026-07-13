@@ -350,6 +350,25 @@ pub async fn update_package(
 
     info!(request_id = %request_id, package = %package_name, "Updating package");
 
+    // Self-update guard: if updating linux-patch-api itself, block while other
+    // jobs are running. The 300s delayed restart after self-update would kill
+    // any concurrent apt-get operation mid-transaction, leaving dpkg broken.
+    if package_name == crate::packages::SELF_PACKAGE_NAME {
+        let running_count = job_manager.running_count().await;
+        if running_count > 0 {
+            warn!(request_id = %request_id, package = %package_name, running_jobs = running_count, "Self-update blocked by running jobs");
+            let response = ApiResponse::<()>::error(
+                "SELF_UPDATE_BLOCKED",
+                "Cannot self-update while other jobs are running. Retry after jobs complete.",
+                Some(serde_json::json!({"running_jobs": running_count})),
+                true,
+            );
+            return HttpResponse::Conflict()
+                .insert_header(("Retry-After", "60"))
+                .json(response);
+        }
+    }
+
     // Check job queue capacity
     if !job_manager.can_accept_job().await {
         let response = ApiResponse::<()>::error(

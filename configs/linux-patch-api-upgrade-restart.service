@@ -4,6 +4,11 @@ ConditionPathExists=/var/lib/linux_patch_api/upgrade-pending
 
 [Service]
 Type=oneshot
+# Wait for any in-progress package operations to finish before restarting.
+# If apt-get/dpkg is still running (e.g. a concurrent patch-apply job), the
+# restart would kill it mid-transaction and leave dpkg in a broken state.
+# We poll every 5s for up to 10 minutes, then restart regardless.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 120); do if ! pgrep -x apt-get >/dev/null 2>&1 && ! pgrep -x dpkg >/dev/null 2>&1; then break; fi; sleep 5; done'
 ExecStart=systemctl restart linux-patch-api.service
 ExecStartPost=rm -f /var/lib/linux_patch_api/upgrade-pending
 RemainAfterExit=no
