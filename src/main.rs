@@ -276,6 +276,30 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Startup repo-config self-heal: ensure the manager-hosted package repo
+    // is configured so self-update can actually find a newer package. This
+    // catches hosts that were enrolled before repo_config was added to the
+    // enrollment bundle, or where the repo files were lost. Best-effort —
+    // failures are logged but do not block startup.
+    if let Some(manager_url) = config.enrollment_manager_url() {
+        match enroll::check_and_provision_repo_config(manager_url).await {
+            Ok(enroll::RepoHealResult::AlreadyConfigured) => {
+                info!("Repo config already present at startup");
+            }
+            Ok(enroll::RepoHealResult::Provisioned) => {
+                info!("Repo config provisioned via startup self-heal");
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Repo config self-heal failed at startup — self-update may be a no-op until repo is configured"
+                );
+            }
+        }
+    } else {
+        info!("No manager URL configured — skipping repo config self-heal at startup");
+    }
+
     // Initialize IP whitelist manager
     let whitelist_path = config.whitelist_path();
     info!(
@@ -301,6 +325,10 @@ async fn main() -> Result<()> {
     // Store job manager and backend in Arc for sharing
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
+
+    // Manager URL for repo-config self-heal during self-update.
+    // Extracted from enrollment config; None when not configured.
+    let manager_url_data = web::Data::new(config.enrollment_manager_url().map(|s| s.to_string()));
 
     // Initialize package cache state with configured stale threshold
     let cache_state = web::Data::new(PackageCacheState::with_threshold(
@@ -342,6 +370,7 @@ async fn main() -> Result<()> {
             .app_data(backend_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
+            .app_data(manager_url_data.clone())
             .configure(|cfg| {
                 configure_api_routes(
                     cfg,

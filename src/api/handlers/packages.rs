@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::enroll::{check_and_provision_repo_config, RepoHealResult};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
 use crate::packages::{
     validate_package_name, validate_version_string, InstallOptions, Package, PackageManagerBackend,
@@ -350,6 +351,7 @@ pub async fn update_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    manager_url: web::Data<Option<String>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -384,6 +386,42 @@ pub async fn update_package(
                 .insert_header(("Retry-After", "60"))
                 .json(response);
         }
+
+        // Pre-self-update repo-config self-heal: ensure the manager-hosted
+        // package repo is configured before attempting the upgrade. Without
+        // this, `apt-get install --only-upgrade linux-patch-api` silently finds
+        // "already newest version" and reports success without upgrading.
+        // This catches hosts that were enrolled before repo_config was added
+        // to the enrollment bundle, or where the repo files were lost.
+        match manager_url.as_ref() {
+            Some(url) => {
+                info!(request_id = %request_id, "Pre-self-update repo config check");
+                match check_and_provision_repo_config(url).await {
+                    Ok(RepoHealResult::AlreadyConfigured) => {
+                        info!(request_id = %request_id, "Repo config already present");
+                    }
+                    Ok(RepoHealResult::Provisioned) => {
+                        info!(request_id = %request_id, "Repo config provisioned via self-heal");
+                    }
+                    Err(e) => {
+                        error!(request_id = %request_id, error = %e, "Repo config self-heal failed — aborting self-update to prevent silent no-op");
+                        let response = ApiResponse::<()>::error(
+                            "REPO_CONFIG_MISSING",
+                            "Cannot self-update: manager-hosted repo is not configured and self-heal failed. The upgrade would be a silent no-op.",
+                            Some(serde_json::json!({"error": e.to_string()})),
+                            true,
+                        );
+                        return HttpResponse::Conflict()
+                            .insert_header(("Retry-After", "60"))
+                            .json(response);
+                    }
+                }
+            }
+            None => {
+                warn!(request_id = %request_id, "No manager URL configured — cannot run repo config self-heal. Self-update may be a no-op if repo is not configured.");
+            }
+        }
+
         job_manager.set_self_update_in_progress().await;
         info!(request_id = %request_id, "Self-update flag set — other job endpoints will reject new jobs");
     }

@@ -552,15 +552,34 @@ impl EnrollmentClient {
     ///
     /// Called when the enrollment bundle did not include `repo_config` (older
     /// manager that doesn't embed it in the Approved response). Performs
-    /// `GET /api/v1/pki/repo-config` on the manager URL and deserializes the
-    /// response body into a [`RepoConfig`].
+    /// `GET /api/v1/pki/repo-config?distro_id=<distro_id>` on the manager URL
+    /// and deserializes the response body into a [`RepoConfig`].
+    ///
+    /// The `distro_id` query parameter is required by the manager to generate
+    /// the correct distro-specific sources config. It is detected from
+    /// `/etc/os-release` (the `ID` field, falling back to `ID_LIKE`).
     ///
     /// # Returns
     /// - `Ok(RepoConfig)` on HTTP 200 with a valid JSON body
     /// - `Err` on network error, non-200 status, or malformed JSON
     pub async fn fetch_repo_config(&self) -> Result<RepoConfig> {
-        let url = format!("{}/api/v1/pki/repo-config", self.manager_url);
-        tracing::info!(url = %url, "Fetching repo config from manager fallback endpoint");
+        let distro_id = identity::get_os_details()
+            .context("Failed to detect OS details for repo-config fetch")?
+            .get("distro")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_lowercase())
+            .ok_or_else(|| {
+                anyhow!(
+                    "OS details missing 'distro' field — \
+                     cannot determine distro_id for repo-config fetch"
+                )
+            })?;
+
+        let url = format!(
+            "{}/api/v1/pki/repo-config?distro_id={}",
+            self.manager_url, distro_id
+        );
+        tracing::info!(url = %url, distro_id = %distro_id, "Fetching repo config from manager fallback endpoint");
 
         let response = self
             .http_client
