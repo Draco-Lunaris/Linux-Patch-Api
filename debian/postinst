@@ -3,7 +3,7 @@
 # Created by package build system
 #
 # Upgrade-aware: on upgrade ($2 is non-empty), we skip CRL/cert/config operations
-# and schedule a 300s delayed restart via systemd-run.
+# and schedule a 30s delayed restart via systemd-run.
 
 set -e
 
@@ -12,6 +12,10 @@ if [ "$1" = "configure" ]; then
     if [ -z "$2" ]; then
         # Fresh install: full setup
         echo "Configuring linux-patch-api..."
+        
+        # Create required directories with correct ownership
+        mkdir -p /var/log/linux_patch_api /var/lib/linux_patch_api/state
+        chown -R root:root /var/log/linux_patch_api /var/lib/linux_patch_api
         
         # Copy example configs if they don't exist
         if [ ! -f "/etc/linux_patch_api/config.yaml" ]; then
@@ -95,17 +99,13 @@ if [ "$1" = "configure" ]; then
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
         systemctl daemon-reload
         
-        # Schedule a 300s delayed restart using an installed systemd timer.
+        # Schedule a 30s delayed restart using an installed systemd timer.
         # The running process keeps serving on the old binary while dpkg has
-        # already placed the new one on disk. After 300s, the timer fires the
+        # already placed the new one on disk. After 30s, the timer fires the
         # one-shot restart service which restarts the agent and removes the
-        # marker file. This avoids interrupting in-flight requests and lets
-        # any concurrent package operations finish.
-        #
-        # NOTE: We use installed unit files (not transient systemd-run units)
-        # because transient units can silently disappear without firing if the
-        # creating process exits. Installed timer units are tracked by systemd
-        # and survive dpkg exit reliably.
+        # marker file. This is enough time to drain in-flight HTTP requests.
+        # The bidirectional self-update guard in the agent ensures no new
+        # package operations start during this window.
         mkdir -p /var/lib/linux_patch_api
         touch /var/lib/linux_patch_api/upgrade-pending
         systemctl daemon-reload

@@ -4,7 +4,7 @@
 #
 # On upgrade: do NOT stop or disable the service. The running process
 # keeps serving on the old binary while apk replaces files on disk.
-# The post-install script schedules a 300s delayed restart.
+# The post-install script schedules a 30s delayed restart.
 #
 # On removal: the post-deinstall script handles stopping and disabling.
 # We cannot distinguish upgrade from removal here (apk passes no

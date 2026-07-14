@@ -2,7 +2,7 @@
 Description=Linux Patch API - Delayed restart after package upgrade
 
 [Timer]
-OnActiveSec=300
+OnActiveSec=30
 AccuracySec=1s
 RemainAfterElapse=no
 Unit=linux-patch-api-upgrade-restart.service

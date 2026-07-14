@@ -207,6 +207,11 @@ pub struct JobManager {
     jobs: Arc<RwLock<HashMap<Uuid, Job>>>,
     /// Broadcast sender for job status events
     event_sender: broadcast::Sender<JobStatusEvent>,
+    /// Set to true while a self-update (linux-patch-api package upgrade) is in
+    /// progress. While this is true, all other job-creating endpoints reject
+    /// new jobs with 409 Conflict so the delayed restart doesn't kill a
+    /// concurrent apt/dnf/pacman operation mid-transaction.
+    self_update_in_progress: Arc<RwLock<bool>>,
 }
 
 impl JobManager {
@@ -223,6 +228,7 @@ impl JobManager {
             max_queue_depth,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
+            self_update_in_progress: Arc::new(RwLock::new(false)),
         })
     }
 
@@ -484,6 +490,26 @@ impl JobManager {
         active_count < self.max_queue_depth
     }
 
+    /// Returns true if a self-update (linux-patch-api upgrade) is in progress.
+    /// While true, all non-self-update job endpoints should reject new jobs
+    /// with 409 Conflict to prevent the delayed restart from killing a
+    /// concurrent package operation.
+    pub async fn is_self_update_in_progress(&self) -> bool {
+        *self.self_update_in_progress.read().await
+    }
+
+    /// Mark that a self-update is in progress. All other job-creating
+    /// endpoints will reject new jobs until [`clear_self_update`] is called.
+    pub async fn set_self_update_in_progress(&self) {
+        *self.self_update_in_progress.write().await = true;
+    }
+
+    /// Clear the self-update-in-progress flag. Called when the self-update
+    /// job completes or fails.
+    pub async fn clear_self_update(&self) {
+        *self.self_update_in_progress.write().await = false;
+    }
+
     /// Delete a completed/failed job from history
     pub async fn delete_job(&self, job_id: &Uuid) -> Result<bool> {
         let mut jobs = self.jobs.write().await;
@@ -548,6 +574,7 @@ impl Clone for JobManager {
             max_queue_depth: self.max_queue_depth,
             jobs: self.jobs.clone(),
             event_sender: self.event_sender.clone(),
+            self_update_in_progress: self.self_update_in_progress.clone(),
         }
     }
 }

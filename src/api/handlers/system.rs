@@ -232,6 +232,16 @@ pub async fn reboot_system(
 
     // Check for running jobs unless force is true
     if !force {
+        if job_manager.is_self_update_in_progress().await {
+            warn!(request_id = %request_id, "Reboot blocked — self-update in progress");
+            let response = ApiResponse::<()>::error(
+                "SELF_UPDATE_IN_PROGRESS",
+                "Cannot reboot while a self-update is in progress. Use force=true to override.",
+                None,
+                false,
+            );
+            return HttpResponse::Conflict().json(response);
+        }
         let running_count = job_manager.running_count().await;
         if running_count > 0 {
             warn!(request_id = %request_id, running_jobs = running_count, "Reboot blocked by running jobs");
