@@ -1,3 +1,9 @@
+linux-patch-api (2.2.0) unstable; urgency=low
+
+  * Release v2.2.0
+
+ -- git-echo <git-echo@moon-dragon.us>  Tue, 14 Jul 2026 20:20:56 +0000
+
 linux-patch-api (2.1.2) unstable; urgency=low
 
   * Release v2.1.2
