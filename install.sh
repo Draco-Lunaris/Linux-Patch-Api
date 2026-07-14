@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 APP_NAME="linux-patch-api"
-VERSION="2.1.1"
+VERSION="2.1.2"
 INSTALL_DIR="/usr/bin"
 CONFIG_DIR="/etc/linux_patch_api"
 CERTS_DIR="${CONFIG_DIR}/certs"
