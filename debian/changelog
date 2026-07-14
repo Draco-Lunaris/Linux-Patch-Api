@@ -1,3 +1,12 @@
+linux-patch-api (2.1.2) unstable; urgency=low
+
+  * Release v2.1.2
+  * fix: bidirectional self-update guard to prevent concurrent apt operations
+  * fix: retry fix-broken when dist-upgrade fails with unmet dependencies
+  * Reduce delayed restart timer from 300s to 30s
+
+ -- git-echo <git-echo@moon-dragon.us>  Tue, 14 Jul 2026 16:40:00 +0000
+
 linux-patch-api (2.1.1) unstable; urgency=low
 
   * Release v2.1.1

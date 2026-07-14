@@ -183,6 +183,11 @@ fi
 
 # Changelog
 %changelog
+* Tue Jul 14 2026 Echo <echo@moon-dragon.us> - 2.1.2-1
+- Bidirectional self-update guard to prevent concurrent apt operations
+- Retry fix-broken when dist-upgrade fails with unmet dependencies
+- Reduce delayed restart timer from 300s to 30s
+
 * Tue May 27 2026 Echo <echo@moon-dragon.us> - 1.1.17-1
 - Add mandatory package cache refresh before patch_apply
 - Add health check cache refresh when stale (>4h)
