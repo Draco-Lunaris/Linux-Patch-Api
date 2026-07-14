@@ -611,16 +611,47 @@ impl PackageManagerBackend for AptBackend {
                 a
             }
             None => {
-                // Run fix-broken first to resolve any unmet dependencies,
-                // then use dist-upgrade to handle new/removed dependencies
-                let _ = self.run_apt(&["-f", "install", "-y"]);
+                // Run fix-broken first to resolve any unmet dependencies from
+                // interrupted package operations (e.g. agent crash during upgrade).
+                // We log the result but don't fail here — dist-upgrade may still
+                // succeed even if fix-broken reports nothing to fix.
+                match self.run_apt(&["-f", "install", "-y"]) {
+                    Ok(_) => info!("apt-get -f install completed (no broken packages or fixed)"),
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "apt-get -f install failed — proceeding with dist-upgrade anyway")
+                    }
+                }
                 vec!["dist-upgrade", "-y"]
             }
         };
 
-        self.run_apt(&args)?;
-        info!("Applied patches for packages: {:?}", packages);
-        Ok(())
+        match self.run_apt(&args) {
+            Ok(_) => {
+                info!("Applied patches for packages: {:?}", packages);
+                Ok(())
+            }
+            Err(e) => {
+                // If dist-upgrade fails with unmet dependencies, try fix-broken
+                // and retry once. This handles the case where the first fix-broken
+                // partially resolved things but dist-upgrade needs another pass.
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("unmet dependencies")
+                    || err_str.contains("broken")
+                    || err_str.contains("dependency")
+                {
+                    tracing::warn!(error = ?e, "dist-upgrade failed with dependency issues — running fix-broken and retrying");
+                    match self.run_apt(&["-f", "install", "-y"]) {
+                        Ok(_) => info!("apt-get -f install completed on retry"),
+                        Err(fix_err) => {
+                            tracing::warn!(error = ?fix_err, "apt-get -f install failed on retry")
+                        }
+                    }
+                    self.run_apt(&args).map(|_| ())
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     fn get_system_info(&self) -> Result<SystemInfo> {
