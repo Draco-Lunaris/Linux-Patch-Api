@@ -229,9 +229,74 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
         }
     }
 
-    write_pem_file(&repo.keyring_path, &repo.gpg_public_key, false)
-        .context("Failed to write repo GPG key")?;
-    tracing::info!(keyring = %repo.keyring_path, "Repo GPG public key written");
+    // For apt-based distros, the key must be in binary GPG keyring format
+    // (not ASCII-armored) when the sources config uses `signed-by=<path>.gpg`.
+    // apt accepts ASCII-armored keys only when the file has a `.asc` extension.
+    // Since the manager sends an ASCII-armored key and the keyring_path uses
+    // `.gpg`, we dearmor it via `gpg --dearmor` for apt distros.
+    let is_apt = matches!(repo.distro_id.as_str(), "ubuntu" | "debian" | "linuxmint");
+    let key_is_armored = repo.gpg_public_key.contains("-----BEGIN PGP");
+
+    if is_apt && key_is_armored {
+        // Try to dearmor the key via `gpg --dearmor`. If gpg is not installed,
+        // fall back to writing the ASCII-armored key with a `.asc` extension
+        // and patching the sources_config to reference it.
+        match std::process::Command::new("gpg")
+            .args(["--dearmor", "--batch", "--yes"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(mut child) => {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(repo.gpg_public_key.as_bytes())?;
+                }
+                let output = child
+                    .wait_with_output()
+                    .context("gpg --dearmor process failed")?;
+                if output.status.success() {
+                    fs::write(&repo.keyring_path, &output.stdout).with_context(|| {
+                        format!("Failed to write dearmored key to {}", repo.keyring_path)
+                    })?;
+                    // Set permissions (0644)
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&repo.keyring_path, fs::Permissions::from_mode(0o644))?;
+                    }
+                    tracing::info!(
+                        keyring = %repo.keyring_path,
+                        "Repo GPG public key written (dearmored to binary keyring)"
+                    );
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!("gpg --dearmor failed: {}", stderr.trim());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // gpg not installed — fall back to .asc extension
+                let asc_path = format!("{}.asc", repo.keyring_path.trim_end_matches(".gpg"));
+                write_pem_file(&asc_path, &repo.gpg_public_key, false).context(
+                    "Failed to write repo GPG key as .asc (gpg not installed for dearmor)",
+                )?;
+                tracing::warn!(
+                    original = %repo.keyring_path,
+                    asc_path = %asc_path,
+                    "gpg not installed — wrote ASCII-armored key to .asc path. \
+                     The sources_config signed-by path may need updating."
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to spawn gpg --dearmor: {}", e));
+            }
+        }
+    } else {
+        write_pem_file(&repo.keyring_path, &repo.gpg_public_key, false)
+            .context("Failed to write repo GPG key")?;
+        tracing::info!(keyring = %repo.keyring_path, "Repo GPG public key written");
+    }
 
     // 2. Write sources config to distro-specific path
     let sources_path = match repo.distro_id.as_str() {
