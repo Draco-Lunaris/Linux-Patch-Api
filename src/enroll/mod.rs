@@ -13,6 +13,7 @@
 pub mod client;
 pub mod identity;
 pub mod provision;
+pub mod repo_health;
 
 use anyhow::{Context, Result};
 
@@ -26,6 +27,8 @@ pub use identity::{
     get_fqdn, get_hostname, get_ip_addresses, get_ip_for_interface, get_machine_id, get_os_details,
     get_primary_ip, get_route_source_ip, is_container_bridge, is_link_local,
 };
+/// Re-export repo self-heal entry point.
+pub use repo_health::{check_and_provision_repo_config, RepoHealResult};
 
 /// Error type for enrollment conflict (HTTP 409).
 /// Used to signal that the host is already registered and we should
