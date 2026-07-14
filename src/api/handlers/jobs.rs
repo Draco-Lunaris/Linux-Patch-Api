@@ -210,6 +210,20 @@ pub async fn rollback_job(
 
     info!(request_id = %request_id, job_id = %job_id_str, "Initiating job rollback");
 
+    // Block new jobs while a self-update is in progress
+    if job_manager.is_self_update_in_progress().await {
+        warn!(request_id = %request_id, "Rollback rejected — self-update in progress");
+        let response = ApiResponse::<()>::error(
+            "SELF_UPDATE_IN_PROGRESS",
+            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
+            None,
+            true,
+        );
+        return HttpResponse::Conflict()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     // Check job queue capacity
     if !job_manager.can_accept_job().await {
         let response = ApiResponse::<()>::error(
