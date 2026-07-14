@@ -7,7 +7,7 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
@@ -113,6 +113,20 @@ pub async fn apply_patches(
         reboot = body.reboot,
         "Applying patches"
     );
+
+    // Block new jobs while a self-update is in progress
+    if job_manager.is_self_update_in_progress().await {
+        warn!(request_id = %request_id, "Patch apply rejected — self-update in progress");
+        let response = ApiResponse::<()>::error(
+            "SELF_UPDATE_IN_PROGRESS",
+            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
+            None,
+            true,
+        );
+        return HttpResponse::Conflict()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
 
     // Check job queue capacity
     if !job_manager.can_accept_job().await {

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
 use crate::packages::{
     validate_package_name, validate_version_string, InstallOptions, Package, PackageManagerBackend,
-    PackageSpec,
+    PackageSpec, SELF_PACKAGE_NAME,
 };
 
 /// Validate all package names and versions in a request
@@ -252,6 +252,20 @@ pub async fn install_packages(
 
     info!(request_id = %request_id, packages = ?package_names, "Installing packages");
 
+    // Block new jobs while a self-update is in progress
+    if job_manager.is_self_update_in_progress().await {
+        warn!(request_id = %request_id, "Install rejected — self-update in progress");
+        let response = ApiResponse::<()>::error(
+            "SELF_UPDATE_IN_PROGRESS",
+            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
+            None,
+            true,
+        );
+        return HttpResponse::Conflict()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
+
     // Check job queue capacity
     if !job_manager.can_accept_job().await {
         let response = ApiResponse::<()>::error(
@@ -350,8 +364,35 @@ pub async fn update_package(
 
     info!(request_id = %request_id, package = %package_name, "Updating package");
 
+    // Self-update guard: if updating linux-patch-api itself, block while other
+    // jobs are running AND block new jobs from starting until the self-update
+    // completes. The delayed restart after self-update would kill any concurrent
+    // package operation mid-transaction, leaving the package manager in a
+    // broken state.
+    let is_self_update = package_name == SELF_PACKAGE_NAME;
+    if is_self_update {
+        let running_count = job_manager.running_count().await;
+        if running_count > 0 {
+            warn!(request_id = %request_id, package = %package_name, running_jobs = running_count, "Self-update blocked by running jobs");
+            let response = ApiResponse::<()>::error(
+                "SELF_UPDATE_BLOCKED",
+                "Cannot self-update while other jobs are running. Retry after jobs complete.",
+                Some(serde_json::json!({"running_jobs": running_count})),
+                true,
+            );
+            return HttpResponse::Conflict()
+                .insert_header(("Retry-After", "60"))
+                .json(response);
+        }
+        job_manager.set_self_update_in_progress().await;
+        info!(request_id = %request_id, "Self-update flag set — other job endpoints will reject new jobs");
+    }
+
     // Check job queue capacity
     if !job_manager.can_accept_job().await {
+        if is_self_update {
+            job_manager.clear_self_update().await;
+        }
         let response = ApiResponse::<()>::error(
             "QUEUE_FULL",
             "Job queue is at capacity. Please retry later.",
@@ -403,6 +444,14 @@ pub async fn update_package(
                         error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Package update failed");
                     }
                 }
+
+                // Clear the self-update flag regardless of outcome so other
+                // jobs can resume. The delayed restart (30s) will swap the
+                // binary; by then all package operations have been blocked.
+                if pkg_name == SELF_PACKAGE_NAME {
+                    job_manager_clone.clear_self_update().await;
+                    info!(package = %pkg_name, "Self-update flag cleared — job endpoints accepting new jobs");
+                }
             });
 
             let response = ApiResponse::success(JobResponseData {
@@ -416,6 +465,9 @@ pub async fn update_package(
             HttpResponse::Accepted().json(response)
         }
         Err(e) => {
+            if is_self_update {
+                job_manager.clear_self_update().await;
+            }
             error!(request_id = %request_id, error = ?e, "Failed to create job");
             let response = ApiResponse::<()>::error(
                 "JOB_CREATE_ERROR",
@@ -446,6 +498,20 @@ pub async fn remove_package(
     }
 
     info!(request_id = %request_id, package = %package_name, "Removing package");
+
+    // Block new jobs while a self-update is in progress
+    if job_manager.is_self_update_in_progress().await {
+        warn!(request_id = %request_id, "Remove rejected — self-update in progress");
+        let response = ApiResponse::<()>::error(
+            "SELF_UPDATE_IN_PROGRESS",
+            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
+            None,
+            true,
+        );
+        return HttpResponse::Conflict()
+            .insert_header(("Retry-After", "60"))
+            .json(response);
+    }
 
     // Check job queue capacity
     if !job_manager.can_accept_job().await {

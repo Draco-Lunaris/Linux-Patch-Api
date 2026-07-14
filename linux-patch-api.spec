@@ -96,7 +96,7 @@ chmod 755 /var/log/linux_patch_api
 # Post-installation script - copy configs, enable service (matches Debian postinst)
 %post
 # Upgrade-aware: on upgrade ($1 > 1), skip CRL/cert/config operations
-# and schedule a 300s delayed restart via systemd-run.
+# and schedule a 30s delayed restart via systemd-run.
 if [ $1 -eq 1 ]; then
     # Fresh install: full setup
     # Copy example configs if they don't exist
@@ -133,10 +133,12 @@ elif [ $1 -gt 1 ]; then
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
-    # Schedule a 300s delayed restart — the running process keeps
+    # Schedule a 30s delayed restart — the running process keeps
     # serving on the old binary while files are replaced on disk.
-    # After 300s, systemd restarts the service and the new binary loads.
-    systemd-run --on-active=300s systemctl restart linux-patch-api.service
+    # After 30s, systemd restarts the service and the new binary loads.
+    # The bidirectional self-update guard ensures no concurrent package
+    # operations are running during this window.
+    systemd-run --on-active=30s systemctl restart linux-patch-api.service
 fi
 
 # Pre-uninstallation script
