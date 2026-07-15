@@ -146,6 +146,10 @@ path = "tests/unit/backend_error_test.rs"
 name = "production_wiring_test"
 path = "tests/unit/production_wiring_test.rs"
 
+[[test]]
+name = "scheduler_test"
+path = "tests/unit/scheduler_test.rs"
+
 [[bench]]
 name = "api_benchmarks"
 harness = false
