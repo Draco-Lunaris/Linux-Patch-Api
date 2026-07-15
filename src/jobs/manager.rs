@@ -42,6 +42,59 @@ impl std::fmt::Display for SelfUpdateAdmissionError {
 
 impl std::error::Error for SelfUpdateAdmissionError {}
 
+/// Reservation guard for self-update. Automatically rolls back on drop
+/// unless explicitly committed. This ensures cancellation or panic before
+/// task spawn cannot leave an orphaned owner.
+pub struct SelfUpdateReservation {
+    pub job_id: Uuid,
+    owner_handle: Arc<RwLock<Option<Uuid>>>,
+    jobs_handle: Arc<RwLock<HashMap<Uuid, Job>>>,
+    committed: bool,
+}
+
+impl std::fmt::Debug for SelfUpdateReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelfUpdateReservation")
+            .field("job_id", &self.job_id)
+            .field("committed", &self.committed)
+            .finish()
+    }
+}
+
+impl SelfUpdateReservation {
+    /// Commit the reservation — transfer ownership to the execution task.
+    /// After commit, the guard will NOT roll back on drop.
+    pub fn commit(mut self) -> Uuid {
+        self.committed = true;
+        self.job_id
+    }
+}
+
+impl Drop for SelfUpdateReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            tracing::warn!(
+                job_id = %self.job_id,
+                "SelfUpdateReservation dropped without commit — rolling back owner and job"
+            );
+            // We can't await in Drop, so we use try_write and blocking
+            // operations. In practice, if the reservation is dropped
+            // before being committed, it means the task was cancelled
+            // before spawn, so there shouldn't be lock contention.
+            if let Ok(mut owner) = self.owner_handle.try_write() {
+                if let Some(current) = &*owner {
+                    if current == &self.job_id {
+                        *owner = None;
+                    }
+                }
+            }
+            if let Ok(mut jobs) = self.jobs_handle.try_write() {
+                jobs.remove(&self.job_id);
+            }
+        }
+    }
+}
+
 /// Error returned by `admit_reboot` when a reboot request cannot be admitted.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RebootAdmissionError {
@@ -693,13 +746,14 @@ impl JobManager {
     /// (it will block until we release, then see Some) and no second
     /// self-update can pass the owner check.
     ///
-    /// Returns the job ID on success, or an error describing why the
-    /// reservation was rejected. The job ID is the ownership permit —
-    /// it must be passed to `release_self_update` to clear the lock.
+    /// Returns a `SelfUpdateReservation` guard that owns the job ID and
+    /// automatically rolls back (removes owner and job) on drop unless
+    /// explicitly committed via `commit()`. This ensures cancellation
+    /// or panic before task spawn cannot leave an orphaned owner.
     pub async fn try_reserve_self_update(
         &self,
         packages: Vec<String>,
-    ) -> Result<Uuid, SelfUpdateAdmissionError> {
+    ) -> Result<SelfUpdateReservation, SelfUpdateAdmissionError> {
         // Create the job first to get the job_id (the ownership permit).
         let job = Job::new(JobOperation::SelfUpdate, packages);
         let job_id = job.id;
@@ -755,7 +809,14 @@ impl JobManager {
 
         self.emit_event("job_status", &job_id, &status, progress, &message, None);
 
-        Ok(job_id)
+        // Return a reservation guard. If dropped without commit(),
+        // it rolls back the owner and removes the job.
+        Ok(SelfUpdateReservation {
+            job_id,
+            owner_handle: self.self_update_owner.clone(),
+            jobs_handle: self.jobs.clone(),
+            committed: false,
+        })
     }
 
     /// Atomically admit a normal (non-self-update) job.

@@ -125,7 +125,7 @@ async fn test_try_reserve_sets_owner() {
         .await;
 
     assert!(result.is_ok(), "try_reserve should succeed when idle");
-    let job_id = result.unwrap();
+    let job_id = result.unwrap().commit();
     assert!(
         jm.is_self_update_in_progress().await,
         "Self-update should be in progress after try_reserve"

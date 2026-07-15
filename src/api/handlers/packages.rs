@@ -427,7 +427,8 @@ pub async fn update_package(
             .try_reserve_self_update(vec![package_name.clone()])
             .await
         {
-            Ok(job_id) => {
+            Ok(reservation) => {
+                let job_id = reservation.job_id;
                 info!(
                     request_id = %request_id,
                     job_id = %job_id,
@@ -440,7 +441,14 @@ pub async fn update_package(
                 // abort the self-update before invoking the package manager. If we
                 // proceeded and the process crashed, the next startup would not
                 // know an upgrade was in progress.
-                let from_version = env!("CARGO_PKG_VERSION").to_string();
+                //
+                // Section 9: Query the package manager for the installed version,
+                // not CARGO_PKG_VERSION. The package manager is the authoritative
+                // source for the installed package version.
+                let from_version = backend
+                    .get_installed_version(&package_name)
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
                 // Try to resolve the target version before installing.
                 let target_version = backend
                     .get_candidate_version(&package_name)
@@ -462,6 +470,8 @@ pub async fn update_package(
                 );
                 if let Err(e) = crate::jobs::upgrade_state::write_state(&upgrade_state) {
                     // FAIL-CLOSED: abort the self-update
+                    // The reservation will be dropped here, rolling back
+                    // the owner and job automatically.
                     error!(error = %e, "Failed to write persistent Installing state — aborting self-update before invoking package manager");
                     job_manager.release_self_update(&job_id).await;
                     let response = ApiResponse::<()>::error(
@@ -472,6 +482,11 @@ pub async fn update_package(
                     );
                     return HttpResponse::InternalServerError().json(response);
                 }
+
+                // Commit the reservation — transfer ownership to the spawned task.
+                // If we don't reach this point (cancellation/panic), the
+                // reservation guard will roll back the owner and job on drop.
+                let job_id = reservation.commit();
 
                 // Spawn background task to execute the update
                 let backend_clone = backend.clone();
