@@ -30,6 +30,7 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let self_update_owner = web::Data::new(Arc::new(tokio::sync::RwLock::new(None::<uuid::Uuid>)));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     let rl_cfg = RateLimitConfig::default();
 
@@ -39,6 +40,7 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
             .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(coordinator.clone())
+            .app_data(self_update_owner.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
@@ -72,6 +74,7 @@ async fn test_system_info_exempt_from_rate_limiting() {
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let self_update_owner = web::Data::new(Arc::new(tokio::sync::RwLock::new(None::<uuid::Uuid>)));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     let rl_cfg = RateLimitConfig::default();
 
@@ -81,6 +84,7 @@ async fn test_system_info_exempt_from_rate_limiting() {
             .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(coordinator.clone())
+            .app_data(self_update_owner.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
@@ -115,6 +119,7 @@ async fn test_read_rate_limiting_returns_429() {
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let self_update_owner = web::Data::new(Arc::new(tokio::sync::RwLock::new(None::<uuid::Uuid>)));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     // Use very low limits so sequential test requests can reliably trigger 429
     let rl_cfg = RateLimitConfig {
@@ -131,6 +136,7 @@ async fn test_read_rate_limiting_returns_429() {
             .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(coordinator.clone())
+            .app_data(self_update_owner.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
@@ -169,6 +175,7 @@ async fn test_destructive_rate_limiting_returns_429() {
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let self_update_owner = web::Data::new(Arc::new(tokio::sync::RwLock::new(None::<uuid::Uuid>)));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     // Use very low limits so sequential test requests can reliably trigger 429
     let rl_cfg = RateLimitConfig {
@@ -185,6 +192,7 @@ async fn test_destructive_rate_limiting_returns_429() {
             .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(coordinator.clone())
+            .app_data(self_update_owner.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
@@ -228,6 +236,7 @@ async fn test_rate_limiting_disabled() {
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let self_update_owner = web::Data::new(Arc::new(tokio::sync::RwLock::new(None::<uuid::Uuid>)));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     let rl_cfg = RateLimitConfig {
         enabled: false,
@@ -240,6 +249,7 @@ async fn test_rate_limiting_disabled() {
             .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(coordinator.clone())
+            .app_data(self_update_owner.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {

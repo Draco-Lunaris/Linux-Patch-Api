@@ -50,6 +50,22 @@ get_state() {
     fi
 }
 
+# Parse a specific field from the state file as JSON.
+get_state_field() {
+    FIELD="$1"
+    if [ ! -f "$STATE_FILE" ]; then
+        echo ""
+        return
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2],''))" "$STATE_FILE" "$FIELD" 2>/dev/null
+    elif command -v jq >/dev/null 2>&1; then
+        jq -r ".${FIELD} // \"\"" "$STATE_FILE" 2>/dev/null
+    else
+        echo ""
+    fi
+}
+
 # Wait for the state to be safe for restart.
 RETRY=0
 while [ "$RETRY" -lt "$MAX_RETRIES" ]; do
@@ -61,8 +77,15 @@ while [ "$RETRY" -lt "$MAX_RETRIES" ]; do
 
     STATE=$(get_state)
 
-    if [ "$STATE" = "restart_pending" ]; then
-        echo "Upgrade state is restart_pending — safe to restart"
+    if [ "$STATE" = "restart_pending" ] || [ "$STATE" = "starting_new_process" ]; then
+        # Check generation match between marker and state file
+        MARKER_GEN=$(cat "$MARKER" 2>/dev/null || echo 0)
+        STATE_GEN=$(get_state_field "generation")
+        if [ -n "$STATE_GEN" ] && [ "$MARKER_GEN" != "$STATE_GEN" ]; then
+            echo "Generation mismatch: marker=$MARKER_GEN state=$STATE_GEN — stale marker, aborting"
+            exit 0
+        fi
+        echo "Upgrade state is $STATE — safe to restart"
         break
     fi
 

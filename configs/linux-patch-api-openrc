@@ -78,18 +78,27 @@ start_post() {
         fi
     fi
 
-    # Verify the API listener is actually responding — this is the
-    # real readiness check, not just PID existence. We check the health
-    # endpoint on localhost. If TLS is enabled, use https and skip cert
-    # verification with curl -k.
+    # Verify the API listener is actually responding. When mTLS is
+    # enabled, curl without a client cert will fail the TLS handshake,
+    # so we check TCP connectivity instead. If TLS is disabled, we
+    # can use curl for a full HTTP health check.
     CONFIG_FILE="/etc/linux_patch_api/config.yaml"
     PORT=$(grep -E '^\s*port:' "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/.*port:\s*//' | tr -d ' ')
     if [ -z "$PORT" ]; then
         PORT=12443
     fi
 
-    # Try HTTPS first (mTLS is the default), fall back to HTTP
-    if command -v curl >/dev/null 2>&1; then
+    # Check if the port is accepting connections (works with or without mTLS)
+    if command -v nc >/dev/null 2>&1; then
+        if nc -z -w5 127.0.0.1 "$PORT" 2>/dev/null; then
+            einfo "linux-patch-api started successfully (listener active on port $PORT)"
+        else
+            ewarn "linux-patch-api process is running but listener is not accepting connections on port $PORT"
+            ewarn "Check logs: cat /var/log/linux_patch_api/linux-patch-api.err"
+            return 1
+        fi
+    elif command -v curl >/dev/null 2>&1; then
+        # Fall back to curl — works for non-TLS or if mTLS allows it
         if curl -sk --connect-timeout 5 "https://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
             einfo "linux-patch-api started successfully (API responding on port $PORT)"
         elif curl -s --connect-timeout 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
@@ -100,11 +109,11 @@ start_post() {
             return 1
         fi
     else
-        # No curl available — fall back to PID check only
+        # No nc or curl — fall back to PID check only
         if [ -f "$pidfile" ]; then
             pid=$(cat "$pidfile" 2>/dev/null)
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                einfo "linux-patch-api started (PID: $pid) — curl not available for API check"
+                einfo "linux-patch-api started (PID: $pid) — nc/curl not available for listener check"
             else
                 ewarn "linux-patch-api may not have started correctly - process not running"
                 return 1

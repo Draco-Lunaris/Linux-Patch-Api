@@ -131,6 +131,7 @@ pub async fn health_check(
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     crl_state: web::Data<SharedCrlState>,
     coordinator: web::Data<Arc<OperationCoordinator>>,
+    self_update_owner: web::Data<Arc<tokio::sync::RwLock<Option<Uuid>>>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let _request_id = Uuid::new_v4().to_string();
@@ -200,6 +201,14 @@ pub async fn health_check(
             cache_status_val.last_update.map(|dt| dt.to_rfc3339()),
         )
     };
+
+    // Check if the system is in recovery/self-update mode. When the
+    // self_update_owner is set, all mutating API requests are rejected
+    // and health should report "degraded" (or "recovering").
+    let self_update_active = self_update_owner.read().await.is_some();
+    if self_update_active {
+        status = "degraded".to_string();
+    }
 
     // CRL status from shared state — re-evaluate expiry at query time
     let crl = crl_state.load();
@@ -279,6 +288,20 @@ pub async fn reboot_system(
 
     match job_manager.admit_reboot(admission, pkg_op_active).await {
         Ok(job_id) => {
+            let job_sem = coordinator.job_semaphore().clone();
+            let job_permit = match job_sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!(error = %e, "Job semaphore closed unexpectedly");
+                    return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                        "INTERNAL_ERROR",
+                        "Job semaphore closed unexpectedly",
+                        None,
+                        false,
+                    ));
+                }
+            };
+
             // Spawn background task to execute the reboot
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
@@ -286,6 +309,7 @@ pub async fn reboot_system(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
+                let _job_permit = job_permit;
 
                 // Update job to running
                 let _ = job_manager_clone

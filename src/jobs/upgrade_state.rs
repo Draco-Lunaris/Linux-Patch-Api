@@ -415,6 +415,31 @@ pub fn marker_exists() -> bool {
     Path::new(UPGRADE_MARKER_PATH).exists()
 }
 
+/// Write the upgrade-pending marker file with the given generation.
+/// The marker contains the generation so stale timers can detect
+/// mismatched generations and refuse to act.
+pub fn write_marker(generation: u64) {
+    let marker = Path::new(UPGRADE_MARKER_PATH);
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(marker, generation.to_string()) {
+        warn!(error = %e, "Failed to write upgrade-pending marker file");
+    } else {
+        info!(generation = generation, "Upgrade-pending marker written");
+    }
+}
+
+/// Read the generation from the upgrade-pending marker file.
+/// Returns None if the marker doesn't exist or can't be parsed.
+pub fn read_marker() -> Option<u64> {
+    let marker = Path::new(UPGRADE_MARKER_PATH);
+    match std::fs::read_to_string(marker) {
+        Ok(content) => content.trim().parse::<u64>().ok(),
+        Err(_) => None,
+    }
+}
+
 /// Remove the upgrade-pending marker file.
 pub fn clear_marker() {
     let marker = Path::new(UPGRADE_MARKER_PATH);

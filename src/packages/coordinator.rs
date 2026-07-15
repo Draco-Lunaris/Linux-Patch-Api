@@ -148,7 +148,9 @@ pub struct OperationCoordinator {
 
     /// Enforces `max_concurrent` running jobs. Acquired before spawning a job
     /// task, released when the job completes/fails/times out.
-    job_semaphore: Semaphore,
+    /// Wrapped in `Arc` so `acquire_owned()` can be used to get a `'static`
+    /// permit that can be moved into `tokio::spawn`.
+    job_semaphore: Arc<Semaphore>,
 
     /// True while a package-DB mutation is in progress. Checked by the
     /// SIGTERM handler to decide whether to wait before shutting down.
@@ -157,6 +159,11 @@ pub struct OperationCoordinator {
     /// True while a job is running (any job, not just mutations). Used for
     /// health reporting and drain logic.
     job_in_progress: Arc<AtomicBool>,
+
+    /// Set to true when shutdown begins. New mutations are rejected
+    /// while this is true. This prevents a mutation from starting
+    /// between the SIGTERM signal and the drain check.
+    shutdown_admission_frozen: Arc<AtomicBool>,
 }
 
 impl OperationCoordinator {
@@ -165,9 +172,10 @@ impl OperationCoordinator {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             mutation_semaphore: Semaphore::new(1),
-            job_semaphore: Semaphore::new(max_concurrent.max(1)),
+            job_semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
             op_in_progress: Arc::new(AtomicBool::new(false)),
             job_in_progress: Arc::new(AtomicBool::new(false)),
+            shutdown_admission_frozen: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -182,9 +190,23 @@ impl OperationCoordinator {
         self.job_in_progress.load(Ordering::SeqCst)
     }
 
-    /// Get a handle to the job semaphore for acquiring before spawning a job.
-    pub fn job_semaphore(&self) -> &Semaphore {
+    /// Get a handle to the job semaphore for acquiring owned permits
+    /// before spawning a job task. Returns `Arc<Semaphore>` so callers
+    /// can use `acquire_owned()` to get a `'static` permit.
+    pub fn job_semaphore(&self) -> &Arc<Semaphore> {
         &self.job_semaphore
+    }
+
+    /// Freeze mutation admission — new mutations are rejected.
+    /// Called by the SIGTERM handler to stop admitting new work
+    /// before draining active operations.
+    pub fn freeze_admission(&self) {
+        self.shutdown_admission_frozen.store(true, Ordering::SeqCst);
+    }
+
+    /// Check if mutation admission is frozen (shutdown in progress).
+    pub fn is_admission_frozen(&self) -> bool {
+        self.shutdown_admission_frozen.load(Ordering::SeqCst)
     }
 
     /// Get a handle to the mutation semaphore for acquiring before a mutation.
@@ -217,6 +239,12 @@ impl OperationCoordinator {
     where
         F: FnOnce() -> Result<T>,
     {
+        if self.is_admission_frozen() {
+            return Err(anyhow::anyhow!(
+                "Mutation admission frozen — shutdown in progress"
+            ));
+        }
+
         let _permit = self
             .mutation_semaphore
             .acquire()

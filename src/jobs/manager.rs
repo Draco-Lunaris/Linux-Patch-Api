@@ -77,10 +77,8 @@ impl Drop for SelfUpdateReservation {
                 job_id = %self.job_id,
                 "SelfUpdateReservation dropped without commit — rolling back owner and job"
             );
-            // We can't await in Drop, so we use try_write and blocking
-            // operations. In practice, if the reservation is dropped
-            // before being committed, it means the task was cancelled
-            // before spawn, so there shouldn't be lock contention.
+            // We can't await in Drop, so use try_write (fail-closed if
+            // the lock is held). The lock is a tokio::sync::RwLock.
             if let Ok(mut owner) = self.owner_handle.try_write() {
                 if let Some(current) = &*owner {
                     if current == &self.job_id {

@@ -110,7 +110,15 @@ if [ "$1" = "configure" ]; then
         # if a previous timer is still running from a retried upgrade,
         # it is reset rather than duplicated.
         mkdir -p /var/lib/linux_patch_api
-        touch /var/lib/linux_patch_api/upgrade-pending
+        # Write the generation from the state file into the marker so
+        # stale timers can detect mismatched generations.
+        STATE_FILE=/var/lib/linux_patch_api/upgrade-state.json
+        if [ -f "$STATE_FILE" ] && command -v python3 >/dev/null 2>&1; then
+            GEN=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('generation','0'))" "$STATE_FILE" 2>/dev/null || echo 0)
+        else
+            GEN=0
+        fi
+        echo "$GEN" > /var/lib/linux_patch_api/upgrade-pending
         systemctl daemon-reload
         systemctl restart linux-patch-api-upgrade-restart.timer
     fi

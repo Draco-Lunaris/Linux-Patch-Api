@@ -153,6 +153,20 @@ pub async fn apply_patches(
         .await
     {
         Ok(job_id) => {
+            let job_sem = coordinator.job_semaphore().clone();
+            let job_permit = match job_sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!(error = %e, "Job semaphore closed unexpectedly");
+                    return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                        "INTERNAL_ERROR",
+                        "Job semaphore closed unexpectedly",
+                        None,
+                        false,
+                    ));
+                }
+            };
+
             // Spawn background task to execute the patching
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
@@ -162,6 +176,7 @@ pub async fn apply_patches(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
+                let _job_permit = job_permit;
 
                 // Update job to running
                 let _ = job_manager_clone

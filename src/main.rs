@@ -432,6 +432,9 @@ async fn main() -> Result<()> {
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
     let coordinator_data = web::Data::new(coordinator.clone());
+    // Share the self_update_owner handle with the health endpoint so it
+    // can report degraded status when in recovery/self-update mode.
+    let self_update_owner_data = web::Data::new(self_update_owner_handle.clone());
 
     // Manager URL for repo-config self-heal during self-update.
     // Extracted from enrollment config; None when not configured.
@@ -486,6 +489,7 @@ async fn main() -> Result<()> {
             .app_data(job_manager_data.clone())
             .app_data(backend_data.clone())
             .app_data(coordinator_data.clone())
+            .app_data(self_update_owner_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
             .app_data(manager_url_data.clone())
@@ -995,6 +999,12 @@ async fn setup_sigterm_handler(
 
     // Notify systemd that we're stopping
     notify_systemd_stopping();
+
+    // Stop admitting new mutating work immediately. This prevents a
+    // mutation from starting between the SIGTERM signal and the drain
+    // check. New run_mutation calls will return an error.
+    coordinator.freeze_admission();
+    info!("Mutation admission frozen — no new mutations will be accepted");
 
     // Check if a package mutation is in progress via the coordinator
     if coordinator.is_operation_in_progress() {

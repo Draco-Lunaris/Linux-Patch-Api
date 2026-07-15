@@ -288,6 +288,25 @@ pub async fn install_packages(
         .await
     {
         Ok(job_id) => {
+            // Acquire a job concurrency permit before spawning. This
+            // enforces max_concurrent — if all slots are in use, we
+            // wait here (the HTTP response is delayed until a slot
+            // is available). The permit is moved into the task and
+            // released when the task completes.
+            let job_sem = coordinator.job_semaphore().clone();
+            let job_permit = match job_sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!(error = %e, "Job semaphore closed unexpectedly");
+                    return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                        "INTERNAL_ERROR",
+                        "Job semaphore closed unexpectedly",
+                        None,
+                        false,
+                    ));
+                }
+            };
+
             // Spawn background task to execute the installation
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
@@ -297,6 +316,8 @@ pub async fn install_packages(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
+                // Hold the permit for the duration of the task
+                let _job_permit = job_permit;
 
                 // Update job to running
                 let _ = job_manager_clone
@@ -482,6 +503,20 @@ pub async fn update_package(
                 let job_id = reservation.commit();
 
                 // Spawn background task to execute the update
+                let job_sem = coordinator.job_semaphore().clone();
+                let job_permit = match job_sem.acquire_owned().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!(error = %e, "Job semaphore closed unexpectedly");
+                        return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                            "INTERNAL_ERROR",
+                            "Job semaphore closed unexpectedly",
+                            None,
+                            false,
+                        ));
+                    }
+                };
+
                 let backend_clone = backend.clone();
                 let job_manager_clone = job_manager.clone();
                 let coordinator_clone = coordinator.clone();
@@ -489,6 +524,7 @@ pub async fn update_package(
 
                 tokio::spawn(async move {
                     let job_id_clone = job_id;
+                    let _job_permit = job_permit;
 
                     // Update job to running
                     let _ = job_manager_clone
@@ -563,13 +599,13 @@ pub async fn update_package(
                                 .unwrap_or(None);
 
                             match &installed_version {
-                                Some(v) if v != &from_version => {
+                                Some(v) if v == &target_version => {
                                     info!(
                                         job_id = %job_id_clone,
                                         from_version = %from_version,
                                         installed_version = %v,
                                         target_version = %target_version,
-                                        "Self-update verified — installed version changed"
+                                        "Self-update verified — installed version matches target"
                                     );
                                     let _ = job_manager_clone
                                         .add_job_log(
@@ -598,7 +634,26 @@ pub async fn update_package(
                                     crate::jobs::upgrade_state::clear_marker();
                                     return;
                                 }
-                                _ => {
+                                Some(v) => {
+                                    // Installed version changed to something other
+                                    // than the expected target — enter recovery.
+                                    error!(
+                                        job_id = %job_id_clone,
+                                        from_version = %from_version,
+                                        installed_version = %v,
+                                        target_version = %target_version,
+                                        "Self-update installed unexpected version — entering recovery, NOT restarting"
+                                    );
+                                    crate::jobs::upgrade_state::write_recovering_state();
+                                    let _ = job_manager_clone
+                                        .fail_job(&job_id_clone, format!(
+                                            "Installed version {} does not match target {}. Entered recovery mode.",
+                                            v, target_version
+                                        ))
+                                        .await;
+                                    return;
+                                }
+                                None => {
                                     warn!(
                                         job_id = %job_id_clone,
                                         "Could not verify installed version after update — proceeding with restart"
@@ -817,6 +872,20 @@ pub async fn update_package(
         .await
     {
         Ok(job_id) => {
+            let job_sem = coordinator.job_semaphore().clone();
+            let job_permit = match job_sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!(error = %e, "Job semaphore closed unexpectedly");
+                    return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                        "INTERNAL_ERROR",
+                        "Job semaphore closed unexpectedly",
+                        None,
+                        false,
+                    ));
+                }
+            };
+
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
             let coordinator_clone = coordinator.clone();
@@ -824,6 +893,7 @@ pub async fn update_package(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
+                let _job_permit = job_permit;
 
                 let _ = job_manager_clone
                     .update_job(
@@ -900,6 +970,20 @@ pub async fn remove_package(
         .await
     {
         Ok(job_id) => {
+            let job_sem = coordinator.job_semaphore().clone();
+            let job_permit = match job_sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!(error = %e, "Job semaphore closed unexpectedly");
+                    return HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
+                        "INTERNAL_ERROR",
+                        "Job semaphore closed unexpectedly",
+                        None,
+                        false,
+                    ));
+                }
+            };
+
             // Spawn background task to execute the removal
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
@@ -908,6 +992,7 @@ pub async fn remove_package(
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
+                let _job_permit = job_permit;
 
                 // Update job to running
                 let _ = job_manager_clone
