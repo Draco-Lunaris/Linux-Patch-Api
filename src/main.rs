@@ -287,6 +287,8 @@ async fn main() -> Result<()> {
     // No early clearing: state is only cleared in finalize_successful_restart,
     // called AFTER listener bind + READY=1.
     let startup_reconciliation = linux_patch_api::jobs::upgrade_state::reconcile_startup_state();
+    // Clean up any stale temp files from prior crashes
+    linux_patch_api::jobs::upgrade_state::cleanup_stale_temp_files();
     let should_block_for_upgrade = match startup_reconciliation {
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::Clean => false,
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::RestartInProgress => true,

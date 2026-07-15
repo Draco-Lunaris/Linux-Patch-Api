@@ -857,6 +857,7 @@ async fn recovering_state_with_marker_continues_recovery() {
         target_version: String::new(),
         started_at: chrono::Utc::now().to_rfc3339(),
         restart_deadline: None,
+        generation: 0,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     std::fs::write(&state_path, &json).unwrap();
@@ -888,6 +889,7 @@ async fn recovering_state_without_marker() {
         target_version: String::new(),
         started_at: chrono::Utc::now().to_rfc3339(),
         restart_deadline: None,
+        generation: 0,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     std::fs::write(&state_path, &json).unwrap();

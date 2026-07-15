@@ -434,8 +434,12 @@ pub async fn update_package(
                     "Self-update reserved atomically — flag set, job created, other endpoints rejecting new jobs"
                 );
 
-                // Write persistent upgrade state — start in Reserving phase.
+                // Write persistent upgrade state — start in Installing phase.
                 // The state file survives process restarts, unlike the in-memory flag.
+                // FAIL-CLOSED: If we cannot persist the Installing state, we MUST
+                // abort the self-update before invoking the package manager. If we
+                // proceeded and the process crashed, the next startup would not
+                // know an upgrade was in progress.
                 let from_version = env!("CARGO_PKG_VERSION").to_string();
                 // Try to resolve the target version before installing.
                 let target_version = backend
@@ -457,7 +461,16 @@ pub async fn update_package(
                     &target_version,
                 );
                 if let Err(e) = crate::jobs::upgrade_state::write_state(&upgrade_state) {
-                    warn!(error = %e, "Failed to write persistent upgrade state — self-update will proceed but crash recovery may not work correctly");
+                    // FAIL-CLOSED: abort the self-update
+                    error!(error = %e, "Failed to write persistent Installing state — aborting self-update before invoking package manager");
+                    job_manager.release_self_update(&job_id).await;
+                    let response = ApiResponse::<()>::error(
+                        "PERSISTENCE_FAILED",
+                        "Failed to persist upgrade state — self-update aborted for safety. Retry after resolving the disk issue.",
+                        Some(serde_json::json!({"error": e.to_string()})),
+                        true,
+                    );
+                    return HttpResponse::InternalServerError().json(response);
                 }
 
                 // Spawn background task to execute the update
@@ -493,6 +506,9 @@ pub async fn update_package(
 
                             // Transition to Verifying phase — check that the
                             // installed version actually changed.
+                            // FAIL-CLOSED: If we cannot persist the Verifying state,
+                            // do NOT restart and do NOT clear the admission block.
+                            // Enter Recovering state instead.
                             let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
                                 &job_id_clone.to_string(),
                                 &from_version,
@@ -500,7 +516,17 @@ pub async fn update_package(
                             );
                             state.to_verifying();
                             if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
-                                error!(error = %e, "Failed to write verifying upgrade state");
+                                error!(
+                                    error = %e,
+                                    "Failed to write Verifying upgrade state — entering recovery mode, NOT restarting"
+                                );
+                                crate::jobs::upgrade_state::write_recovering_state();
+                                let _ = job_manager_clone
+                                    .fail_job(&job_id_clone, format!(
+                                        "Failed to persist Verifying state: {}. Entered recovery mode — manual intervention required.", e
+                                    ))
+                                    .await;
+                                return;
                             }
 
                             // Verify the installed version changed
@@ -555,6 +581,8 @@ pub async fn update_package(
                             let _ = job_manager_clone.complete_job(&job_id_clone).await;
 
                             // Transition to RestartPending
+                            // FAIL-CLOSED: If we cannot persist the RestartPending
+                            // state, do NOT restart. Enter Recovering state.
                             let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
                                 &job_id_clone.to_string(),
                                 &from_version,
@@ -562,7 +590,13 @@ pub async fn update_package(
                             );
                             state.to_restart_pending();
                             if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
-                                error!(error = %e, "Failed to write restart_pending upgrade state — crash recovery may not work correctly");
+                                error!(
+                                    error = %e,
+                                    "Failed to write RestartPending upgrade state — entering recovery mode, NOT restarting"
+                                );
+                                crate::jobs::upgrade_state::write_recovering_state();
+                                // Keep the admission block set — do not clear
+                                return;
                             }
                         }
                         Err(e) => {
