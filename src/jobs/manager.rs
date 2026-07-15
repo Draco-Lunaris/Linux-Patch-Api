@@ -11,6 +11,62 @@ use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
+/// Error returned by `try_reserve_self_update` when a self-update request
+/// cannot be admitted. Each variant maps to a specific HTTP response in the
+/// handler.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelfUpdateAdmissionError {
+    /// A self-update is already in progress (duplicate request).
+    AlreadyInProgress,
+    /// One or more jobs are currently running or pending.
+    JobsInProgress { count: usize },
+    /// The job queue is at capacity.
+    QueueFull,
+}
+
+impl std::fmt::Display for SelfUpdateAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelfUpdateAdmissionError::AlreadyInProgress => {
+                write!(f, "A self-update is already in progress")
+            }
+            SelfUpdateAdmissionError::JobsInProgress { count } => {
+                write!(f, "Cannot self-update while {} jobs are in progress", count)
+            }
+            SelfUpdateAdmissionError::QueueFull => {
+                write!(f, "Job queue is at capacity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SelfUpdateAdmissionError {}
+
+/// Error returned by `admit_job` when a normal (non-self-update) job
+/// cannot be admitted. Each variant maps to a specific HTTP response.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobAdmissionError {
+    /// A self-update is in progress — no new jobs accepted.
+    SelfUpdateInProgress,
+    /// The job queue is at capacity.
+    QueueFull,
+}
+
+impl std::fmt::Display for JobAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JobAdmissionError::SelfUpdateInProgress => {
+                write!(f, "A self-update is in progress")
+            }
+            JobAdmissionError::QueueFull => {
+                write!(f, "Job queue is at capacity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for JobAdmissionError {}
+
 /// Job status
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum JobStatus {
@@ -207,11 +263,11 @@ pub struct JobManager {
     jobs: Arc<RwLock<HashMap<Uuid, Job>>>,
     /// Broadcast sender for job status events
     event_sender: broadcast::Sender<JobStatusEvent>,
-    /// Set to true while a self-update (linux-patch-api package upgrade) is in
-    /// progress. While this is true, all other job-creating endpoints reject
-    /// new jobs with 409 Conflict so the delayed restart doesn't kill a
-    /// concurrent apt/dnf/pacman operation mid-transaction.
-    self_update_in_progress: Arc<RwLock<bool>>,
+    /// Self-update ownership state. `None` = no self-update in progress (idle).
+    /// `Some(job_id)` = a self-update is in progress, owned by the given job.
+    /// The job ID is the permit: only the owner can release the lock.
+    /// This prevents one self-update from clearing another's flag.
+    self_update_owner: Arc<RwLock<Option<Uuid>>>,
 }
 
 impl JobManager {
@@ -228,7 +284,7 @@ impl JobManager {
             max_queue_depth,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             event_sender,
-            self_update_in_progress: Arc::new(RwLock::new(false)),
+            self_update_owner: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -477,6 +533,18 @@ impl JobManager {
             .count()
     }
 
+    /// Get count of active jobs (running + pending).
+    ///
+    /// This is the count that matters for safety checks: a pending job can
+    /// transition to running at any time, so both must be zero before a
+    /// self-update or reboot can proceed safely.
+    pub async fn active_count(&self) -> usize {
+        let jobs = self.jobs.read().await;
+        jobs.values()
+            .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+            .count()
+    }
+
     /// Check if can accept new job (respecting max_queue_depth)
     /// Returns false when the total number of pending + running jobs
     /// equals or exceeds the configured queue depth cap.
@@ -495,22 +563,207 @@ impl JobManager {
     /// with 409 Conflict to prevent the delayed restart from killing a
     /// concurrent package operation.
     pub async fn is_self_update_in_progress(&self) -> bool {
-        *self.self_update_in_progress.read().await
+        self.self_update_owner.read().await.is_some()
     }
 
-    /// Mark that a self-update is in progress. All other job-creating
-    /// endpoints will reject new jobs until [`clear_self_update`] is called.
-    pub async fn set_self_update_in_progress(&self) {
-        *self.self_update_in_progress.write().await = true;
+    /// Mark that a self-update is in progress, owned by `job_id`.
+    /// Used by the startup reconciliation path (main.rs) when the persistent
+    /// state file indicates a restart is pending.
+    pub async fn set_self_update_in_progress(&self, job_id: Uuid) {
+        *self.self_update_owner.write().await = Some(job_id);
     }
 
-    /// Clear the self-update-in-progress flag. Called when the self-update
-    /// job completes or fails.
-    pub async fn clear_self_update(&self) {
-        *self.self_update_in_progress.write().await = false;
+    /// Release the self-update lock. Only succeeds if the caller's `job_id`
+    /// matches the current owner. This prevents one self-update from clearing
+    /// another's lock — if Update A finishes and calls release, but Update B
+    /// now owns the lock, the release is a no-op (logged as a warning).
+    ///
+    /// Returns true if the lock was released, false if the caller did not own it.
+    pub async fn release_self_update(&self, job_id: &Uuid) -> bool {
+        let mut owner = self.self_update_owner.write().await;
+        match &*owner {
+            Some(current) if current == job_id => {
+                *owner = None;
+                true
+            }
+            Some(current) => {
+                tracing::warn!(
+                    caller_job_id = %job_id,
+                    owner_job_id = %current,
+                    "release_self_update: caller does not own the lock — ignoring"
+                );
+                false
+            }
+            None => {
+                tracing::warn!(
+                    caller_job_id = %job_id,
+                    "release_self_update: no self-update in progress — ignoring"
+                );
+                false
+            }
+        }
     }
 
-    /// Delete a completed/failed job from history
+    /// Force-clear the self-update lock regardless of ownership.
+    ///
+    /// Used ONLY by the startup path (main.rs) when the new process has
+    /// successfully initialized and needs to clear any stale reservation
+    /// from the old process.
+    pub async fn force_clear_self_update(&self) {
+        *self.self_update_owner.write().await = None;
+    }
+
+    /// Atomically reserve a self-update slot.
+    ///
+    /// This is the single admission point for self-update requests. It
+    /// performs all checks and state changes under one exclusive lock
+    /// acquisition, preventing the check-then-set race where a competing
+    /// patch/install/remove request interleaves between the running-count
+    /// check and the flag set.
+    ///
+    /// Under the `self_update_owner` write lock, this method:
+    /// 1. Rejects if a self-update is already in progress (duplicate request)
+    /// 2. Rejects if any jobs are running or pending (concurrent operations)
+    /// 3. Rejects if the job queue is at capacity
+    /// 4. Sets the self-update owner to the new job's UUID (permit)
+    /// 5. Creates the self-update job in the jobs map
+    ///
+    /// Because the `self_update_owner` write lock is held for the
+    /// entire duration, no other handler can read `is_self_update_in_progress()`
+    /// (it will block until we release, then see Some) and no second
+    /// self-update can pass the owner check.
+    ///
+    /// Returns the job ID on success, or an error describing why the
+    /// reservation was rejected. The job ID is the ownership permit —
+    /// it must be passed to `release_self_update` to clear the lock.
+    pub async fn try_reserve_self_update(
+        &self,
+        packages: Vec<String>,
+    ) -> Result<Uuid, SelfUpdateAdmissionError> {
+        // Create the job first to get the job_id (the ownership permit).
+        let job = Job::new(JobOperation::SelfUpdate, packages);
+        let job_id = job.id;
+
+        // Acquire the self-update write lock FIRST and hold it for the
+        // entire operation. This prevents any other handler from reading
+        // is_self_update_in_progress() (they'll block until we release,
+        // then see Some) and prevents a second self-update from passing
+        // the owner check.
+        let mut su_guard = self.self_update_owner.write().await;
+
+        // 1. Reject duplicate self-update
+        if su_guard.is_some() {
+            return Err(SelfUpdateAdmissionError::AlreadyInProgress);
+        }
+
+        // 2. Check for running/pending jobs under the jobs read lock.
+        //    We hold the self-update write lock, so no other handler can
+        //    start a new job between this check and the owner set below.
+        {
+            let jobs = self.jobs.read().await;
+            let active_count = jobs
+                .values()
+                .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+                .count();
+            if active_count > 0 {
+                return Err(SelfUpdateAdmissionError::JobsInProgress {
+                    count: active_count,
+                });
+            }
+
+            // 3. Check queue capacity
+            if active_count >= self.max_queue_depth {
+                return Err(SelfUpdateAdmissionError::QueueFull);
+            }
+        }
+
+        // 4. Set the self-update owner to this job's UUID. All other
+        //    handlers will now see Some when they check is_self_update_in_progress().
+        *su_guard = Some(job_id);
+        drop(su_guard);
+
+        // 5. Insert the job into the jobs map. The owner is already set,
+        //    so no other handler can create a job.
+        let status = job.status.clone();
+        let progress = job.progress;
+        let message = job.message.clone();
+
+        {
+            let mut jobs = self.jobs.write().await;
+            jobs.insert(job_id, job);
+        }
+
+        self.emit_event("job_status", &job_id, &status, progress, &message, None);
+
+        Ok(job_id)
+    }
+
+    /// Atomically admit a normal (non-self-update) job.
+    ///
+    /// This is the single admission point for all non-self-update job-creating
+    /// endpoints (install, update, remove, patch-apply, reboot, rollback). It
+    /// performs the self-update flag check and job creation under one lock
+    /// acquisition, preventing the check-then-create race where a self-update
+    /// reservation interleaves between the flag check and `create_job()`.
+    ///
+    /// Under the `self_update_owner` read lock, this method:
+    /// 1. Rejects if a self-update is in progress (no new jobs during self-update)
+    /// 2. Acquires the `jobs` write lock and checks queue capacity
+    /// 3. Creates the job in the jobs map
+    ///
+    /// The read lock on `self_update_owner` blocks the self-update handler
+    /// from acquiring its write lock (in `try_reserve_self_update`) while we're
+    /// creating the job. This means a self-update cannot set its owner between
+    /// our flag check and our job creation.
+    ///
+    /// No handler should call `create_job()` directly. All job admission must
+    /// go through either `admit_job` (normal) or `try_reserve_self_update`
+    /// (self-update).
+    pub async fn admit_job(
+        &self,
+        operation: JobOperation,
+        packages: Vec<String>,
+    ) -> Result<Uuid, JobAdmissionError> {
+        // Acquire the self-update READ lock and hold it for the entire
+        // operation. This blocks try_reserve_self_update from acquiring
+        // its write lock while we're checking and creating.
+        let su_guard = self.self_update_owner.read().await;
+
+        // 1. Reject if a self-update is in progress
+        if su_guard.is_some() {
+            return Err(JobAdmissionError::SelfUpdateInProgress);
+        }
+
+        // 2. Check queue capacity and create the job atomically under
+        //    the jobs write lock. We still hold the self-update read lock,
+        //    so no self-update can set its flag between these steps.
+        let job = Job::new(operation, packages);
+        let job_id = job.id;
+        let status = job.status.clone();
+        let progress = job.progress;
+        let message = job.message.clone();
+
+        {
+            let mut jobs = self.jobs.write().await;
+            let active_count = jobs
+                .values()
+                .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+                .count();
+            if active_count >= self.max_queue_depth {
+                return Err(JobAdmissionError::QueueFull);
+            }
+            jobs.insert(job_id, job);
+        }
+
+        // Release the self-update read lock before emitting the event
+        // (event emission doesn't need the lock, and releasing early
+        // reduces lock contention).
+        drop(su_guard);
+
+        self.emit_event("job_status", &job_id, &status, progress, &message, None);
+
+        Ok(job_id)
+    }
     pub async fn delete_job(&self, job_id: &Uuid) -> Result<bool> {
         let mut jobs = self.jobs.write().await;
 
@@ -531,8 +784,14 @@ impl JobManager {
         Ok(false)
     }
 
-    /// Create a rollback job for a failed job
-    pub async fn create_rollback_job(&self, original_job_id: &Uuid) -> Result<Option<Uuid>> {
+    /// Create a rollback job for a failed job.
+    ///
+    /// Uses `admit_job` internally to atomically check the self-update flag
+    /// and queue capacity before creating the rollback job.
+    pub async fn create_rollback_job(
+        &self,
+        original_job_id: &Uuid,
+    ) -> Result<Option<Uuid>, JobAdmissionError> {
         let original_job = {
             let jobs = self.jobs.read().await;
             jobs.get(original_job_id).cloned()
@@ -545,7 +804,7 @@ impl JobManager {
                 JobStatus::Failed | JobStatus::Completed
             ) {
                 let rollback_job_id = self
-                    .create_job(JobOperation::Rollback, original_job.packages.clone())
+                    .admit_job(JobOperation::Rollback, original_job.packages.clone())
                     .await?;
 
                 // Mark as exclusive mode
@@ -574,7 +833,7 @@ impl Clone for JobManager {
             max_queue_depth: self.max_queue_depth,
             jobs: self.jobs.clone(),
             event_sender: self.event_sender.clone(),
-            self_update_in_progress: self.self_update_in_progress.clone(),
+            self_update_owner: self.self_update_owner.clone(),
         }
     }
 }

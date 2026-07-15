@@ -210,33 +210,6 @@ pub async fn rollback_job(
 
     info!(request_id = %request_id, job_id = %job_id_str, "Initiating job rollback");
 
-    // Block new jobs while a self-update is in progress
-    if job_manager.is_self_update_in_progress().await {
-        warn!(request_id = %request_id, "Rollback rejected — self-update in progress");
-        let response = ApiResponse::<()>::error(
-            "SELF_UPDATE_IN_PROGRESS",
-            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
-            None,
-            true,
-        );
-        return HttpResponse::Conflict()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
-    // Check job queue capacity
-    if !job_manager.can_accept_job().await {
-        let response = ApiResponse::<()>::error(
-            "QUEUE_FULL",
-            "Job queue is at capacity. Please retry later.",
-            None,
-            true,
-        );
-        return HttpResponse::TooManyRequests()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
     // Parse job ID
     let job_id = match Uuid::parse_str(&job_id_str) {
         Ok(id) => id,
@@ -251,6 +224,8 @@ pub async fn rollback_job(
         }
     };
 
+    // create_rollback_job uses admit_job internally, which atomically checks
+    // the self-update flag and queue capacity under a single lock.
     match job_manager.create_rollback_job(&job_id).await {
         Ok(Some(rollback_job_id)) => {
             info!(
@@ -280,15 +255,9 @@ pub async fn rollback_job(
             );
             HttpResponse::BadRequest().json(response)
         }
-        Err(e) => {
-            error!(request_id = %request_id, job_id = %job_id_str, error = ?e, "Failed to create rollback job");
-            let response = ApiResponse::<()>::error(
-                "JOB_CREATE_ERROR",
-                &format!("Failed to create rollback job: {}", e),
-                None,
-                true,
-            );
-            HttpResponse::InternalServerError().json(response)
+        Err(ref admission_err) => {
+            warn!(request_id = %request_id, job_id = %job_id_str, error = %admission_err, "Rollback job admission rejected");
+            super::packages::admission_error_response(admission_err)
         }
     }
 }

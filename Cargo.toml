@@ -126,6 +126,18 @@ path = "tests/integration/auth_test.rs"
 name = "rate_limit_test"
 path = "tests/unit/rate_limit_test.rs"
 
+[[test]]
+name = "apt_serialization_test"
+path = "tests/unit/apt_serialization_test.rs"
+
+[[test]]
+name = "self_update_guard_test"
+path = "tests/unit/self_update_guard_test.rs"
+
+[[test]]
+name = "concurrency_invariant_test"
+path = "tests/unit/concurrency_invariant_test.rs"
+
 [[bench]]
 name = "api_benchmarks"
 harness = false

@@ -114,37 +114,11 @@ pub async fn apply_patches(
         "Applying patches"
     );
 
-    // Block new jobs while a self-update is in progress
-    if job_manager.is_self_update_in_progress().await {
-        warn!(request_id = %request_id, "Patch apply rejected — self-update in progress");
-        let response = ApiResponse::<()>::error(
-            "SELF_UPDATE_IN_PROGRESS",
-            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
-            None,
-            true,
-        );
-        return HttpResponse::Conflict()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
-    // Check job queue capacity
-    if !job_manager.can_accept_job().await {
-        let response = ApiResponse::<()>::error(
-            "QUEUE_FULL",
-            "Job queue is at capacity. Please retry later.",
-            None,
-            true,
-        );
-        return HttpResponse::TooManyRequests()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
-    // Create async job
+    // Atomically admit the job — checks self-update flag and queue capacity
+    // under a single lock to prevent race with self-update reservation.
     let package_list = body.packages.clone().unwrap_or_default();
     match job_manager
-        .create_job(JobOperation::PatchApply, package_list)
+        .admit_job(JobOperation::PatchApply, package_list)
         .await
     {
         Ok(job_id) => {
@@ -354,15 +328,9 @@ pub async fn apply_patches(
 
             HttpResponse::Accepted().json(response)
         }
-        Err(e) => {
-            error!(request_id = %request_id, error = ?e, "Failed to create job");
-            let response = ApiResponse::<()>::error(
-                "JOB_CREATE_ERROR",
-                &format!("Failed to create job: {}", e),
-                None,
-                true,
-            );
-            HttpResponse::InternalServerError().json(response)
+        Err(ref admission_err) => {
+            warn!(request_id = %request_id, error = %admission_err, "Patch apply admission rejected");
+            super::packages::admission_error_response(admission_err)
         }
     }
 }

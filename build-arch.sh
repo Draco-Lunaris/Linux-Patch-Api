@@ -40,8 +40,10 @@ mkdir -p "$PKGDIR"/var/log/linux_patch_api
 chmod 755 target/release/linux-patch-api
 cp target/release/linux-patch-api "$PKGDIR"/usr/bin/
 
-# Copy systemd service
+# Copy systemd service and upgrade-restart timer units
 cp configs/linux-patch-api.service "$PKGDIR"/usr/lib/systemd/system/
+cp configs/linux-patch-api-upgrade-restart.service "$PKGDIR"/usr/lib/systemd/system/
+cp configs/linux-patch-api-upgrade-restart.timer "$PKGDIR"/usr/lib/systemd/system/
 
 mkdir -p "$PKGDIR"/usr/lib/linux-patch-api
 
