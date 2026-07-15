@@ -8,10 +8,12 @@
 //! - **Health exempt**: /health, /api/v1/system/info (health-exempt routes)
 
 use actix_web::{web, HttpResponse};
+use std::sync::Arc;
 use tracing::info;
 
 use crate::jobs::manager::JobManager;
 use crate::packages::cache::PackageCacheState;
+use crate::packages::coordinator::OperationCoordinator;
 
 use super::handlers::{jobs, packages, patches, system, websocket};
 
@@ -28,6 +30,7 @@ pub fn configure_api_routes(
     cfg: &mut web::ServiceConfig,
     job_manager: web::Data<JobManager>,
     backend: web::Data<Box<dyn crate::packages::PackageManagerBackend>>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     cache_state: web::Data<PackageCacheState>,
 ) {
     info!("Configuring API v1 routes");
@@ -38,6 +41,7 @@ pub fn configure_api_routes(
 
     cfg.app_data(job_manager)
         .app_data(backend)
+        .app_data(coordinator)
         .app_data(cache_state)
         .service(
             web::scope("/api/v1")

@@ -8,12 +8,14 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
+use crate::packages::coordinator::OperationCoordinator;
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
@@ -128,6 +130,7 @@ pub async fn health_check(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     crl_state: web::Data<SharedCrlState>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let _request_id = Uuid::new_v4().to_string();
@@ -150,20 +153,38 @@ pub async fn health_check(
     // Check cache status — report stale without synchronously refreshing.
     // Health checks must NOT mutate package state. If the cache is stale,
     // we spawn an async refresh task (best-effort) and report the current
-    // status immediately. This prevents health checks from racing with
-    // package operations on the dpkg/rpm/pacman frontend lock.
+    // status immediately. The refresh uses the coordinator's non-blocking
+    // try_run_mutation — if a mutation is already in progress, the refresh
+    // is skipped and stale cache is reported.
     let cache_status_val = cache_state.status();
     let (mut status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
-        // Spawn a best-effort background refresh — do NOT block the health
-        // response. The task will acquire the mutation semaphore via the
-        // backend's refresh_package_cache method, so it won't race with
-        // in-progress operations.
+        // Spawn a best-effort background refresh using the coordinator's
+        // non-blocking mutation admission. This deduplicates refreshes
+        // (only one can hold the mutation semaphore at a time) and never
+        // blocks the health response.
         let backend_clone = backend.clone();
         let cache_state_clone = cache_state.clone();
+        let coordinator_clone = coordinator.clone();
         actix_web::rt::spawn(async move {
-            if !backend_clone.is_operation_in_progress() {
-                if let Err(e) = backend_clone.refresh_package_cache(&cache_state_clone) {
-                    tracing::warn!(error = ?e, "Background cache refresh from health check failed");
+            // Run in spawn_blocking because refresh_package_cache is a
+            // blocking command execution.
+            let refresh_result = tokio::task::spawn_blocking(move || {
+                coordinator_clone
+                    .try_run_mutation(|| backend_clone.refresh_package_cache(&cache_state_clone))
+            })
+            .await;
+            match refresh_result {
+                Ok(Ok(_)) => info!("Background cache refresh from health check succeeded"),
+                Ok(Err(crate::packages::coordinator::TryMutationError::Busy)) => {
+                    info!(
+                        "Background cache refresh from health check skipped — mutation in progress"
+                    );
+                }
+                Ok(Err(crate::packages::coordinator::TryMutationError::Failed(e))) => {
+                    warn!(error = ?e, "Background cache refresh from health check failed");
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Background cache refresh task panicked");
                 }
             }
         });
@@ -230,6 +251,7 @@ pub async fn reboot_system(
     body: web::Json<RebootRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -263,7 +285,7 @@ pub async fn reboot_system(
     //   A durable audit event is logged.
 
     let self_update_active = job_manager.is_self_update_in_progress().await;
-    let pkg_op_active = backend.is_operation_in_progress();
+    let pkg_op_active = coordinator.is_operation_in_progress();
     let active_jobs = if !force {
         Some(job_manager.active_count().await)
     } else {

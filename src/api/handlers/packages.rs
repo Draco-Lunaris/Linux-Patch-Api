@@ -10,11 +10,13 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::enroll::{check_and_provision_repo_config, RepoHealResult};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
+use crate::packages::coordinator::OperationCoordinator;
 use crate::packages::{
     validate_package_name, validate_version_string, InstallOptions, Package, PackageManagerBackend,
     PackageSpec, SELF_PACKAGE_NAME,
@@ -264,6 +266,7 @@ pub async fn install_packages(
     body: web::Json<InstallRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -288,6 +291,7 @@ pub async fn install_packages(
             // Spawn background task to execute the installation
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
+            let coordinator_clone = coordinator.clone();
             let options = body.options.clone();
             let packages = body.packages.clone();
 
@@ -307,8 +311,14 @@ pub async fn install_packages(
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute installation
-                match backend_clone.install_packages(&packages, &options) {
+                // Execute installation through the coordinator's mutation
+                // semaphore — this serializes all package-DB mutations across
+                // ALL backends (APT, DNF, YUM, APK, Pacman).
+                let install_result = coordinator_clone
+                    .run_mutation(|| backend_clone.install_packages(&packages, &options))
+                    .await;
+
+                match install_result {
                     Ok(_) => {
                         let _ = job_manager_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, "Package installation completed");
@@ -344,6 +354,7 @@ pub async fn update_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     manager_url: web::Data<Option<String>>,
     _req: HttpRequest,
 ) -> impl Responder {
@@ -452,6 +463,7 @@ pub async fn update_package(
                 // Spawn background task to execute the update
                 let backend_clone = backend.clone();
                 let job_manager_clone = job_manager.clone();
+                let coordinator_clone = coordinator.clone();
                 let pkg_name = package_name.clone();
 
                 tokio::spawn(async move {
@@ -470,8 +482,12 @@ pub async fn update_package(
                         .add_job_log(&job_id_clone, "Job started".to_string())
                         .await;
 
-                    // Execute update
-                    match backend_clone.update_package(&pkg_name) {
+                    // Execute update through the coordinator's mutation semaphore
+                    let update_result = coordinator_clone
+                        .run_mutation(|| backend_clone.update_package(&pkg_name))
+                        .await;
+
+                    match update_result {
                         Ok(_) => {
                             info!(job_id = %job_id_clone, package = %pkg_name, "Self-update install completed");
 
@@ -615,13 +631,13 @@ pub async fn update_package(
 
                         loop {
                             let active = job_manager_clone.active_count().await;
-                            let apt_busy = backend_clone.is_operation_in_progress();
+                            let mutation_busy = coordinator_clone.is_operation_in_progress();
 
-                            if active == 0 && !apt_busy {
+                            if active == 0 && !mutation_busy {
                                 info!(
                                     job_id = %job_id_clone,
                                     active_jobs = active,
-                                    apt_in_progress = apt_busy,
+                                    mutation_in_progress = mutation_busy,
                                     "Drain complete — all operations finished, triggering restart"
                                 );
                                 break;
@@ -631,7 +647,7 @@ pub async fn update_package(
                                 warn!(
                                     job_id = %job_id_clone,
                                     active_jobs = active,
-                                    apt_in_progress = apt_busy,
+                                    mutation_in_progress = mutation_busy,
                                     "Drain timeout (120s) reached — restarting with {} active operations (postinst timer is fallback)",
                                     active
                                 );
@@ -642,7 +658,7 @@ pub async fn update_package(
                             info!(
                                 job_id = %job_id_clone,
                                 active_jobs = active,
-                                apt_in_progress = apt_busy,
+                                mutation_in_progress = mutation_busy,
                                 "Waiting for operations to drain before restart..."
                             );
                         }
@@ -723,6 +739,7 @@ pub async fn update_package(
         Ok(job_id) => {
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
+            let coordinator_clone = coordinator.clone();
             let pkg_name = package_name.clone();
 
             tokio::spawn(async move {
@@ -740,7 +757,12 @@ pub async fn update_package(
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                match backend_clone.update_package(&pkg_name) {
+                // Execute update through the coordinator's mutation semaphore
+                let update_result = coordinator_clone
+                    .run_mutation(|| backend_clone.update_package(&pkg_name))
+                    .await;
+
+                match update_result {
                     Ok(_) => {
                         let _ = job_manager_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package update completed");
@@ -776,6 +798,7 @@ pub async fn remove_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -800,6 +823,7 @@ pub async fn remove_package(
             // Spawn background task to execute the removal
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
+            let coordinator_clone = coordinator.clone();
             let pkg_name = package_name.clone();
 
             tokio::spawn(async move {
@@ -818,8 +842,12 @@ pub async fn remove_package(
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute removal (purge=false for standard removal)
-                match backend_clone.remove_package(&pkg_name, false) {
+                // Execute removal through the coordinator's mutation semaphore
+                let remove_result = coordinator_clone
+                    .run_mutation(|| backend_clone.remove_package(&pkg_name, false))
+                    .await;
+
+                match remove_result {
                     Ok(_) => {
                         let _ = job_manager_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package removal completed");

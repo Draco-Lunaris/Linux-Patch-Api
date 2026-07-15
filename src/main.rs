@@ -35,6 +35,7 @@ use linux_patch_api::auth::{
 use linux_patch_api::config::loader::{validate_certs, CertStatus};
 use linux_patch_api::enroll;
 use linux_patch_api::packages::cache::PackageCacheState;
+use linux_patch_api::packages::coordinator::OperationCoordinator;
 use linux_patch_api::packages::create_backend;
 use linux_patch_api::{init_logging, AppConfig, JobManager};
 
@@ -265,6 +266,15 @@ async fn main() -> Result<()> {
         "Job manager initialized"
     );
 
+    // Initialize the OperationCoordinator — the single chokepoint for all
+    // package-database mutations. One shared Arc instance is injected into
+    // web::Data and used by all handlers and the SIGTERM handler.
+    let coordinator = Arc::new(OperationCoordinator::new(config.jobs.max_concurrent));
+    info!(
+        max_concurrent = config.jobs.max_concurrent,
+        "Operation coordinator initialized"
+    );
+
     // Reconcile persistent upgrade state on startup.
     //
     // The in-memory self_update_in_progress flag is volatile — it disappears
@@ -384,6 +394,7 @@ async fn main() -> Result<()> {
     // Store job manager and backend in Arc for sharing
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
+    let coordinator_data = web::Data::new(coordinator.clone());
 
     // Manager URL for repo-config self-heal during self-update.
     // Extracted from enrollment config; None when not configured.
@@ -402,12 +413,11 @@ async fn main() -> Result<()> {
     let shared_crl_state = crl::new_shared_state();
     let crl_state_data = web::Data::new(shared_crl_state.clone());
 
-    // Clone backend for the SIGTERM handler — it needs to check if an apt
-    // operation is in progress and wait for it to complete before allowing
-    // the server to shut down. Without this, systemd's SIGTERM → SIGKILL
-    // cycle (TimeoutStopSec=30s) can kill apt-get mid-transaction, leaving
-    // dpkg in a half-configured state.
-    let sigterm_backend = backend_data.clone();
+    // Clone the coordinator for the SIGTERM handler — it needs to check if a
+    // package mutation is in progress and wait for it to complete before
+    // allowing the server to shut down. The coordinator is the authoritative
+    // source for this check, working across ALL backends (not just APT).
+    let sigterm_coordinator = coordinator.clone();
 
     // Configure bind address
     let bind_address = format!("{}:{}", config.server.bind, config.server.port);
@@ -434,6 +444,7 @@ async fn main() -> Result<()> {
             .wrap(Logger::default())
             .app_data(job_manager_data.clone())
             .app_data(backend_data.clone())
+            .app_data(coordinator_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
             .app_data(manager_url_data.clone())
@@ -442,6 +453,7 @@ async fn main() -> Result<()> {
                     cfg,
                     job_manager_data.clone(),
                     backend_data.clone(),
+                    coordinator_data.clone(),
                     cache_state.clone(),
                 );
             })
@@ -452,6 +464,11 @@ async fn main() -> Result<()> {
     .client_request_timeout(std::time::Duration::from_secs(5))
     // FIX: Set explicit client disconnect timeout to prevent connection resets on larger responses
     .client_disconnect_timeout(std::time::Duration::from_secs(5))
+    // Graceful shutdown timeout: how long Actix waits for in-flight requests
+    // to complete after receiving the stop signal. Must be less than
+    // TimeoutStopSec (90s) minus the package-mutation drain window (80s) =
+    // 10s margin.
+    .shutdown_timeout(10)
     .keep_alive(std::time::Duration::from_secs(15))
     .max_connection_rate(1000);
     info!(
@@ -631,12 +648,12 @@ async fn main() -> Result<()> {
             .listen_rustls_0_23(tcp_listener, server_config)?
             .run();
 
-        // Spawn SIGTERM handler that waits for in-progress apt operations
+        // Spawn SIGTERM handler that waits for in-progress package operations
         // to complete before stopping the server. This prevents SIGKILL from
-        // killing apt-get mid-transaction (which leaves dpkg half-configured).
+        // killing apt-get/dnf/apk/pacman mid-transaction.
         let server_handle = server.handle();
         tokio::spawn(async move {
-            setup_sigterm_handler(server_handle, sigterm_backend).await;
+            setup_sigterm_handler(server_handle, sigterm_coordinator).await;
         });
 
         server.await?;
@@ -689,7 +706,7 @@ async fn main() -> Result<()> {
         // Spawn SIGTERM handler (same as TLS path)
         let server_handle = server.handle();
         tokio::spawn(async move {
-            setup_sigterm_handler(server_handle, sigterm_backend).await;
+            setup_sigterm_handler(server_handle, sigterm_coordinator).await;
         });
 
         server.await?;
@@ -735,23 +752,25 @@ fn notify_systemd_stopping() {
 /// before stopping the HTTP server.
 ///
 /// When systemd stops the service (`systemctl stop`), it sends SIGTERM, waits
-/// `TimeoutStopSec=30s`, then sends SIGKILL. If apt-get is mid-transaction when
-/// SIGKILL arrives, dpkg is left in a half-configured state — packages unpacked
+/// `TimeoutStopSec=90s`, then sends SIGKILL. If a package-manager operation
+/// (apt-get/dnf/apk/pacman) is mid-transaction when SIGKILL arrives, the
+/// package database is left in a half-configured state — packages unpacked
 /// but not configured, kernel installed but initramfs not generated, etc.
 ///
 /// This handler:
 /// 1. Catches SIGTERM
-/// 2. Checks if a package operation is in progress (via `is_operation_in_progress`)
-/// 3. If yes: waits up to 25s (leaving 5s margin before SIGKILL) for it to complete
+/// 2. Checks if a package mutation is in progress (via the coordinator's
+///    `op_in_progress` flag, which works across ALL backends)
+/// 3. If yes: waits up to 80s (leaving margin before SIGKILL) for it to complete
 /// 4. Stops the HTTP server gracefully (stops accepting new connections, drains)
 /// 5. If no operation in progress: stops immediately
 ///
-/// The 25s deadline is based on the systemd service's `TimeoutStopSec=30s` —
-/// we leave a 5s margin for the server to drain in-flight HTTP requests after
+/// The 80s deadline is based on the systemd service's `TimeoutStopSec=90s` —
+/// we leave a 10s margin for the server to drain in-flight HTTP requests after
 /// we call `stop()`.
 async fn setup_sigterm_handler(
     server_handle: actix_web::dev::ServerHandle,
-    backend: web::Data<Box<dyn linux_patch_api::packages::PackageManagerBackend>>,
+    coordinator: Arc<OperationCoordinator>,
 ) {
     use std::time::{Duration, Instant};
     use tokio::signal::unix::{signal, SignalKind};
@@ -759,7 +778,7 @@ async fn setup_sigterm_handler(
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(s) => s,
         Err(e) => {
-            error!(error = %e, "Failed to install SIGTERM handler — apt operations may be killed mid-transaction on shutdown");
+            error!(error = %e, "Failed to install SIGTERM handler — package operations may be killed mid-transaction on shutdown");
             return;
         }
     };
@@ -771,19 +790,19 @@ async fn setup_sigterm_handler(
     // Notify systemd that we're stopping
     notify_systemd_stopping();
 
-    // Check if a package operation is in progress
-    if backend.is_operation_in_progress() {
-        info!("Package operation in progress — waiting up to 25s for it to complete before shutting down");
+    // Check if a package mutation is in progress via the coordinator
+    if coordinator.is_operation_in_progress() {
+        info!("Package mutation in progress — waiting up to 80s for it to complete before shutting down");
 
-        let deadline = Instant::now() + Duration::from_secs(25);
+        let deadline = Instant::now() + Duration::from_secs(80);
         let mut waited = 0u64;
 
-        while backend.is_operation_in_progress() {
+        while coordinator.is_operation_in_progress() {
             let now = Instant::now();
             if now >= deadline {
                 warn!(
                     waited_seconds = waited,
-                    "Package operation still in progress after 25s — shutting down anyway (systemd will SIGKILL in ~5s)"
+                    "Package mutation still in progress after 80s — shutting down anyway (systemd will SIGKILL in ~10s)"
                 );
                 break;
             }
@@ -793,26 +812,26 @@ async fn setup_sigterm_handler(
             tokio::time::sleep(sleep_dur).await;
             waited += sleep_dur.as_secs();
 
-            if backend.is_operation_in_progress() {
+            if coordinator.is_operation_in_progress() {
                 info!(
                     waited_seconds = waited,
-                    "Still waiting for package operation to complete..."
+                    "Still waiting for package mutation to complete..."
                 );
             }
         }
 
-        if !backend.is_operation_in_progress() {
+        if !coordinator.is_operation_in_progress() {
             info!(
                 waited_seconds = waited,
-                "Package operation completed — proceeding with shutdown"
+                "Package mutation completed — proceeding with shutdown"
             );
         }
     } else {
-        info!("No package operation in progress — shutting down immediately");
+        info!("No package mutation in progress — shutting down immediately");
     }
 
     // Stop the HTTP server gracefully — stops accepting new connections and
     // drains in-flight requests. The server's own drain timeout is set by
-    // client_disconnect_timeout (5s).
+    // shutdown_timeout() on the server builder.
     let _ = server_handle.stop(true).await;
 }
