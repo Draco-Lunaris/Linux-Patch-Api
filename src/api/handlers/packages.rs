@@ -435,21 +435,14 @@ pub async fn update_package(
                     "Self-update reserved atomically — flag set, job created, other endpoints rejecting new jobs"
                 );
 
-                // Write persistent upgrade state — start in Installing phase.
+                // Write persistent upgrade state — start in Reserving phase.
                 // The state file survives process restarts, unlike the in-memory flag.
-                // FAIL-CLOSED: If we cannot persist the Installing state, we MUST
-                // abort the self-update before invoking the package manager. If we
-                // proceeded and the process crashed, the next startup would not
-                // know an upgrade was in progress.
-                //
-                // Section 9: Query the package manager for the installed version,
-                // not CARGO_PKG_VERSION. The package manager is the authoritative
-                // source for the installed package version.
+                // FAIL-CLOSED: If we cannot persist the Reserving state, we MUST
+                // abort the self-update before invoking the package manager.
                 let from_version = backend
                     .get_installed_version(&package_name)
                     .unwrap_or(None)
                     .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-                // Try to resolve the target version before installing.
                 let target_version = backend
                     .get_candidate_version(&package_name)
                     .unwrap_or(None)
@@ -463,7 +456,7 @@ pub async fn update_package(
                 } else {
                     warn!("Could not resolve target version — using from_version as placeholder");
                 }
-                let upgrade_state = crate::jobs::upgrade_state::UpgradeState::installing(
+                let upgrade_state = crate::jobs::upgrade_state::UpgradeState::reserving(
                     &job_id.to_string(),
                     &from_version,
                     &target_version,
@@ -472,7 +465,7 @@ pub async fn update_package(
                     // FAIL-CLOSED: abort the self-update
                     // The reservation will be dropped here, rolling back
                     // the owner and job automatically.
-                    error!(error = %e, "Failed to write persistent Installing state — aborting self-update before invoking package manager");
+                    error!(error = %e, "Failed to write persistent Reserving state — aborting self-update before invoking package manager");
                     job_manager.release_self_update(&job_id).await;
                     let response = ApiResponse::<()>::error(
                         "PERSISTENCE_FAILED",
@@ -509,6 +502,26 @@ pub async fn update_package(
                     let _ = job_manager_clone
                         .add_job_log(&job_id_clone, "Job started".to_string())
                         .await;
+
+                    // Transition from Reserving to Installing before invoking
+                    // the package manager. FAIL-CLOSED: if this persistence
+                    // fails, abort the self-update.
+                    let installing_state = crate::jobs::upgrade_state::UpgradeState::installing(
+                        &job_id_clone.to_string(),
+                        &from_version,
+                        &target_version,
+                    );
+                    if let Err(e) = crate::jobs::upgrade_state::write_state(&installing_state) {
+                        error!(error = %e, "Failed to write Installing state — aborting self-update before invoking package manager");
+                        crate::jobs::upgrade_state::write_recovering_state();
+                        let _ = job_manager_clone
+                            .fail_job(
+                                &job_id_clone,
+                                format!("Failed to persist Installing state: {}", e),
+                            )
+                            .await;
+                        return;
+                    }
 
                     // Execute update through the coordinator's mutation semaphore
                     let update_result = coordinator_clone
