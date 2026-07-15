@@ -397,6 +397,7 @@ async fn main() -> Result<()> {
     // This runs under the coordinator's mutation semaphore to serialize
     // with any other operations (there shouldn't be any since the admission
     // block is set, but the semaphore ensures correctness).
+    let mut repair_failed = false;
     if startup_reconciliation
         == linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall
         || startup_reconciliation
@@ -411,11 +412,6 @@ async fn main() -> Result<()> {
         match repair_result {
             Ok(_) => {
                 info!("Startup package database repair succeeded");
-                // For InterruptedInstall: repair succeeded, we can proceed
-                // to normal initialization. The admission block will be
-                // cleared after READY=1.
-                // For RecoveryMode: repair succeeded, but we still keep the
-                // admission block until the full initialization completes.
             }
             Err(e) => {
                 error!(
@@ -423,8 +419,8 @@ async fn main() -> Result<()> {
                     "Startup package database repair FAILED — retaining recovery state. \
                      All package operations will remain blocked. Manual intervention required."
                 );
-                // Write recovering state so the next startup also enters recovery
                 linux_patch_api::jobs::upgrade_state::write_recovering_state();
+                repair_failed = true;
                 // The admission block stays set — mutations are blocked.
                 // The server will start in recovery mode (health reports degraded).
                 // Only health and read-only diagnostic endpoints are available.
@@ -469,6 +465,10 @@ async fn main() -> Result<()> {
     // Clone rate limit config for use inside the HttpServer closure
     let rate_limit_config = config.rate_limit.clone();
 
+    // Clone backend_data for use in the finalization code after server
+    // construction (the HttpServer::new closure moves the original).
+    let finalize_backend = backend_data.clone();
+
     // Create server builder
     // Security middleware stack (order matters):
     //   1. WhitelistMiddleware   — IP-based access control (deny-by-default)
@@ -510,6 +510,12 @@ async fn main() -> Result<()> {
     // TimeoutStopSec (120s) minus the package-mutation drain window (100s) =
     // 20s margin. We use 10s for Actix, leaving 10s safety margin.
     .shutdown_timeout(10)
+    // Disable Actix's built-in signal handling — we install our own
+    // SIGTERM handler (setup_sigterm_handler) that drains package
+    // mutations before stopping the server. Without disable_signals(),
+    // Actix would install a competing SIGTERM handler that stops the
+    // server immediately without waiting for mutations to complete.
+    .disable_signals()
     .keep_alive(std::time::Duration::from_secs(15))
     .max_connection_rate(1000);
     info!(
@@ -693,31 +699,86 @@ async fn main() -> Result<()> {
         // 5. Transition persistent state to Ready
         // 6. Send READY=1 to systemd
         // 7. Clear upgrade state, marker, and admission block
-        if needs_state_finalize {
+        if needs_state_finalize && !repair_failed {
             info!("Server initialized — finalizing self-update restart");
 
-            // Transition persistent state to Ready
-            let mut ready_state =
-                linux_patch_api::jobs::upgrade_state::UpgradeState::installing("startup", "", "");
-            ready_state.to_ready();
-            if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
-                error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
-                // Don't clear the flag — fail-closed
+            // Section 9: Verify running binary version, installed package
+            // version, and expected target version all agree before
+            // clearing state. If they don't, enter recovery mode.
+            let running_version = env!("CARGO_PKG_VERSION").to_string();
+            let installed_version = finalize_backend
+                .get_installed_version(linux_patch_api::packages::SELF_PACKAGE_NAME)
+                .unwrap_or(None);
+
+            // Read the persistent state to get the expected target version
+            let state_result = linux_patch_api::jobs::upgrade_state::read_state();
+            let expected_target = match &state_result {
+                Ok(s) => s.target_version.clone(),
+                Err(_) => String::new(),
+            };
+
+            let versions_match = if expected_target.is_empty() {
+                // No target version in state (e.g. InterruptedInstall with
+                // empty target) — accept if installed version matches running
+                installed_version.as_deref() == Some(&running_version)
             } else {
-                // State is Ready — send READY=1, then clear everything
+                // All three must agree: running == installed == target
+                installed_version.as_deref() == Some(&running_version)
+                    && installed_version.as_deref() == Some(&expected_target)
+            };
+
+            if !versions_match && !expected_target.is_empty() {
+                error!(
+                    running_version = %running_version,
+                    installed_version = ?installed_version,
+                    expected_target = %expected_target,
+                    "Version mismatch on startup after self-update — entering recovery mode, NOT clearing state"
+                );
+                linux_patch_api::jobs::upgrade_state::write_recovering_state();
                 notify_systemd_ready();
-                if in_recovery_mode {
-                    warn!("Notifying systemd of degraded status (recovery mode)");
-                    notify_systemd_status("Running in recovery mode — package operations blocked");
+                notify_systemd_status(
+                    "Running in recovery mode — version mismatch after self-update",
+                );
+                // Keep admission block set — mutations blocked
+            } else {
+                // Versions agree (or no target to compare) — proceed
+                info!(
+                    running_version = %running_version,
+                    installed_version = ?installed_version,
+                    expected_target = %expected_target,
+                    "Version verification passed — clearing upgrade state"
+                );
+
+                // Transition persistent state to Ready
+                let mut ready_state =
+                    linux_patch_api::jobs::upgrade_state::UpgradeState::installing(
+                        "startup", "", "",
+                    );
+                ready_state.to_ready();
+                if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
+                    error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
+                } else {
+                    notify_systemd_ready();
+                    if in_recovery_mode {
+                        warn!("Notifying systemd of degraded status (recovery mode)");
+                        notify_systemd_status(
+                            "Running in recovery mode — package operations blocked",
+                        );
+                    }
+
+                    linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+                    *self_update_owner_handle.write().await = None;
+                    info!("Self-update admission block cleared — server ready for mutations");
                 }
-
-                // Clear the persistent state file and marker
-                linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-
-                // Clear the in-memory self-update admission block
-                *self_update_owner_handle.write().await = None;
-                info!("Self-update admission block cleared — server ready for mutations");
             }
+        } else if needs_state_finalize && repair_failed {
+            // Repair failed — server starts but mutations remain blocked.
+            // Health reports degraded. Only read-only endpoints available.
+            info!("Server starting in recovery mode — repair failed, mutations blocked");
+            notify_systemd_ready();
+            notify_systemd_status(
+                "Running in recovery mode — package operations blocked (repair failed)",
+            );
         } else {
             // Normal startup — just send READY=1
             notify_systemd_ready();
@@ -768,25 +829,65 @@ async fn main() -> Result<()> {
         });
 
         // Finalize the self-update restart (same ordering as TLS path)
-        if needs_state_finalize {
+        if needs_state_finalize && !repair_failed {
             info!("Server initialized — finalizing self-update restart");
 
-            let mut ready_state =
-                linux_patch_api::jobs::upgrade_state::UpgradeState::installing("startup", "", "");
-            ready_state.to_ready();
-            if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
-                error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
+            // Section 9: Verify versions match before clearing state
+            let running_version = env!("CARGO_PKG_VERSION").to_string();
+            let installed_version = finalize_backend
+                .get_installed_version(linux_patch_api::packages::SELF_PACKAGE_NAME)
+                .unwrap_or(None);
+            let state_result = linux_patch_api::jobs::upgrade_state::read_state();
+            let expected_target = match &state_result {
+                Ok(s) => s.target_version.clone(),
+                Err(_) => String::new(),
+            };
+            let versions_match = if expected_target.is_empty() {
+                installed_version.as_deref() == Some(&running_version)
             } else {
-                notify_systemd_ready();
-                if in_recovery_mode {
-                    warn!("Notifying systemd of degraded status (recovery mode)");
-                    notify_systemd_status("Running in recovery mode — package operations blocked");
-                }
+                installed_version.as_deref() == Some(&running_version)
+                    && installed_version.as_deref() == Some(&expected_target)
+            };
 
-                linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-                *self_update_owner_handle.write().await = None;
-                info!("Self-update admission block cleared — server ready for mutations");
+            if !versions_match && !expected_target.is_empty() {
+                error!(
+                    running_version = %running_version,
+                    installed_version = ?installed_version,
+                    expected_target = %expected_target,
+                    "Version mismatch — entering recovery mode, NOT clearing state"
+                );
+                linux_patch_api::jobs::upgrade_state::write_recovering_state();
+                notify_systemd_ready();
+                notify_systemd_status(
+                    "Running in recovery mode — version mismatch after self-update",
+                );
+            } else {
+                let mut ready_state =
+                    linux_patch_api::jobs::upgrade_state::UpgradeState::installing(
+                        "startup", "", "",
+                    );
+                ready_state.to_ready();
+                if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
+                    error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
+                } else {
+                    notify_systemd_ready();
+                    if in_recovery_mode {
+                        warn!("Notifying systemd of degraded status (recovery mode)");
+                        notify_systemd_status(
+                            "Running in recovery mode — package operations blocked",
+                        );
+                    }
+                    linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+                    *self_update_owner_handle.write().await = None;
+                    info!("Self-update admission block cleared — server ready for mutations");
+                }
             }
+        } else if needs_state_finalize && repair_failed {
+            info!("Server starting in recovery mode — repair failed, mutations blocked");
+            notify_systemd_ready();
+            notify_systemd_status(
+                "Running in recovery mode — package operations blocked (repair failed)",
+            );
         } else {
             notify_systemd_ready();
             if in_recovery_mode {
