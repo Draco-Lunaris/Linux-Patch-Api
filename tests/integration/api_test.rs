@@ -24,7 +24,7 @@ async fn create_test_app() -> actix_web::App<impl actix_web::dev::ServiceFactory
     Error = actix_web::Error,
 >> {
     let job_manager = JobManager::new(5, 30).unwrap();
-    let backend = Box::new(AptBackend::new()) as Box<dyn linux_patch_api::packages::PackageManagerBackend>;
+    let backend = Box::new(AptBackend::with_system_runner()) as Box<dyn linux_patch_api::packages::PackageManagerBackend>;
     
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(backend);

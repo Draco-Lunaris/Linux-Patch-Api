@@ -423,15 +423,27 @@ pub async fn update_package(
                     "Self-update reserved atomically — flag set, job created, other endpoints rejecting new jobs"
                 );
 
-                // Write persistent upgrade state so the new process can
-                // reconcile on startup if this process crashes or is
-                // restarted. The state file survives process restarts,
-                // unlike the in-memory flag.
+                // Write persistent upgrade state — start in Reserving phase.
+                // The state file survives process restarts, unlike the in-memory flag.
                 let from_version = env!("CARGO_PKG_VERSION").to_string();
+                // Try to resolve the target version before installing.
+                let target_version = backend
+                    .get_candidate_version(&package_name)
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| from_version.clone());
+                if target_version != from_version {
+                    info!(
+                        from_version = %from_version,
+                        target_version = %target_version,
+                        "Resolved target version for self-update"
+                    );
+                } else {
+                    warn!("Could not resolve target version — using from_version as placeholder");
+                }
                 let upgrade_state = crate::jobs::upgrade_state::UpgradeState::installing(
                     &job_id.to_string(),
                     &from_version,
-                    &from_version, // target version unknown until apt resolves it
+                    &target_version,
                 );
                 if let Err(e) = crate::jobs::upgrade_state::write_state(&upgrade_state) {
                     warn!(error = %e, "Failed to write persistent upgrade state — self-update will proceed but crash recovery may not work correctly");
@@ -461,14 +473,76 @@ pub async fn update_package(
                     // Execute update
                     match backend_clone.update_package(&pkg_name) {
                         Ok(_) => {
-                            let _ = job_manager_clone.complete_job(&job_id_clone).await;
-                            info!(job_id = %job_id_clone, package = %pkg_name, "Self-update completed");
+                            info!(job_id = %job_id_clone, package = %pkg_name, "Self-update install completed");
 
-                            // Transition persistent state to restart_pending.
+                            // Transition to Verifying phase — check that the
+                            // installed version actually changed.
                             let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
                                 &job_id_clone.to_string(),
                                 &from_version,
+                                &target_version,
+                            );
+                            state.to_verifying();
+                            if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
+                                error!(error = %e, "Failed to write verifying upgrade state");
+                            }
+
+                            // Verify the installed version changed
+                            let installed_version = backend_clone
+                                .get_installed_version(&pkg_name)
+                                .unwrap_or(None);
+
+                            match &installed_version {
+                                Some(v) if v != &from_version => {
+                                    info!(
+                                        job_id = %job_id_clone,
+                                        from_version = %from_version,
+                                        installed_version = %v,
+                                        target_version = %target_version,
+                                        "Self-update verified — installed version changed"
+                                    );
+                                    let _ = job_manager_clone
+                                        .add_job_log(
+                                            &job_id_clone,
+                                            format!("Updated from {} to {}", from_version, v),
+                                        )
+                                        .await;
+                                }
+                                Some(v) if v == &from_version => {
+                                    warn!(
+                                        job_id = %job_id_clone,
+                                        installed_version = %v,
+                                        "Self-update was a no-op — installed version unchanged. Not restarting."
+                                    );
+                                    let _ = job_manager_clone
+                                        .add_job_log(
+                                            &job_id_clone,
+                                            "No update available — installed version unchanged"
+                                                .to_string(),
+                                        )
+                                        .await;
+                                    let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                                    // Release the self-update lock, clear state and marker
+                                    job_manager_clone.release_self_update(&job_id_clone).await;
+                                    crate::jobs::upgrade_state::clear_state();
+                                    crate::jobs::upgrade_state::clear_marker();
+                                    return;
+                                }
+                                _ => {
+                                    warn!(
+                                        job_id = %job_id_clone,
+                                        "Could not verify installed version after update — proceeding with restart"
+                                    );
+                                }
+                            }
+
+                            let _ = job_manager_clone.complete_job(&job_id_clone).await;
+
+                            // Transition to RestartPending
+                            let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
+                                &job_id_clone.to_string(),
                                 &from_version,
+                                &target_version,
                             );
                             state.to_restart_pending();
                             if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
@@ -518,7 +592,12 @@ pub async fn update_package(
                         // somehow took over, this is a no-op.
                         job_manager_clone.release_self_update(&job_id_clone).await;
                         crate::jobs::upgrade_state::clear_state();
-                        info!(package = %pkg_name, "Self-update failed — lock and state cleared, job endpoints accepting new jobs");
+                        // Also clear the marker in case the postinst already
+                        // created it (e.g. package was already at target version).
+                        // Without this, the next startup would see marker-without-
+                        // state and enter RecoveryMode unnecessarily.
+                        crate::jobs::upgrade_state::clear_marker();
+                        info!(package = %pkg_name, "Self-update failed — lock, state, and marker cleared, job endpoints accepting new jobs");
                     } else {
                         info!(package = %pkg_name, "Self-update succeeded — beginning state-based drain before restart");
 
@@ -568,19 +647,28 @@ pub async fn update_package(
                             );
                         }
 
-                        // Trigger the restart immediately. The postinst's 30s
-                        // timer is a fallback in case this call fails or the
-                        // process crashes before reaching this point.
+                        // Cancel the fallback timer before triggering the
+                        // restart. The marker file is the cancellation signal —
+                        // the timer's ExecStartPre checks for the marker and
+                        // aborts if it's gone. Removing it prevents a duplicate
+                        // restart from the fallback timer.
+                        info!(job_id = %job_id_clone, "Cancelling fallback restart timer by removing marker");
+                        crate::jobs::upgrade_state::clear_marker();
+
+                        // Trigger the restart immediately. restart_own_service
+                        // is fire-and-forget (spawn, not output) so it doesn't
+                        // block a tokio worker thread. The process will be
+                        // killed by the restart.
                         info!(job_id = %job_id_clone, "Initiating service restart after self-update drain");
                         match backend_clone.restart_own_service() {
                             Ok(_) => {
-                                info!(job_id = %job_id_clone, "Service restart command executed — process will be replaced");
+                                info!(job_id = %job_id_clone, "Service restart command spawned — process will be replaced");
                             }
                             Err(e) => {
                                 error!(
                                     job_id = %job_id_clone,
                                     error = ?e,
-                                    "Failed to trigger service restart — relying on postinst 30s fallback timer"
+                                    "Failed to trigger service restart — fallback timer was cancelled, manual restart may be needed"
                                 );
                             }
                         }

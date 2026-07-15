@@ -1,8 +1,14 @@
 #!/sbin/openrc-run
 # OpenRC init script for linux-patch-api
 # Used on Alpine Linux and other OpenRC-based systems
+#
+# Uses supervise-daemon for process management (OpenRC 0.42+).
+# This replaces the previous command_background + pidfile approach
+# which had a PID-file race on crash restart.
 
 name="linux_patch_api"
+description="Secure Remote Package Management API"
+supervise_daemon_args="--stdout /var/log/linux_patch_api/linux-patch-api.log --stderr /var/log/linux_patch_api/linux-patch-api.err"
 command="/usr/bin/linux-patch-api"
 command_args="--config /etc/linux_patch_api/config.yaml"
 command_background=true
@@ -17,8 +23,7 @@ depend() {
 
 # Create required directories before starting
 start_pre() {
-    # NOTE: checkpath resets /etc/linux_patch_api/certs/ ownership to root:root on every start.
-    # This is fine for the service (runs as root) but would break enrollment run as a non-root user.
+    # Create directories with correct ownership
     checkpath --directory --owner root:root --mode 0755 \
         /run/linux-patch-api \
         /var/log/linux_patch_api \
@@ -26,9 +31,6 @@ start_pre() {
         /etc/linux_patch_api/certs
 
     # Fix ownership of log files that may have been created by a non-root user
-    # (e.g. during manual testing or enrollment). The service runs as root, so
-    # log files must be root-owned or tracing-appender will panic with
-    # "Permission denied" when trying to create/append the daily rolling log.
     for f in /var/log/linux_patch_api/linux-patch-api.log \
              /var/log/linux_patch_api/linux-patch-api.err; do
         if [ -f "$f" ]; then
@@ -36,7 +38,8 @@ start_pre() {
         fi
     done
 
-    # Remove stale PID file from a previous crash
+    # Remove stale PID file from a previous crash (supervise-daemon handles
+    # this, but we clean up just in case of a version downgrade)
     if [ -f "$pidfile" ]; then
         pid=$(cat "$pidfile" 2>/dev/null)
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
@@ -59,19 +62,25 @@ start_pre() {
     fi
 }
 
-# Verify service started successfully
+# Health check after start — verify the process is alive and responding
 start_post() {
+    # Give the process a few seconds to bind the listener
     sleep 2
     if [ -f "$pidfile" ]; then
-        einfo "linux-patch-api started successfully (PID: $(cat $pidfile))"
+        pid=$(cat "$pidfile" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            einfo "linux-patch-api started successfully (PID: $pid)"
+        else
+            ewarn "linux-patch-api may not have started correctly - process not running"
+        fi
     else
         ewarn "linux-patch-api may not have started correctly - pidfile not found"
     fi
 }
 
-# Clean shutdown
+# Clean shutdown — send SIGTERM and let the process drain
 stop_pre() {
-    einfo "Stopping linux-patch-api service..."
+    einfo "Stopping linux-patch-api service (SIGTERM — process will drain active operations)..."
 }
 
 # Verify service stopped

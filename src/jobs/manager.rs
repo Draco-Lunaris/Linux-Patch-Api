@@ -333,8 +333,18 @@ impl JobManager {
         let _ = self.event_sender.send(event);
     }
 
-    /// Create a new job and return its ID
-    pub async fn create_job(&self, operation: JobOperation, packages: Vec<String>) -> Result<Uuid> {
+    /// Create a new job and return its ID.
+    ///
+    /// **WARNING**: This bypasses the self-update guard and queue capacity
+    /// check. Only use this when you have already performed admission checks
+    /// via `admit_job` or `try_reserve_self_update`, or in the emergency
+    /// reboot path where the caller has explicitly acknowledged the risk.
+    /// All normal job creation MUST go through `admit_job`.
+    pub async fn create_job_unchecked(
+        &self,
+        operation: JobOperation,
+        packages: Vec<String>,
+    ) -> Result<Uuid> {
         let job = Job::new(operation, packages);
         let job_id = job.id;
         let status = job.status.clone();
@@ -670,9 +680,9 @@ impl JobManager {
                     count: active_count,
                 });
             }
-
-            // 3. Check queue capacity
-            if active_count >= self.max_queue_depth {
+            // Queue capacity check: if max_queue_depth is 0 (misconfiguration),
+            // reject. Otherwise, active_count == 0 means we're below capacity.
+            if self.max_queue_depth == 0 {
                 return Err(SelfUpdateAdmissionError::QueueFull);
             }
         }

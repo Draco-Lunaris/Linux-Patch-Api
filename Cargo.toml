@@ -138,6 +138,10 @@ path = "tests/unit/self_update_guard_test.rs"
 name = "concurrency_invariant_test"
 path = "tests/unit/concurrency_invariant_test.rs"
 
+[[test]]
+name = "backend_error_test"
+path = "tests/unit/backend_error_test.rs"
+
 [[bench]]
 name = "api_benchmarks"
 harness = false

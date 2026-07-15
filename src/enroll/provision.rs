@@ -80,10 +80,11 @@ pub fn write_pem_file(path: &str, pem_data: &str, is_key: bool) -> Result<()> {
         }
     }
 
-    // Backup existing file if present
+    // Backup existing file if present — use copy (not rename) so the
+    // original stays in place if we crash before the new file is written.
     if path.exists() {
         let backup_path = format!("{}.bak", path.display());
-        fs::rename(path, &backup_path)
+        fs::copy(path, &backup_path)
             .with_context(|| format!("Failed to backup existing file: {}", path.display()))?;
         tracing::info!(
             original = %path.display(),
@@ -257,8 +258,13 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
                     .wait_with_output()
                     .context("gpg --dearmor process failed")?;
                 if output.status.success() {
-                    fs::write(&repo.keyring_path, &output.stdout).with_context(|| {
-                        format!("Failed to write dearmored key to {}", repo.keyring_path)
+                    // Atomic write: temp file + rename
+                    let tmp_path = format!("{}.tmp", repo.keyring_path);
+                    fs::write(&tmp_path, &output.stdout).with_context(|| {
+                        format!("Failed to write temp keyring file: {}", tmp_path)
+                    })?;
+                    fs::rename(&tmp_path, &repo.keyring_path).with_context(|| {
+                        format!("Failed to rename temp keyring to {}", repo.keyring_path)
                     })?;
                     // Set permissions (0644)
                     #[cfg(unix)]
@@ -300,8 +306,8 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
 
     // 2. Write sources config to distro-specific path
     let sources_path = match repo.distro_id.as_str() {
-        "ubuntu" | "debian" => "/etc/apt/sources.list.d/lpa.list".to_string(),
-        "fedora" | "rhel" | "almalinux" | "centos" | "rocky" => {
+        "ubuntu" | "debian" | "linuxmint" => "/etc/apt/sources.list.d/lpa.list".to_string(),
+        "fedora" | "rhel" | "almalinux" | "centos" | "rocky" | "amzn" => {
             // Ensure /etc/yum.repos.d exists
             fs::create_dir_all("/etc/yum.repos.d").ok();
             "/etc/yum.repos.d/lpa.repo".to_string()
@@ -314,12 +320,15 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
                 return Ok(());
             }
             let new_content = format!("{}\n{}\n", existing.trim_end(), repo.sources_config);
-            fs::write("/etc/apk/repositories", new_content)
-                .context("Failed to append to /etc/apk/repositories")?;
+            // Atomic write: temp file + rename
+            let tmp = "/etc/apk/repositories.tmp";
+            fs::write(tmp, &new_content).context("Failed to write temp /etc/apk/repositories")?;
+            fs::rename(tmp, "/etc/apk/repositories")
+                .context("Failed to rename /etc/apk/repositories")?;
             tracing::info!("Repo URL appended to /etc/apk/repositories");
             return Ok(());
         }
-        "arch" | "manjaro" => {
+        "arch" | "manjaro" | "endeavouros" => {
             // pacman: write include file
             fs::create_dir_all("/etc/pacman.d").ok();
             "/etc/pacman.d/lpa-repo".to_string()
@@ -332,8 +341,12 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
         }
     };
 
-    fs::write(&sources_path, &repo.sources_config)
-        .with_context(|| format!("Failed to write sources config to {}", sources_path))?;
+    // Atomic write for sources config: temp file + rename
+    let tmp_path = format!("{}.tmp", sources_path);
+    fs::write(&tmp_path, &repo.sources_config)
+        .with_context(|| format!("Failed to write sources config to temp file {}", tmp_path))?;
+    fs::rename(&tmp_path, &sources_path)
+        .with_context(|| format!("Failed to rename sources config to {}", sources_path))?;
     tracing::info!(
         distro = %repo.distro_id,
         sources = %sources_path,

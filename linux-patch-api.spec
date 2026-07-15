@@ -67,6 +67,12 @@ chmod 755 %{buildroot}/usr/bin/linux-patch-api
 cp configs/linux-patch-api.service %{buildroot}/lib/systemd/system/
 chmod 644 %{buildroot}/lib/systemd/system/linux-patch-api.service
 
+# Install upgrade-restart service and timer (same as Debian)
+cp configs/linux-patch-api-upgrade-restart.service %{buildroot}/lib/systemd/system/
+cp configs/linux-patch-api-upgrade-restart.timer %{buildroot}/lib/systemd/system/
+chmod 644 %{buildroot}/lib/systemd/system/linux-patch-api-upgrade-restart.service
+chmod 644 %{buildroot}/lib/systemd/system/linux-patch-api-upgrade-restart.timer
+
 mkdir -p %{buildroot}/usr/lib/linux-patch-api
 mkdir -p %{buildroot}/usr/lib/systemd/system
 
@@ -133,12 +139,14 @@ elif [ $1 -gt 1 ]; then
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
-    # Schedule a 30s delayed restart — the running process keeps
-    # serving on the old binary while files are replaced on disk.
-    # After 30s, systemd restarts the service and the new binary loads.
-    # The bidirectional self-update guard ensures no concurrent package
-    # operations are running during this window.
-    systemd-run --on-active=30s systemctl restart linux-patch-api.service
+    # Create upgrade-pending marker so the new process knows it's starting
+    # after a self-update restart. The state-aware timer will check the
+    # upgrade state file and restart when safe.
+    mkdir -p /var/lib/linux_patch_api
+    touch /var/lib/linux_patch_api/upgrade-pending
+    # Enable and start the state-aware restart timer
+    systemctl enable linux-patch-api-upgrade-restart.timer
+    systemctl start linux-patch-api-upgrade-restart.timer
 fi
 
 # Pre-uninstallation script
@@ -172,6 +180,8 @@ fi
 %defattr(-,root,root,-)
 /usr/bin/linux-patch-api
 /lib/systemd/system/linux-patch-api.service
+/lib/systemd/system/linux-patch-api-upgrade-restart.service
+/lib/systemd/system/linux-patch-api-upgrade-restart.timer
 %config(noreplace) /etc/linux_patch_api/config.yaml.example
 %config(noreplace) /etc/linux_patch_api/whitelist.yaml.example
 %ghost %config(noreplace) /etc/linux_patch_api/config.yaml

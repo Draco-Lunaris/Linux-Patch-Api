@@ -44,8 +44,8 @@ use linux_patch_api::packages::{AptBackend, InstallOptions, PackageManagerBacken
 #[test]
 #[serial_test::serial]
 fn test_concurrent_apt_operations_do_not_overlap() {
-    let backend1 = Arc::new(AptBackend::new());
-    let backend2 = Arc::new(AptBackend::new());
+    let backend1 = Arc::new(AptBackend::with_system_runner());
+    let backend2 = Arc::new(AptBackend::with_system_runner());
 
     // Barrier to ensure both threads start at approximately the same time.
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -135,8 +135,8 @@ fn test_concurrent_apt_operations_do_not_overlap() {
 #[test]
 #[serial_test::serial]
 fn test_second_operation_blocks_until_first_completes() {
-    let backend1 = Arc::new(AptBackend::new());
-    let backend2 = Arc::new(AptBackend::new());
+    let backend1 = Arc::new(AptBackend::with_system_runner());
+    let backend2 = Arc::new(AptBackend::with_system_runner());
 
     // Channel to signal when operation 1 has started (entered run_apt_safe)
     let (op1_started, op1_started_rx) = mpsc::channel::<Instant>();
@@ -236,7 +236,7 @@ fn test_is_operation_in_progress_false_at_rest() {
     // ensures this test runs alone, but the static flag may be left true if a
     // prior test was interrupted. We wait briefly for any in-progress operation
     // to complete.
-    let backend = AptBackend::new();
+    let backend = AptBackend::with_system_runner();
     for _ in 0..100 {
         if !backend.is_operation_in_progress() {
             break;
@@ -258,7 +258,7 @@ fn test_is_operation_in_progress_false_at_rest() {
 #[test]
 #[serial_test::serial]
 fn test_is_operation_in_progress_true_during_operation() {
-    let backend = Arc::new(AptBackend::new());
+    let backend = Arc::new(AptBackend::with_system_runner());
     let flag_seen_true = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
 
@@ -306,9 +306,9 @@ fn test_is_operation_in_progress_true_during_operation() {
 #[test]
 #[serial_test::serial]
 fn test_three_concurrent_apt_operations_complete_serially() {
-    let backend1 = Arc::new(AptBackend::new());
-    let backend2 = Arc::new(AptBackend::new());
-    let backend3 = Arc::new(AptBackend::new());
+    let backend1 = Arc::new(AptBackend::with_system_runner());
+    let backend2 = Arc::new(AptBackend::with_system_runner());
+    let backend3 = Arc::new(AptBackend::with_system_runner());
 
     let barrier = Arc::new(std::sync::Barrier::new(3));
 

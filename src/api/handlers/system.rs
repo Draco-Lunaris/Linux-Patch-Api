@@ -147,27 +147,31 @@ pub async fn health_check(
 
     let version = env!("CARGO_PKG_VERSION").to_string();
 
-    // Check cache status and refresh if stale
+    // Check cache status — report stale without synchronously refreshing.
+    // Health checks must NOT mutate package state. If the cache is stale,
+    // we spawn an async refresh task (best-effort) and report the current
+    // status immediately. This prevents health checks from racing with
+    // package operations on the dpkg/rpm/pacman frontend lock.
     let cache_status_val = cache_state.status();
     let (mut status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
-        match backend.refresh_package_cache(&cache_state) {
-            Ok(_) => {
-                let updated = cache_state.status();
-                (
-                    "healthy".to_string(),
-                    "fresh".to_string(),
-                    updated.last_update.map(|dt| dt.to_rfc3339()),
-                )
+        // Spawn a best-effort background refresh — do NOT block the health
+        // response. The task will acquire the mutation semaphore via the
+        // backend's refresh_package_cache method, so it won't race with
+        // in-progress operations.
+        let backend_clone = backend.clone();
+        let cache_state_clone = cache_state.clone();
+        actix_web::rt::spawn(async move {
+            if !backend_clone.is_operation_in_progress() {
+                if let Err(e) = backend_clone.refresh_package_cache(&cache_state_clone) {
+                    tracing::warn!(error = ?e, "Background cache refresh from health check failed");
+                }
             }
-            Err(e) => {
-                error!("Health check cache refresh failed: {}", e);
-                (
-                    "degraded".to_string(),
-                    "failed".to_string(),
-                    cache_status_val.last_update.map(|dt| dt.to_rfc3339()),
-                )
-            }
-        }
+        });
+        (
+            "healthy".to_string(),
+            "stale".to_string(),
+            cache_status_val.last_update.map(|dt| dt.to_rfc3339()),
+        )
     } else {
         (
             "healthy".to_string(),
@@ -347,7 +351,7 @@ pub async fn reboot_system(
             Err(crate::jobs::manager::JobAdmissionError::QueueFull)
         } else {
             job_manager
-                .create_job(JobOperation::Reboot, vec![])
+                .create_job_unchecked(JobOperation::Reboot, vec![])
                 .await
                 .map_err(|_| crate::jobs::manager::JobAdmissionError::QueueFull)
         }

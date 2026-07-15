@@ -6,6 +6,8 @@ name: CI/CD Pipeline
     tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ master ]
+  schedule:
+    - cron: '0 3 * * *'
 
 env:
   CARGO_TERM_COLOR: always
@@ -149,11 +151,62 @@ jobs:
       - name: Build binary
         run: cargo build
       - name: Verify --enroll flag exists
-        run: cargo run -- --help | grep -q '\-\-enroll'
+        run: cargo run -- --help | grep -q '\-\-enroll
+
+  fuzz:
+    name: Fuzz Tests
+    needs: [fmt, clippy]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        run: |
+          curl -sfL -H "Authorization: token ${{ secrets.GITEATOKEN }}" "https://gitea-lxc.moon-dragon.us/git-echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz" -o repo.tar.gz
+          tar -xzf repo.tar.gz --strip-components=1
+          rm -f repo.tar.gz
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -f install -y
+          sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+      - name: Run fuzz tests (5000 random iterations)
+        run: LPA_FUZZ_RANDOM_ITER=5000 cargo test --test concurrency_invariant_test -- fuzz_
+        env:
+          RUST_BACKTRACE: 1
+
+  fuzz-nightly:
+    name: Nightly Exhaustive Fuzz
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        run: |
+          curl -sfL -H "Authorization: token ${{ secrets.GITEATOKEN }}" "https://gitea-lxc.moon-dragon.us/git-echo/linux_patch_api/archive/${GITHUB_SHA}.tar.gz" -o repo.tar.gz
+          tar -xzf repo.tar.gz --strip-components=1
+          rm -f repo.tar.gz
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          . "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -f install -y
+          sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+      - name: Run exhaustive fuzz (50000 random + 10000 truncated)
+        run: |
+          LPA_FUZZ_RANDOM_ITER=50000 LPA_FUZZ_TRUNCATED_ITER=10000 cargo test --test concurrency_invariant_test -- fuzz_
+        env:
+          RUST_BACKTRACE: 1
 
   build-deb:
     name: Build Debian Package
-    needs: [fmt, clippy, test, enrollment-tests]
+    needs: [fmt, clippy, test, enrollment-tests, fuzz]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -196,7 +249,7 @@ jobs:
 
   build-deb-u2204:
     name: Build Debian Package (Ubuntu 22.04)
-    needs: [fmt, clippy, test, enrollment-tests]
+    needs: [fmt, clippy, test, enrollment-tests, fuzz]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
@@ -239,7 +292,7 @@ jobs:
 
   build-rpm:
     name: Build RPM Package
-    needs: [fmt, clippy, test, enrollment-tests]
+    needs: [fmt, clippy, test, enrollment-tests, fuzz]
     runs-on: fedora
     steps:
       - name: Checkout repository
@@ -300,7 +353,7 @@ jobs:
 
   build-apk:
     name: Build Alpine Package
-    needs: [fmt, clippy, test, enrollment-tests]
+    needs: [fmt, clippy, test, enrollment-tests, fuzz]
     runs-on: alpine
     steps:
       - name: Checkout repository
@@ -357,7 +410,7 @@ jobs:
 
   build-arch:
     name: Build Arch Package
-    needs: [fmt, clippy, test, enrollment-tests]
+    needs: [fmt, clippy, test, enrollment-tests, fuzz]
     runs-on: arch
     steps:
       - name: Checkout repository

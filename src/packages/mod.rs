@@ -5,13 +5,15 @@
 //! and pacman (Arch Linux) with pluggable backend architecture.
 
 pub mod cache;
+pub mod coordinator;
 pub mod error_utils;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use coordinator::CommandRunner;
 use error_utils::{format_error_for_cache, CommandError};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::sync::Arc;
 use tracing::info;
 
 /// Maximum allowed length for package names and version strings
@@ -219,6 +221,22 @@ pub trait PackageManagerBackend: Send + Sync {
         false
     }
 
+    /// Get the currently installed version of a package, or None if not installed.
+    /// Used by the self-update flow to verify the installed version changed
+    /// after an upgrade.
+    fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
+        let _ = name;
+        Ok(None)
+    }
+
+    /// Get the candidate (target) version for a package — the version that
+    /// `install` or `upgrade` would install. Used by self-update to persist
+    /// the expected target version before the operation begins.
+    fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
+        let _ = name;
+        Ok(None)
+    }
+
     /// Restart the agent's own service (not the whole system).
     ///
     /// On systemd: `systemctl restart linux-patch-api.service`
@@ -230,20 +248,248 @@ pub trait PackageManagerBackend: Send + Sync {
     fn restart_own_service(&self) -> Result<()> {
         let program = "systemctl";
         let args = ["restart", "linux-patch-api.service"];
-        let output = Command::new(program)
+        // Fire-and-forget: the process is about to be killed by the restart,
+        // so waiting for the command to complete is pointless and blocks a
+        // tokio worker thread. Spawn the command and return immediately.
+        std::process::Command::new(program)
             .args(args)
             .env("DEBIAN_FRONTEND", "noninteractive")
-            .output()
-            .context("Failed to execute service restart command")?;
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Service restart failed (exit {}): {}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+            .spawn()
+            .context("Failed to spawn service restart command")?;
+        info!("Service restart spawned (fire-and-forget)");
         Ok(())
     }
+}
+
+/// Shared helper: get system info via a command runner.
+/// Used by all backends to avoid duplicated `get_system_info` implementations.
+fn get_system_info_via_runner(runner: &dyn CommandRunner) -> Result<SystemInfo> {
+    let hostname = runner
+        .run("hostname", &[])
+        .ok()
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let os_info = std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .map(|content| {
+            let mut os = "Linux".to_string();
+            let mut version = "unknown".to_string();
+
+            for line in content.lines() {
+                if line.starts_with("PRETTY_NAME=") {
+                    os = line
+                        .trim_start_matches("PRETTY_NAME=")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
+                } else if line.starts_with("NAME=") {
+                    os = line
+                        .trim_start_matches("NAME=")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
+                } else if line.starts_with("VERSION=") {
+                    version = line
+                        .trim_start_matches("VERSION=")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
+                } else if line.starts_with("VERSION_ID=") {
+                    version = line
+                        .trim_start_matches("VERSION_ID=")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
+                }
+            }
+
+            (os, version)
+        })
+        .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
+
+    let kernel = runner
+        .run("uname", &["-r"])
+        .ok()
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let architecture = runner
+        .run("uname", &["-m"])
+        .ok()
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists()
+        || std::path::Path::new("/boot/.reboot-required").exists();
+
+    Ok(SystemInfo {
+        hostname,
+        os: os_info.0,
+        os_version: os_info.1,
+        kernel,
+        architecture,
+        last_update_check: None,
+        last_update_apply: None,
+        pending_reboot,
+    })
+}
+
+/// Shared helper: reboot the system via a command runner.
+fn reboot_system_via_runner(runner: &dyn CommandRunner, delay_seconds: u64) -> Result<()> {
+    if delay_seconds > 0 {
+        let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
+        info!(
+            "Scheduling system reboot in {} minutes (requested {} seconds)",
+            delay_minutes, delay_seconds
+        );
+        let delay_str = format!("+{}", delay_minutes);
+        coordinator::run_command(runner, "shutdown", &["-r", &delay_str])?;
+        info!("System reboot scheduled in {} minutes", delay_minutes);
+    } else {
+        info!("Initiating immediate system reboot");
+        coordinator::run_command(runner, "systemctl", &["reboot"])?;
+        info!("System reboot initiated");
+    }
+    Ok(())
+}
+
+/// Shared helper: query systemd service status via a command runner.
+fn get_systemd_service_status_via_runner(
+    runner: &dyn CommandRunner,
+    name: &str,
+) -> Result<Option<ServiceStatus>> {
+    let output = runner.run(
+        "systemctl",
+        &[
+            "show",
+            "--property=Id,Description,ActiveState,SubState,LoadState,UnitFileState,MainPID",
+            "--no-pager",
+            "--",
+            name,
+        ],
+    )?;
+
+    let success = output.success();
+    let stdout = output.stdout;
+
+    if !success || stdout.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut id = String::new();
+    let mut description = String::new();
+    let mut active_state = String::new();
+    let mut sub_state = String::new();
+    let mut load_state = String::new();
+    let mut unit_file_state = String::new();
+    let mut main_pid: Option<u32> = None;
+
+    for line in stdout.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "Id" => id = value.to_string(),
+                "Description" => description = value.to_string(),
+                "ActiveState" => active_state = value.to_string(),
+                "SubState" => sub_state = value.to_string(),
+                "LoadState" => load_state = value.to_string(),
+                "UnitFileState" => unit_file_state = value.to_string(),
+                "MainPID" => {
+                    main_pid = value.parse::<u32>().ok().filter(|&p| p > 0);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if load_state == "not-found" || load_state == "bad-setting" || id.is_empty() {
+        return Ok(None);
+    }
+
+    let healthy = active_state == "active" && sub_state == "running";
+
+    let healthy = if !healthy && active_state == "inactive" && unit_file_state == "enabled" {
+        let socket_name = format!("{}.socket", id.trim_end_matches(".service"));
+        if let Ok(socket_output) = runner.run(
+            "systemctl",
+            &["show", &socket_name, "--property=ActiveState", "--no-pager"],
+        ) {
+            if socket_output.stdout.contains("ActiveState=active") {
+                true
+            } else {
+                healthy
+            }
+        } else {
+            healthy
+        }
+    } else {
+        healthy
+    };
+
+    Ok(Some(ServiceStatus {
+        name: id,
+        display_name: description,
+        active_state,
+        sub_state,
+        load_state,
+        enabled_state: unit_file_state,
+        main_pid,
+        healthy,
+    }))
+}
+
+/// Shared helper: query OpenRC service status via a command runner.
+fn get_openrc_service_status_via_runner(
+    runner: &dyn CommandRunner,
+    name: &str,
+) -> Result<Option<ServiceStatus>> {
+    let output = runner.run("rc-service", &[name, "status"])?;
+
+    let stdout = output.stdout.clone();
+    let stderr = output.stderr.clone();
+
+    if !output.success() {
+        if stderr.contains("does not exist") || stdout.contains("does not exist") {
+            return Ok(None);
+        }
+        return Err(anyhow::anyhow!("rc-service failed: {}", stderr));
+    }
+
+    let status_line = stdout.lines().next().unwrap_or("").to_lowercase();
+
+    let (active_state, sub_state, healthy) =
+        if status_line.contains("started") || status_line.contains("running") {
+            ("active".to_string(), "running".to_string(), true)
+        } else if status_line.contains("stopped") || status_line.contains("not running") {
+            ("inactive".to_string(), "dead".to_string(), false)
+        } else if status_line.contains("crashed") || status_line.contains("failed") {
+            ("failed".to_string(), "failed".to_string(), false)
+        } else {
+            ("unknown".to_string(), "unknown".to_string(), false)
+        };
+
+    let enabled_output = runner.run("rc-update", &["show", "default"]).ok();
+
+    let enabled_state = enabled_output
+        .map(|o| {
+            if o.stdout.lines().any(|l| l.trim().starts_with(name)) {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(Some(ServiceStatus {
+        name: name.to_string(),
+        display_name: name.to_string(),
+        active_state,
+        sub_state,
+        load_state: "loaded".to_string(),
+        enabled_state,
+        main_pid: None,
+        healthy,
+    }))
 }
 
 /// Package specification for installation
@@ -260,7 +506,7 @@ pub struct PackageSpec {
 /// leave the package manager in a broken state) and ensures that dpkg cleanup
 /// (`dpkg --configure -a`) runs atomically before/after every operation.
 pub struct AptBackend {
-    _marker: std::marker::PhantomData<()>,
+    runner: Arc<dyn CommandRunner>,
 }
 
 /// Process-wide mutex serializing all apt/dpkg operations.
@@ -274,10 +520,13 @@ static APT_IN_PROGRESS: std::sync::OnceLock<std::sync::atomic::AtomicBool> =
     std::sync::OnceLock::new();
 
 impl AptBackend {
-    pub fn new() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
+    pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
+        Self { runner }
+    }
+
+    /// Create with the default system command runner.
+    pub fn with_system_runner() -> Self {
+        Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
     fn get_apt_mutex() -> &'static std::sync::Mutex<()> {
@@ -387,48 +636,36 @@ impl AptBackend {
         // Without this, apt-get can hang forever waiting for input on a TTY-less
         // service, and a subsequent SIGKILL leaves dpkg mid-transaction.
         let program = "apt-get";
-        let output = match Command::new(program)
-            .args(args)
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .output()
-        {
+        let output = match self.runner.run(program, args) {
             Ok(o) => o,
             Err(e) => {
-                let err = anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                    .context("Failed to execute apt command");
-                // Cleanup on spawn failure (unlikely but possible)
+                let err = e.context("Failed to execute apt command");
                 let _ = self.ensure_dpkg_clean();
-                // Flag is cleared by _in_progress_guard drop
                 return Err(err);
             }
         };
 
-        if !output.status.success() {
-            let err = anyhow::Error::new(CommandError::from_output(program, args, &output));
+        if !output.success() {
+            let err = anyhow::Error::new(CommandError {
+                program: program.to_string(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+                exit_code: output.status_code,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
+                spawn_error: None,
+            });
 
-            // Cleanup: run dpkg --configure -a after ANY apt failure, not just
-            // dependency errors. A lock contention, disk space error, network
-            // timeout, or OOM kill can all leave packages half-configured.
             tracing::warn!(error = ?err, "apt-get failed — running dpkg --configure -a cleanup");
             let _ = self.ensure_dpkg_clean();
 
-            // Flag is cleared by _in_progress_guard drop
             return Err(err);
         }
 
-        // Post-verification: apt-get exited 0, but dpkg triggers may not have
-        // completed (known edge case with kernel packages + initramfs-tools).
         let verify_result = self.verify_dpkg_clean();
 
-        // Flag is cleared by _in_progress_guard drop
-
-        // Audit found problems even after cleanup. This is a serious state —
-        // the operation partially succeeded. Return an error so the manager
-        // knows the system needs attention, but the dpkg state is at least
-        // as clean as we could make it.
         verify_result?;
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(output.stdout)
     }
 
     /// Run apt command and capture output.
@@ -442,24 +679,7 @@ impl AptBackend {
 
     /// Run dpkg command and capture output.
     fn run_dpkg(&self, args: &[&str]) -> Result<String> {
-        let program = "dpkg";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute dpkg command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "dpkg", args)
     }
 
     /// Run `apt` (the user-facing CLI, not apt-get) for list/query operations.
@@ -469,24 +689,7 @@ impl AptBackend {
     /// stderr and a "Listing..." header to stdout, both of which are handled by the
     /// caller. The exit code is 0 on success.
     fn run_apt_cli(&self, args: &[&str]) -> Result<String> {
-        let program = "apt";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute apt command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "apt", args)
     }
 
     /// Run `apt-cache` for query operations like `policy` and `search`.
@@ -494,24 +697,7 @@ impl AptBackend {
     /// `apt-cache` is the scripting-safe tool for package queries. `apt-get` does not
     /// support `policy` — it's an `apt-cache` operation.
     fn run_apt_cache(&self, args: &[&str]) -> Result<String> {
-        let program = "apt-cache";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute apt-cache command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "apt-cache", args)
     }
 
     /// Parse package list from `apt list` output.
@@ -684,13 +870,15 @@ impl PackageManagerBackend for AptBackend {
             args.push("--no-install-recommends".to_string());
         }
 
-        // SECURITY: --force-yes bypasses GPG signature verification and is a security risk.
+        // SECURITY: --allow-unauthenticated bypasses GPG signature verification.
         // Only allow when explicitly requested; log a warning.
+        // Note: --force-yes was removed in apt 1.1 (2015). --allow-unauthenticated
+        // is the modern equivalent.
         if options.force {
             tracing::warn!(
-                "--force-yes requested: package signature verification will be bypassed"
+                "--allow-unauthenticated requested: package signature verification will be bypassed"
             );
-            args.push("--force-yes".to_string());
+            args.push("--allow-unauthenticated".to_string());
         }
 
         // SECURITY: Insert -- separator before user-supplied package names to prevent
@@ -842,138 +1030,23 @@ impl PackageManagerBackend for AptBackend {
     }
 
     fn get_system_info(&self) -> Result<SystemInfo> {
-        let hostname = Command::new("hostname")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let os_info = std::fs::read_to_string("/etc/os-release")
-            .ok()
-            .map(|content| {
-                let mut os = "Linux".to_string();
-                let mut version = "unknown".to_string();
-
-                for line in content.lines() {
-                    if line.starts_with("PRETTY_NAME=") {
-                        os = line
-                            .trim_start_matches("PRETTY_NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("NAME=") {
-                        os = line
-                            .trim_start_matches("NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION=") {
-                        version = line
-                            .trim_start_matches("VERSION=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    }
-                }
-
-                (os, version)
-            })
-            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
-
-        let kernel = Command::new("uname")
-            .arg("-r")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let architecture = Command::new("uname")
-            .arg("-m")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // Check if reboot is pending
-        let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists();
-
-        Ok(SystemInfo {
-            hostname,
-            os: os_info.0,
-            os_version: os_info.1,
-            kernel,
-            architecture,
-            last_update_check: None,
-            last_update_apply: None,
-            pending_reboot,
-        })
+        get_system_info_via_runner(self.runner.as_ref())
     }
 
     fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
-        if delay_seconds > 0 {
-            // Use shutdown command for delayed reboot (converts seconds to minutes, minimum 1)
-            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
-            info!(
-                "Scheduling system reboot in {} minutes (requested {} seconds)",
-                delay_minutes, delay_seconds
-            );
-            let program = "shutdown";
-            let args = ["-r", &format!("+{}", delay_minutes)];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to schedule delayed reboot"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot scheduled in {} minutes", delay_minutes);
-        } else {
-            // Immediate reboot using systemctl
-            info!("Initiating immediate system reboot");
-            let program = "systemctl";
-            let args = ["reboot"];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to execute reboot command"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot initiated");
-        }
-
-        Ok(())
+        reboot_system_via_runner(self.runner.as_ref(), delay_seconds)
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // SECURITY: Strict allowlist validation to prevent argument/shell injection
         validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        // Determine init system and query accordingly
         let is_systemd = std::path::Path::new("/run/systemd/system").exists();
         let is_openrc = std::path::Path::new("/sbin/openrc").exists();
 
         if is_systemd {
-            get_systemd_service_status(name)
+            get_systemd_service_status_via_runner(self.runner.as_ref(), name)
         } else if is_openrc {
-            get_openrc_service_status(name)
+            get_openrc_service_status_via_runner(self.runner.as_ref(), name)
         } else {
             Err(anyhow::anyhow!(
                 "No supported init system detected (systemd or OpenRC required)"
@@ -983,7 +1056,10 @@ impl PackageManagerBackend for AptBackend {
 
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing APT package cache");
-        match cache::run_command_with_timeout("apt-get", &["update"]) {
+        // Route through run_apt_safe so cache refresh acquires the APT mutex
+        // and sets APT_IN_PROGRESS. This prevents concurrent apt-get update
+        // and apt-get install from racing on the dpkg frontend lock.
+        match self.run_apt(&["update"]) {
             Ok(_) => {
                 cache_state.update_success();
                 info!("APT package cache refreshed successfully");
@@ -1004,197 +1080,64 @@ impl PackageManagerBackend for AptBackend {
     fn is_operation_in_progress(&self) -> bool {
         Self::get_apt_in_progress().load(std::sync::atomic::Ordering::SeqCst)
     }
-}
 
-/// Query systemd service status via systemctl
-fn get_systemd_service_status(name: &str) -> Result<Option<ServiceStatus>> {
-    // SECURITY: -- separator prevents argument injection via service name
-    // Must be placed AFTER all options so systemctl treats only the name as positional
-    let output = Command::new("systemctl")
-        .args([
-            "show",
-            "--property=Id,Description,ActiveState,SubState,LoadState,UnitFileState,MainPID",
-            "--no-pager",
-            "--",
-            name,
-        ])
-        .output()
-        .context("Failed to execute systemctl command")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // If systemctl returns non-zero or empty output, service doesn't exist
-    if !output.status.success() || stdout.trim().is_empty() {
-        return Ok(None);
-    }
-
-    let mut id = String::new();
-    let mut description = String::new();
-    let mut active_state = String::new();
-    let mut sub_state = String::new();
-    let mut load_state = String::new();
-    let mut unit_file_state = String::new();
-    let mut main_pid: Option<u32> = None;
-
-    for line in stdout.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            match key {
-                "Id" => id = value.to_string(),
-                "Description" => description = value.to_string(),
-                "ActiveState" => active_state = value.to_string(),
-                "SubState" => sub_state = value.to_string(),
-                "LoadState" => load_state = value.to_string(),
-                "UnitFileState" => unit_file_state = value.to_string(),
-                "MainPID" => {
-                    main_pid = value.parse::<u32>().ok().filter(|&p| p > 0);
+    fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
+        match self.run_dpkg(&["-s", name]) {
+            Ok(output) => {
+                for line in output.lines() {
+                    if line.starts_with("Version:") {
+                        let version = line.trim_start_matches("Version:").trim().to_string();
+                        if !version.is_empty() {
+                            return Ok(Some(version));
+                        }
+                    }
                 }
-                _ => {}
+                Ok(None)
             }
+            Err(_) => Ok(None),
         }
     }
 
-    // If LoadState is not-found or bad-setting, service doesn't exist
-    if load_state == "not-found" || load_state == "bad-setting" || id.is_empty() {
-        return Ok(None);
-    }
-
-    let healthy = active_state == "active" && sub_state == "running";
-
-    // Check for socket activation: if service is inactive but enabled,
-    // check if the corresponding .socket unit is active (listening)
-    let healthy = if !healthy && active_state == "inactive" && unit_file_state == "enabled" {
-        // Use the resolved service name (id) instead of input name,
-        // so "sshd" resolves to "ssh.service" → "ssh.socket" correctly
-        let socket_name = format!("{}.socket", id.trim_end_matches(".service"));
-        if let Ok(socket_output) = Command::new("systemctl")
-            .args(["show", &socket_name, "--property=ActiveState", "--no-pager"])
-            .output()
-        {
-            let socket_stdout = String::from_utf8_lossy(&socket_output.stdout);
-            if socket_stdout.contains("ActiveState=active") {
-                true
-            } else {
-                healthy
+    fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
+        match self.run_apt_cache(&["policy", name]) {
+            Ok(output) => {
+                for line in output.lines() {
+                    if line.contains("Candidate:") {
+                        let version = line.split_whitespace().nth(1).map(|s| s.to_string());
+                        return Ok(version);
+                    }
+                }
+                Ok(None)
             }
-        } else {
-            healthy
+            Err(_) => Ok(None),
         }
-    } else {
-        healthy
-    };
-
-    Ok(Some(ServiceStatus {
-        name: id,
-        display_name: description,
-        active_state,
-        sub_state,
-        load_state,
-        enabled_state: unit_file_state,
-        main_pid,
-        healthy,
-    }))
-}
-
-/// Query OpenRC service status via rc-service
-fn get_openrc_service_status(name: &str) -> Result<Option<ServiceStatus>> {
-    let output = Command::new("rc-service")
-        .args([name, "status"])
-        .output()
-        .context("Failed to execute rc-service command")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    // rc-service returns error if service doesn't exist
-    if !output.status.success() {
-        if stderr.contains("does not exist") || stdout.contains("does not exist") {
-            return Ok(None);
-        }
-        return Err(anyhow::anyhow!("rc-service failed: {}", stderr));
     }
-
-    // Parse rc-service status output
-    let status_line = stdout.lines().next().unwrap_or("").to_lowercase();
-
-    let (active_state, sub_state, healthy) =
-        if status_line.contains("started") || status_line.contains("running") {
-            ("active".to_string(), "running".to_string(), true)
-        } else if status_line.contains("stopped") || status_line.contains("not running") {
-            ("inactive".to_string(), "dead".to_string(), false)
-        } else if status_line.contains("crashed") || status_line.contains("failed") {
-            ("failed".to_string(), "failed".to_string(), false)
-        } else {
-            ("unknown".to_string(), "unknown".to_string(), false)
-        };
-
-    // Check if service is enabled using rc-update
-    let enabled_output = Command::new("rc-update")
-        .args(["show", "default"])
-        .output()
-        .ok();
-
-    let enabled_state = enabled_output
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| {
-            if s.lines().any(|l| l.trim().starts_with(name)) {
-                "enabled".to_string()
-            } else {
-                "disabled".to_string()
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    Ok(Some(ServiceStatus {
-        name: name.to_string(),
-        display_name: name.to_string(),
-        active_state,
-        sub_state,
-        load_state: "loaded".to_string(),
-        enabled_state,
-        main_pid: None,
-        healthy,
-    }))
 }
 
 impl Default for AptBackend {
     fn default() -> Self {
-        Self::new()
+        Self::with_system_runner()
     }
 }
 
 /// APK package manager backend (Alpine Linux)
 pub struct ApkBackend {
-    _marker: std::marker::PhantomData<()>,
+    runner: Arc<dyn CommandRunner>,
 }
 
 impl ApkBackend {
-    pub fn new() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
+    pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
+        Self { runner }
+    }
+
+    /// Create with the default system command runner.
+    pub fn with_system_runner() -> Self {
+        Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
     /// Run apk command and capture output.
     fn run_apk(&self, args: &[&str]) -> Result<String> {
-        // Service runs as root on Alpine - no sudo needed for apk commands
-        let program = "apk";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute apk command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "apk", args)
     }
 
     /// Parse name and version from apk package identifier (name-version format).
@@ -1557,145 +1500,29 @@ impl PackageManagerBackend for ApkBackend {
     }
 
     fn get_system_info(&self) -> Result<SystemInfo> {
-        let hostname = Command::new("hostname")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let os_info = std::fs::read_to_string("/etc/os-release")
-            .ok()
-            .map(|content| {
-                let mut os = "Linux".to_string();
-                let mut version = "unknown".to_string();
-
-                for line in content.lines() {
-                    if line.starts_with("PRETTY_NAME=") {
-                        os = line
-                            .trim_start_matches("PRETTY_NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("NAME=") {
-                        os = line
-                            .trim_start_matches("NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION=") {
-                        version = line
-                            .trim_start_matches("VERSION=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION_ID=") {
-                        version = line
-                            .trim_start_matches("VERSION_ID=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    }
-                }
-
-                (os, version)
-            })
-            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
-
-        let kernel = Command::new("uname")
-            .arg("-r")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let architecture = Command::new("uname")
-            .arg("-m")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // Alpine uses /boot/.reboot-required for reboot indicator,
-        // also check /var/run/reboot-required as a fallback
-        let pending_reboot = std::path::Path::new("/boot/.reboot-required").exists()
-            || std::path::Path::new("/var/run/reboot-required").exists();
-
-        Ok(SystemInfo {
-            hostname,
-            os: os_info.0,
-            os_version: os_info.1,
-            kernel,
-            architecture,
-            last_update_check: None,
-            last_update_apply: None,
-            pending_reboot,
-        })
+        get_system_info_via_runner(self.runner.as_ref())
     }
 
     fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
         if delay_seconds > 0 {
-            // Use shutdown command for delayed reboot (converts seconds to minutes, minimum 1)
-            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
-            info!(
-                "Scheduling system reboot in {} minutes (requested {} seconds)",
-                delay_minutes, delay_seconds
-            );
-            let program = "shutdown";
-            let args = ["-r", &format!("+{}", delay_minutes)];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to schedule delayed reboot"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot scheduled in {} minutes", delay_minutes);
+            reboot_system_via_runner(self.runner.as_ref(), delay_seconds)
         } else {
             // Alpine uses `reboot` command, not `systemctl reboot`
             info!("Initiating immediate system reboot");
-            let program = "reboot";
-            let args: [&str; 0] = [];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to execute reboot command"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
+            coordinator::run_command(self.runner.as_ref(), "reboot", &[])?;
             info!("System reboot initiated");
+            Ok(())
         }
-
-        Ok(())
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // SECURITY: Strict allowlist validation to prevent argument/shell injection
         validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        // Alpine uses OpenRC for service management
-        get_openrc_service_status(name)
+        get_openrc_service_status_via_runner(self.runner.as_ref(), name)
     }
 
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing APK package cache");
-        match cache::run_command_with_timeout("apk", &["update"]) {
+        match self.run_apk(&["update"]) {
             Ok(_) => {
                 cache_state.update_success();
                 info!("APK package cache refreshed successfully");
@@ -1714,83 +1541,77 @@ impl PackageManagerBackend for ApkBackend {
     }
 
     fn restart_own_service(&self) -> Result<()> {
-        let program = "rc-service";
-        let args = ["linux-patch-api", "restart"];
-        let output = Command::new(program)
-            .args(args)
-            .output()
-            .context("Failed to execute rc-service restart")?;
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "rc-service restart failed (exit {}): {}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        // Fire-and-forget: spawn the command, don't wait for it.
+        std::process::Command::new("rc-service")
+            .args(["linux-patch-api", "restart"])
+            .spawn()
+            .context("Failed to spawn rc-service restart")?;
+        info!("rc-service restart spawned (fire-and-forget)");
         Ok(())
+    }
+
+    fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
+        match self.run_apk(&["list", "--installed", name]) {
+            Ok(output) => {
+                for line in output.lines() {
+                    if line.contains(name) {
+                        let (_, version) = self.parse_name_version(line.trim());
+                        if !version.is_empty() {
+                            return Ok(Some(version));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
+        match self.run_apk(&["info", name]) {
+            Ok(output) => {
+                if let Some(first_line) = output.lines().next() {
+                    let (_, version) = self.parse_name_version(first_line.trim());
+                    if !version.is_empty() {
+                        return Ok(Some(version));
+                    }
+                }
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
     }
 }
 
 impl Default for ApkBackend {
     fn default() -> Self {
-        Self::new()
+        Self::with_system_runner()
     }
 }
 
 /// DNF package manager backend (Fedora/RHEL/CentOS 8+)
 pub struct DnfBackend {
-    _marker: std::marker::PhantomData<()>,
+    runner: Arc<dyn CommandRunner>,
 }
 
 impl DnfBackend {
-    pub fn new() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
+    pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
+        Self { runner }
+    }
+
+    /// Create with the default system command runner.
+    pub fn with_system_runner() -> Self {
+        Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
     /// Run dnf command and capture output.
     fn run_dnf(&self, args: &[&str]) -> Result<String> {
-        let program = "dnf";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute dnf command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "dnf", args)
     }
 
     /// Run rpm command and capture output.
     fn run_rpm(&self, args: &[&str]) -> Result<String> {
-        let program = "rpm";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute rpm command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "rpm", args)
     }
 
     /// Parse name and version from RPM package identifier (name-version-release.arch).
@@ -1911,14 +1732,12 @@ impl DnfBackend {
 
         // Check if upgradable via dnf check-update
         // dnf check-update returns exit code 100 when updates are available
-        let check_output = Command::new("dnf")
-            .args(["check-update", "-q", name])
-            .output();
+        let check_output = self.runner.run("dnf", &["check-update", "-q", name]);
 
         let (upgradable, latest_version) = match check_output {
-            Ok(ref o) if o.status.code() == Some(100) => {
+            Ok(ref o) if o.status_code == Some(100) => {
                 // Updates available - try to parse the available version
-                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stdout = &o.stdout;
                 let candidate = stdout.lines().find_map(|line| {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 && parts[0].starts_with(name) {
@@ -1999,11 +1818,11 @@ impl PackageManagerBackend for DnfBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via dnf
-            let search_output = Command::new("dnf").args(["info", "-q", name]).output();
+            let search_output = self.runner.run("dnf", &["info", "-q", name]);
 
             if let Ok(output) = search_output {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
+                if output.success() {
+                    let stdout = &output.stdout;
                     // Parse available package info from dnf info output
                     let mut version = String::new();
                     let mut release = String::new();
@@ -2105,27 +1924,14 @@ impl PackageManagerBackend for DnfBackend {
     fn list_patches(&self) -> Result<Vec<Patch>> {
         // dnf check-update returns exit code 100 when updates are available,
         // exit code 0 when no updates, and other codes for errors.
-        let program = "dnf";
-        let args = ["check-update", "-q"];
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, &args, &e))
-                        .context("Failed to execute dnf check-update"),
-                );
-            }
-        };
+        let output = coordinator::run_command_with_acceptable_exit(
+            self.runner.as_ref(),
+            "dnf",
+            &["check-update", "-q"],
+            &[0, 100],
+        )?;
 
-        // Exit code 100 means updates available, 0 means no updates
-        let exit_code = output.status.code().unwrap_or(-1);
-        if exit_code != 100 && exit_code != 0 {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, &args, &output,
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = output;
         let mut patches = Vec::new();
 
         for line in stdout.lines() {
@@ -2200,236 +2006,116 @@ impl PackageManagerBackend for DnfBackend {
     }
 
     fn get_system_info(&self) -> Result<SystemInfo> {
-        let hostname = Command::new("hostname")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let os_info = std::fs::read_to_string("/etc/os-release")
-            .ok()
-            .map(|content| {
-                let mut os = "Linux".to_string();
-                let mut version = "unknown".to_string();
-
-                for line in content.lines() {
-                    if line.starts_with("PRETTY_NAME=") {
-                        os = line
-                            .trim_start_matches("PRETTY_NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("NAME=") {
-                        os = line
-                            .trim_start_matches("NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION=") {
-                        version = line
-                            .trim_start_matches("VERSION=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION_ID=") {
-                        version = line
-                            .trim_start_matches("VERSION_ID=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    }
-                }
-
-                (os, version)
-            })
-            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
-
-        let kernel = Command::new("uname")
-            .arg("-r")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let architecture = Command::new("uname")
-            .arg("-m")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // RPM-based systems use /var/run/reboot-required or need-reboot plugin
-        let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists();
-
-        Ok(SystemInfo {
-            hostname,
-            os: os_info.0,
-            os_version: os_info.1,
-            kernel,
-            architecture,
-            last_update_check: None,
-            last_update_apply: None,
-            pending_reboot,
-        })
+        get_system_info_via_runner(self.runner.as_ref())
     }
 
     fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
-        if delay_seconds > 0 {
-            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
-            info!(
-                "Scheduling system reboot in {} minutes (requested {} seconds)",
-                delay_minutes, delay_seconds
-            );
-            let program = "shutdown";
-            let args = ["-r", &format!("+{}", delay_minutes)];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to schedule delayed reboot"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot scheduled in {} minutes", delay_minutes);
-        } else {
-            info!("Initiating immediate system reboot");
-            let program = "systemctl";
-            let args = ["reboot"];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to execute reboot command"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot initiated");
-        }
-
-        Ok(())
+        reboot_system_via_runner(self.runner.as_ref(), delay_seconds)
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // SECURITY: Strict allowlist validation to prevent argument/shell injection
         validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        // Fedora/RHEL use systemd for service management
-        get_systemd_service_status(name)
+        get_systemd_service_status_via_runner(self.runner.as_ref(), name)
     }
 
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing DNF package cache");
         // dnf check-update returns exit code 100 when updates are available (not an error).
-        // run_command_with_timeout treats non-zero as failure, so we run directly.
-        let program = "dnf";
-        let args = ["check-update", "--refresh"];
-        let output = match std::process::Command::new(program)
-            .args(args)
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .output()
-        {
-            Ok(o) => o,
-            Err(e) => {
-                let err = anyhow::Error::new(CommandError::from_spawn_error(program, &args, &e))
-                    .context("Failed to execute dnf check-update");
-                cache_state.update_failure(format_error_for_cache(&err));
-                return Err(err);
+        match coordinator::run_command_with_acceptable_exit(
+            self.runner.as_ref(),
+            "dnf",
+            &["check-update", "--refresh"],
+            &[0, 100],
+        ) {
+            Ok(_) => {
+                cache_state.update_success();
+                info!("DNF package cache refreshed successfully");
+                Ok(())
             }
-        };
-
-        let exit_code = output.status.code().unwrap_or(-1);
-        // Exit code 0 = no updates, 100 = updates available — both are success
-        if exit_code == 0 || exit_code == 100 {
-            cache_state.update_success();
-            info!("DNF package cache refreshed successfully");
-            Ok(())
-        } else {
-            let err = anyhow::Error::new(CommandError::from_output(program, &args, &output));
-            cache_state.update_failure(format_error_for_cache(&err));
-            Err(err)
+            Err(e) => {
+                let err_msg = format!("DNF cache refresh failed: {}", format_error_for_cache(&e));
+                cache_state.update_failure(err_msg);
+                Err(e)
+            }
         }
     }
 
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
+        match self.run_rpm(&["-q", "--qf", "%{VERSION}-%{RELEASE}", name]) {
+            Ok(output) => {
+                let version = output.trim().to_string();
+                if !version.is_empty() {
+                    Ok(Some(version))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
+        let output = self.runner.run("dnf", &["info", "-q", name]);
+        match output {
+            Ok(o) if o.success() => {
+                let stdout = &o.stdout;
+                let mut version = String::new();
+                let mut release = String::new();
+                for line in stdout.lines() {
+                    if line.starts_with("Version") {
+                        version = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                    } else if line.starts_with("Release") {
+                        release = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                    }
+                }
+                if !version.is_empty() {
+                    if release.is_empty() {
+                        Ok(Some(version))
+                    } else {
+                        Ok(Some(format!("{}-{}", version, release)))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl Default for DnfBackend {
     fn default() -> Self {
-        Self::new()
+        Self::with_system_runner()
     }
 }
 
 /// YUM package manager backend (RHEL/CentOS 7)
 pub struct YumBackend {
-    _marker: std::marker::PhantomData<()>,
+    runner: Arc<dyn CommandRunner>,
 }
 
 impl YumBackend {
-    pub fn new() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
+    pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
+        Self { runner }
+    }
+
+    /// Create with the default system command runner.
+    pub fn with_system_runner() -> Self {
+        Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
     /// Run yum command and capture output.
     fn run_yum(&self, args: &[&str]) -> Result<String> {
-        let program = "yum";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute yum command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "yum", args)
     }
 
     /// Run rpm command and capture output.
     fn run_rpm(&self, args: &[&str]) -> Result<String> {
-        let program = "rpm";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute rpm command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "rpm", args)
     }
 
     /// Parse name and version from RPM package identifier (name-version-release.arch).
@@ -2540,14 +2226,11 @@ impl YumBackend {
 
         // Check if upgradable via yum check-update
         // yum check-update returns exit code 100 when updates are available
-        let check_output = Command::new("yum")
-            .args(["check-update", "-q", name])
-            .output();
+        let check_output = self.runner.run("yum", &["check-update", "-q", name]);
 
         let (upgradable, latest_version) = match check_output {
-            Ok(ref o) if o.status.code() == Some(100) => {
-                // Updates available - try to parse the available version
-                let stdout = String::from_utf8_lossy(&o.stdout);
+            Ok(ref o) if o.status_code == Some(100) => {
+                let stdout = &o.stdout;
                 let candidate = stdout.lines().find_map(|line| {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 && parts[0].starts_with(name) {
@@ -2622,11 +2305,11 @@ impl PackageManagerBackend for YumBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via yum
-            let search_output = Command::new("yum").args(["info", "-q", name]).output();
+            let search_output = self.runner.run("yum", &["info", "-q", name]);
 
             if let Ok(output) = search_output {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
+                if output.success() {
+                    let stdout = &output.stdout;
                     let mut version = String::new();
                     let mut release = String::new();
                     let mut description = String::new();
@@ -2722,27 +2405,12 @@ impl PackageManagerBackend for YumBackend {
     }
 
     fn list_patches(&self) -> Result<Vec<Patch>> {
-        // yum check-update returns exit code 100 when updates are available
-        let program = "yum";
-        let args = ["check-update", "-q"];
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, &args, &e))
-                        .context("Failed to execute yum check-update"),
-                );
-            }
-        };
-
-        let exit_code = output.status.code().unwrap_or(-1);
-        if exit_code != 100 && exit_code != 0 {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, &args, &output,
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = coordinator::run_command_with_acceptable_exit(
+            self.runner.as_ref(),
+            "yum",
+            &["check-update", "-q"],
+            &[0, 100],
+        )?;
         let mut patches = Vec::new();
 
         for line in stdout.lines() {
@@ -2812,140 +2480,21 @@ impl PackageManagerBackend for YumBackend {
     }
 
     fn get_system_info(&self) -> Result<SystemInfo> {
-        let hostname = Command::new("hostname")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let os_info = std::fs::read_to_string("/etc/os-release")
-            .ok()
-            .map(|content| {
-                let mut os = "Linux".to_string();
-                let mut version = "unknown".to_string();
-
-                for line in content.lines() {
-                    if line.starts_with("PRETTY_NAME=") {
-                        os = line
-                            .trim_start_matches("PRETTY_NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("NAME=") {
-                        os = line
-                            .trim_start_matches("NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION=") {
-                        version = line
-                            .trim_start_matches("VERSION=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION_ID=") {
-                        version = line
-                            .trim_start_matches("VERSION_ID=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    }
-                }
-
-                (os, version)
-            })
-            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
-
-        let kernel = Command::new("uname")
-            .arg("-r")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let architecture = Command::new("uname")
-            .arg("-m")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists();
-
-        Ok(SystemInfo {
-            hostname,
-            os: os_info.0,
-            os_version: os_info.1,
-            kernel,
-            architecture,
-            last_update_check: None,
-            last_update_apply: None,
-            pending_reboot,
-        })
+        get_system_info_via_runner(self.runner.as_ref())
     }
 
     fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
-        if delay_seconds > 0 {
-            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
-            info!(
-                "Scheduling system reboot in {} minutes (requested {} seconds)",
-                delay_minutes, delay_seconds
-            );
-            let program = "shutdown";
-            let args = ["-r", &format!("+{}", delay_minutes)];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to schedule delayed reboot"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot scheduled in {} minutes", delay_minutes);
-        } else {
-            info!("Initiating immediate system reboot");
-            let program = "systemctl";
-            let args = ["reboot"];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to execute reboot command"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot initiated");
-        }
-
-        Ok(())
+        reboot_system_via_runner(self.runner.as_ref(), delay_seconds)
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // SECURITY: Strict allowlist validation to prevent argument/shell injection
         validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        // CentOS 7 uses systemd for service management
-        get_systemd_service_status(name)
+        get_systemd_service_status_via_runner(self.runner.as_ref(), name)
     }
 
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing YUM package cache");
-        match cache::run_command_with_timeout("yum", &["makecache"]) {
+        match self.run_yum(&["makecache"]) {
             Ok(_) => {
                 cache_state.update_success();
                 info!("YUM package cache refreshed successfully");
@@ -2962,46 +2511,74 @@ impl PackageManagerBackend for YumBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
+        match self.run_rpm(&["-q", "--qf", "%{VERSION}-%{RELEASE}", name]) {
+            Ok(output) => {
+                let version = output.trim().to_string();
+                if !version.is_empty() {
+                    Ok(Some(version))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
+        let output = self.runner.run("yum", &["info", "-q", name]);
+        match output {
+            Ok(o) if o.success() => {
+                let stdout = &o.stdout;
+                let mut version = String::new();
+                let mut release = String::new();
+                for line in stdout.lines() {
+                    if line.starts_with("Version") {
+                        version = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                    } else if line.starts_with("Release") {
+                        release = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                    }
+                }
+                if !version.is_empty() {
+                    if release.is_empty() {
+                        Ok(Some(version))
+                    } else {
+                        Ok(Some(format!("{}-{}", version, release)))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl Default for YumBackend {
     fn default() -> Self {
-        Self::new()
+        Self::with_system_runner()
     }
 }
 
 /// Pacman package manager backend (Arch Linux)
 pub struct PacmanBackend {
-    _marker: std::marker::PhantomData<()>,
+    runner: Arc<dyn CommandRunner>,
 }
 
 impl PacmanBackend {
-    pub fn new() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
+    pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
+        Self { runner }
+    }
+
+    /// Create with the default system command runner.
+    pub fn with_system_runner() -> Self {
+        Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
     /// Run pacman command and capture output.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
-        let program = "pacman";
-        let output = match Command::new(program).args(args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute pacman command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        coordinator::run_command(self.runner.as_ref(), "pacman", args)
     }
 
     /// Parse package list from `pacman -Q` output.
@@ -3143,11 +2720,11 @@ impl PackageManagerBackend for PacmanBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via pacman -Si
-            let search_output = Command::new("pacman").args(["-Si", name]).output();
+            let search_output = self.runner.run("pacman", &["-Si", name]);
 
             if let Ok(output) = search_output {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
+                if output.success() {
+                    let stdout = &output.stdout;
                     let mut version = String::new();
                     let mut description = String::new();
 
@@ -3291,141 +2868,21 @@ impl PackageManagerBackend for PacmanBackend {
     }
 
     fn get_system_info(&self) -> Result<SystemInfo> {
-        let hostname = Command::new("hostname")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let os_info = std::fs::read_to_string("/etc/os-release")
-            .ok()
-            .map(|content| {
-                let mut os = "Linux".to_string();
-                let mut version = "unknown".to_string();
-
-                for line in content.lines() {
-                    if line.starts_with("PRETTY_NAME=") {
-                        os = line
-                            .trim_start_matches("PRETTY_NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("NAME=") {
-                        os = line
-                            .trim_start_matches("NAME=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION=") {
-                        version = line
-                            .trim_start_matches("VERSION=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    } else if line.starts_with("VERSION_ID=") {
-                        version = line
-                            .trim_start_matches("VERSION_ID=")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                    }
-                }
-
-                (os, version)
-            })
-            .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
-
-        let kernel = Command::new("uname")
-            .arg("-r")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let architecture = Command::new("uname")
-            .arg("-m")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // Arch Linux uses systemd, check for reboot-required indicator
-        let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists();
-
-        Ok(SystemInfo {
-            hostname,
-            os: os_info.0,
-            os_version: os_info.1,
-            kernel,
-            architecture,
-            last_update_check: None,
-            last_update_apply: None,
-            pending_reboot,
-        })
+        get_system_info_via_runner(self.runner.as_ref())
     }
 
     fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
-        if delay_seconds > 0 {
-            let delay_minutes = std::cmp::max(1u64, delay_seconds.div_ceil(60));
-            info!(
-                "Scheduling system reboot in {} minutes (requested {} seconds)",
-                delay_minutes, delay_seconds
-            );
-            let program = "shutdown";
-            let args = ["-r", &format!("+{}", delay_minutes)];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to schedule delayed reboot"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot scheduled in {} minutes", delay_minutes);
-        } else {
-            info!("Initiating immediate system reboot");
-            let program = "systemctl";
-            let args = ["reboot"];
-            let output = match Command::new(program).args(args).output() {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, &args, &e,
-                    ))
-                    .context("Failed to execute reboot command"));
-                }
-            };
-            if !output.status.success() {
-                return Err(anyhow::Error::new(CommandError::from_output(
-                    program, &args, &output,
-                )));
-            }
-            info!("System reboot initiated");
-        }
-
-        Ok(())
+        reboot_system_via_runner(self.runner.as_ref(), delay_seconds)
     }
 
     fn get_service_status(&self, name: &str) -> Result<Option<ServiceStatus>> {
-        // SECURITY: Strict allowlist validation to prevent argument/shell injection
         validate_service_name(name).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        // Arch Linux uses systemd for service management
-        get_systemd_service_status(name)
+        get_systemd_service_status_via_runner(self.runner.as_ref(), name)
     }
 
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing Pacman package cache");
-        match cache::run_command_with_timeout("pacman", &["-Sy"]) {
+        match self.run_pacman(&["-Sy"]) {
             Ok(_) => {
                 cache_state.update_success();
                 info!("Pacman package cache refreshed successfully");
@@ -3445,29 +2902,72 @@ impl PackageManagerBackend for PacmanBackend {
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
     }
+
+    fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
+        match self.run_pacman(&["-Q", name]) {
+            Ok(output) => {
+                let line = output.lines().next().unwrap_or("").trim();
+                let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+                if parts.len() >= 2 {
+                    Ok(Some(parts[1].to_string()))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
+        let output = self.runner.run("pacman", &["-Si", name]);
+        match output {
+            Ok(o) if o.success() => {
+                let stdout = &o.stdout;
+                for line in stdout.lines() {
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.trim() == "Version" {
+                            let version = value.trim().to_string();
+                            if !version.is_empty() {
+                                return Ok(Some(version));
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl Default for PacmanBackend {
     fn default() -> Self {
-        Self::new()
+        Self::with_system_runner()
     }
 }
 
 /// Package manager factory
 pub fn create_backend() -> Result<Box<dyn PackageManagerBackend>> {
-    // Detect package manager and return appropriate backend
+    let runner: Arc<dyn CommandRunner> = Arc::new(coordinator::SystemCommandRunner);
+    create_backend_with_runner(runner)
+}
+
+/// Package manager factory with injected command runner (for testing).
+pub fn create_backend_with_runner(
+    runner: Arc<dyn CommandRunner>,
+) -> Result<Box<dyn PackageManagerBackend>> {
     if std::path::Path::new("/usr/bin/apt").exists() {
-        Ok(Box::new(AptBackend::new()))
+        Ok(Box::new(AptBackend::new(runner)))
     } else if std::path::Path::new("/usr/bin/dnf").exists() {
-        Ok(Box::new(DnfBackend::new()))
+        Ok(Box::new(DnfBackend::new(runner)))
     } else if std::path::Path::new("/usr/bin/yum").exists() {
-        Ok(Box::new(YumBackend::new()))
+        Ok(Box::new(YumBackend::new(runner)))
     } else if std::path::Path::new("/usr/bin/apk").exists()
         || std::path::Path::new("/sbin/apk").exists()
     {
-        Ok(Box::new(ApkBackend::new()))
+        Ok(Box::new(ApkBackend::new(runner)))
     } else if std::path::Path::new("/usr/bin/pacman").exists() {
-        Ok(Box::new(PacmanBackend::new()))
+        Ok(Box::new(PacmanBackend::new(runner)))
     } else {
         Err(anyhow::anyhow!("No supported package manager found"))
     }
@@ -3479,7 +2979,7 @@ mod tests {
 
     #[test]
     fn test_apt_backend_creation() {
-        let _backend = AptBackend::new();
+        let _backend = AptBackend::with_system_runner();
         // Test passes if backend creation doesn't panic
     }
 
@@ -3492,13 +2992,13 @@ mod tests {
 
     #[test]
     fn test_apk_backend_creation() {
-        let _backend = ApkBackend::new();
+        let _backend = ApkBackend::with_system_runner();
         // Test passes if backend creation doesn't panic
     }
 
     #[test]
     fn test_apk_parse_name_version_simple() {
-        let backend = ApkBackend::new();
+        let backend = ApkBackend::with_system_runner();
         let (name, version) = backend.parse_name_version("bash-5.2.21-r0");
         assert_eq!(name, "bash");
         assert_eq!(version, "5.2.21-r0");
@@ -3506,7 +3006,7 @@ mod tests {
 
     #[test]
     fn test_apk_parse_name_version_hyphenated() {
-        let backend = ApkBackend::new();
+        let backend = ApkBackend::with_system_runner();
         // Package names with hyphens like gcc-gnat
         let (name, version) = backend.parse_name_version("gcc-gnat-13.2.1-r0");
         assert_eq!(name, "gcc-gnat");
@@ -3515,7 +3015,7 @@ mod tests {
 
     #[test]
     fn test_apk_parse_name_version_no_version() {
-        let backend = ApkBackend::new();
+        let backend = ApkBackend::with_system_runner();
         let (name, version) = backend.parse_name_version("nohyphen");
         assert_eq!(name, "nohyphen");
         assert_eq!(version, "");
@@ -3523,7 +3023,7 @@ mod tests {
 
     #[test]
     fn test_apk_parse_name_version_multiple_hyphens() {
-        let backend = ApkBackend::new();
+        let backend = ApkBackend::with_system_runner();
         let (name, version) = backend.parse_name_version("perl-net-ssleay-1.94-r0");
         assert_eq!(name, "perl-net-ssleay");
         assert_eq!(version, "1.94-r0");
@@ -3531,7 +3031,7 @@ mod tests {
 
     #[test]
     fn test_apk_parse_package_list() {
-        let backend = ApkBackend::new();
+        let backend = ApkBackend::with_system_runner();
         let output = "bash-5.2.21-r0 [main] The GNU Bourne Again shell\nopenssl-3.1.4-r0 [main] Toolkit for SSL/TLS";
         let packages = backend.parse_apk_package_list(output);
         assert_eq!(packages.len(), 2);
@@ -3545,13 +3045,13 @@ mod tests {
 
     #[test]
     fn test_dnf_backend_creation() {
-        let _backend = DnfBackend::new();
+        let _backend = DnfBackend::with_system_runner();
         // Test passes if backend creation doesn't panic
     }
 
     #[test]
     fn test_dnf_parse_rpm_name_version_simple() {
-        let backend = DnfBackend::new();
+        let backend = DnfBackend::with_system_runner();
         let (name, version) = backend.parse_rpm_name_version("bash-5.2.21-1.fc43");
         assert_eq!(name, "bash");
         assert_eq!(version, "5.2.21-1.fc43");
@@ -3559,7 +3059,7 @@ mod tests {
 
     #[test]
     fn test_dnf_parse_rpm_name_version_hyphenated() {
-        let backend = DnfBackend::new();
+        let backend = DnfBackend::with_system_runner();
         // Package names with hyphens like perl-Net-SSLeay
         let (name, version) = backend.parse_rpm_name_version("perl-Net-SSLeay-1.94-1.fc43");
         assert_eq!(name, "perl-Net-SSLeay");
@@ -3568,7 +3068,7 @@ mod tests {
 
     #[test]
     fn test_dnf_parse_rpm_name_version_no_version() {
-        let backend = DnfBackend::new();
+        let backend = DnfBackend::with_system_runner();
         let (name, version) = backend.parse_rpm_name_version("nohyphen");
         assert_eq!(name, "nohyphen");
         assert_eq!(version, "");
@@ -3576,7 +3076,7 @@ mod tests {
 
     #[test]
     fn test_dnf_parse_rpm_package_list() {
-        let backend = DnfBackend::new();
+        let backend = DnfBackend::with_system_runner();
         let output =
             "bash-5.2.21-1.fc43.x86_64\nopenssl-3.1.4-1.fc43.x86_64\ncurl-8.6.0-1.fc43.noarch";
         let packages = backend.parse_rpm_package_list(output);
@@ -3593,13 +3093,13 @@ mod tests {
 
     #[test]
     fn test_yum_backend_creation() {
-        let _backend = YumBackend::new();
+        let _backend = YumBackend::with_system_runner();
         // Test passes if backend creation doesn't panic
     }
 
     #[test]
     fn test_yum_parse_rpm_name_version_simple() {
-        let backend = YumBackend::new();
+        let backend = YumBackend::with_system_runner();
         let (name, version) = backend.parse_rpm_name_version("bash-4.2.46-34.el7");
         assert_eq!(name, "bash");
         assert_eq!(version, "4.2.46-34.el7");
@@ -3607,7 +3107,7 @@ mod tests {
 
     #[test]
     fn test_yum_parse_rpm_name_version_hyphenated() {
-        let backend = YumBackend::new();
+        let backend = YumBackend::with_system_runner();
         let (name, version) = backend.parse_rpm_name_version("perl-Net-SSLeay-1.94-1.el7");
         assert_eq!(name, "perl-Net-SSLeay");
         assert_eq!(version, "1.94-1.el7");
@@ -3615,7 +3115,7 @@ mod tests {
 
     #[test]
     fn test_yum_parse_rpm_package_list() {
-        let backend = YumBackend::new();
+        let backend = YumBackend::with_system_runner();
         let output = "bash-4.2.46-34.el7.x86_64\nopenssl-1.0.2k-25.el7.x86_64";
         let packages = backend.parse_rpm_package_list(output);
         assert_eq!(packages.len(), 2);
@@ -3629,13 +3129,13 @@ mod tests {
 
     #[test]
     fn test_pacman_backend_creation() {
-        let _backend = PacmanBackend::new();
+        let _backend = PacmanBackend::with_system_runner();
         // Test passes if backend creation doesn't panic
     }
 
     #[test]
     fn test_pacman_parse_package_list() {
-        let backend = PacmanBackend::new();
+        let backend = PacmanBackend::with_system_runner();
         let output = "bash 5.2.21-1\nopenssl 3.1.4-1\ncurl 8.6.0-1";
         let packages = backend.parse_pacman_package_list(output);
         assert_eq!(packages.len(), 3);
@@ -3649,7 +3149,7 @@ mod tests {
 
     #[test]
     fn test_pacman_parse_package_list_empty() {
-        let backend = PacmanBackend::new();
+        let backend = PacmanBackend::with_system_runner();
         let output = "";
         let packages = backend.parse_pacman_package_list(output);
         assert!(packages.is_empty());
@@ -3657,7 +3157,7 @@ mod tests {
 
     #[test]
     fn test_pacman_parse_info() {
-        let backend = PacmanBackend::new();
+        let backend = PacmanBackend::with_system_runner();
         let output = "Name            : bash\nVersion         : 5.2.21-1\nDescription     : The GNU Bourne Again shell\nInstalled Size  : 12.50 MiB\nDepends On      : readline  glibc  ncurses\nRequired By     : none\nInstall Date    : Mon 20 May 2026 10:00:00 AM CDT";
         let result = backend.parse_pacman_info(output, "bash").unwrap();
         assert!(result.is_some());
