@@ -173,6 +173,32 @@ jobs:
           sudo apt-get update
           sudo apt-get -f install -y
           sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+      - name: Shell syntax checks for maintainer scripts
+        run: |
+          for f in debian/postinst debian/prerm debian/postrm debian/preinst \
+                   configs/linux-patch-api-delayed-restart.sh \
+                   configs/linux-patch-api-openrc \
+                   configs/linux-patch-api.post-install \
+                   configs/linux-patch-api.post-upgrade \
+                   configs/linux-patch-api.pre-deinstall \
+                   configs/linux-patch-api.pre-install \
+                   configs/linux-patch-api.post-deinstall; do
+            echo -n "Checking $f: "
+            bash -n "$f" && echo "OK" || { echo "FAIL"; exit 1; }
+          done
+      - name: Systemd unit verification
+        run: |
+          for unit in configs/linux-patch-api.service \
+                      configs/linux-patch-api-upgrade-restart.service \
+                      configs/linux-patch-api-upgrade-restart.timer; do
+            echo -n "Checking $unit: "
+            systemd-analyze verify "$unit" 2>&1 || { echo "FAIL"; exit 1; }
+            echo "OK"
+          done
+      - name: CI workflow YAML validation
+        run: |
+          python3 -c "import yaml; yaml.safe_load(open('.gitea/workflows/ci.yml')); print('Gitea YAML: OK')"
+          python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('GitHub YAML: OK')"
       - name: Run fuzz tests (5000 random iterations)
         run: LPA_FUZZ_RANDOM_ITER=5000 cargo test --test concurrency_invariant_test -- fuzz_
         env:

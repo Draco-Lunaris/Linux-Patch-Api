@@ -712,13 +712,24 @@ pub async fn update_package(
                             );
                         }
 
-                        // Cancel the fallback timer before triggering the
-                        // restart. The marker file is the cancellation signal —
-                        // the timer's ExecStartPre checks for the marker and
-                        // aborts if it's gone. Removing it prevents a duplicate
-                        // restart from the fallback timer.
-                        info!(job_id = %job_id_clone, "Cancelling fallback restart timer by removing marker");
-                        crate::jobs::upgrade_state::clear_marker();
+                        // Transition to StartingNewProcess before issuing
+                        // the restart command. This persists the state so
+                        // the new process knows it's the replacement.
+                        let mut restart_state =
+                            crate::jobs::upgrade_state::UpgradeState::installing(
+                                &job_id_clone.to_string(),
+                                &from_version,
+                                &target_version,
+                            );
+                        restart_state.to_starting_new_process();
+                        if let Err(e) = crate::jobs::upgrade_state::write_state(&restart_state) {
+                            error!(
+                                error = %e,
+                                "Failed to write StartingNewProcess state — keeping fallback timer armed, not cancelling marker"
+                            );
+                            // Don't cancel the marker — the fallback timer
+                            // is still needed since we can't persist state.
+                        }
 
                         // Trigger the restart immediately. restart_own_service
                         // is fire-and-forget (spawn, not output) so it doesn't
@@ -728,13 +739,20 @@ pub async fn update_package(
                         match backend_clone.restart_own_service() {
                             Ok(_) => {
                                 info!(job_id = %job_id_clone, "Service restart command spawned — process will be replaced");
+                                // Cancel the fallback timer only AFTER
+                                // successful restart launch. The marker
+                                // file is the cancellation signal.
+                                info!(job_id = %job_id_clone, "Cancelling fallback restart timer by removing marker");
+                                crate::jobs::upgrade_state::clear_marker();
                             }
                             Err(e) => {
                                 error!(
                                     job_id = %job_id_clone,
                                     error = ?e,
-                                    "Failed to trigger service restart — fallback timer was cancelled, manual restart may be needed"
+                                    "Failed to trigger service restart — keeping fallback timer armed (marker preserved)"
                                 );
+                                // Do NOT clear the marker — the fallback
+                                // timer is still armed and will retry.
                             }
                         }
                     }

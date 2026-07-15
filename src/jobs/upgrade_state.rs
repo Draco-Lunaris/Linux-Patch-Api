@@ -76,6 +76,8 @@ const RESTART_DEADLINE_SECS: i64 = 120;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpgradePhase {
+    /// No upgrade in progress. Normal operation.
+    Idle,
     /// Self-update reserved, before apt starts. If process dies here,
     /// the reservation is orphaned — recovery clears it.
     Reserving,
@@ -87,6 +89,10 @@ pub enum UpgradePhase {
     Verifying,
     /// Package installed and verified, waiting for the delayed restart.
     RestartPending,
+    /// Restart command has been issued; the new process is starting.
+    /// If the old process dies here, the new process should appear and
+    /// transition to Ready after initialization.
+    StartingNewProcess,
     /// New process started, listener bound, READY=1 sent. Marker and
     /// state can be safely cleared.
     Ready,
@@ -199,6 +205,13 @@ impl UpgradeState {
     /// Transition to `Ready` state (preserves generation).
     pub fn to_ready(&mut self) {
         self.state = UpgradePhase::Ready;
+    }
+
+    /// Transition to `StartingNewProcess` state (preserves generation).
+    /// Called after the restart command is issued but before the new
+    /// process has completed initialization.
+    pub fn to_starting_new_process(&mut self) {
+        self.state = UpgradePhase::StartingNewProcess;
     }
 
     /// Transition to `Recovering` state (preserves generation).
@@ -466,6 +479,19 @@ pub fn reconcile_startup_state_at(state_path: &Path, marker_path: &Path) -> Star
     };
 
     match state.state {
+        UpgradePhase::Idle => {
+            // Idle state — no upgrade in progress. If marker exists, it's
+            // inconsistent (marker without an active upgrade). Enter recovery.
+            if marker_path.exists() {
+                warn!(
+                    "Upgrade state is 'idle' but marker exists — inconsistent, entering recovery mode"
+                );
+                return StartupReconciliation::RecoveryMode;
+            }
+            info!("Upgrade state is 'idle' — normal startup");
+            clear_state_at(state_path);
+            StartupReconciliation::Clean
+        }
         UpgradePhase::Reserving => {
             warn!(
                 job_id = %state.job_id,
@@ -519,6 +545,19 @@ pub fn reconcile_startup_state_at(state_path: &Path, marker_path: &Path) -> Star
                 );
                 StartupReconciliation::RestartInProgress
             }
+        }
+        UpgradePhase::StartingNewProcess => {
+            // The old process issued the restart command and transitioned
+            // to StartingNewProcess. We are the new process. Keep the
+            // admission block set until initialization completes.
+            info!(
+                job_id = %state.job_id,
+                from_version = %state.from_version,
+                target_version = %state.target_version,
+                "Found upgrade state in 'starting_new_process' phase — new process is initializing. \
+                 Keeping self_update flag set until initialization completes."
+            );
+            StartupReconciliation::RestartInProgress
         }
         UpgradePhase::Ready => {
             // State says Ready but we're starting up — this means the previous

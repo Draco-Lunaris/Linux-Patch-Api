@@ -507,8 +507,8 @@ async fn main() -> Result<()> {
     .client_disconnect_timeout(std::time::Duration::from_secs(5))
     // Graceful shutdown timeout: how long Actix waits for in-flight requests
     // to complete after receiving the stop signal. Must be less than
-    // TimeoutStopSec (90s) minus the package-mutation drain window (80s) =
-    // 10s margin.
+    // TimeoutStopSec (120s) minus the package-mutation drain window (100s) =
+    // 20s margin. We use 10s for Actix, leaving 10s safety margin.
     .shutdown_timeout(10)
     .keep_alive(std::time::Duration::from_secs(15))
     .max_connection_rate(1000);
@@ -803,14 +803,33 @@ async fn main() -> Result<()> {
 }
 
 /// Send READY=1 to systemd's notification socket (for Type=notify services).
-/// If the socket is unavailable (not running under systemd), this is a no-op.
+///
+/// If running under systemd (detected via `/run/systemd/system`), a failure
+/// to send READY=1 is treated as a fatal startup error — the service is
+/// `Type=notify`, so systemd will kill us if we never notify. We exit with
+/// an error code rather than silently continuing.
+///
+/// If NOT running under systemd (no `/run/systemd/system`), this is a no-op
+/// — the notification socket doesn't exist and there's nothing to notify.
 fn notify_systemd_ready() {
     use systemd::daemon::{notify, STATE_READY};
     let state = [(STATE_READY, "1")];
-    if let Err(e) = notify(false, state.iter()) {
-        tracing::debug!(error = ?e, "sd_notify READY=1 failed (not running under systemd?)");
-    } else {
-        info!("Notified systemd: READY=1");
+    let running_under_systemd = std::path::Path::new("/run/systemd/system").exists();
+
+    match notify(false, state.iter()) {
+        Ok(_) => info!("Notified systemd: READY=1"),
+        Err(e) => {
+            if running_under_systemd {
+                error!(
+                    error = ?e,
+                    "sd_notify READY=1 failed while running under systemd (Type=notify) — \
+                     treating as fatal startup failure"
+                );
+                std::process::exit(ExitCode::Error as i32);
+            } else {
+                tracing::debug!(error = ?e, "sd_notify READY=1 failed (not running under systemd)");
+            }
+        }
     }
 }
 
@@ -851,9 +870,9 @@ fn notify_systemd_stopping() {
 /// 4. Stops the HTTP server gracefully (stops accepting new connections, drains)
 /// 5. If no operation in progress: stops immediately
 ///
-/// The 80s deadline is based on the systemd service's `TimeoutStopSec=90s` —
-/// we leave a 10s margin for the server to drain in-flight HTTP requests after
-/// we call `stop()`.
+/// The 100s deadline is based on the systemd service's `TimeoutStopSec=120s` —
+/// we leave a 20s margin: 100s for mutation drain + 10s for Actix graceful
+/// shutdown = 110s, leaving 10s safety margin before SIGKILL.
 async fn setup_sigterm_handler(
     server_handle: actix_web::dev::ServerHandle,
     coordinator: Arc<OperationCoordinator>,
@@ -878,9 +897,9 @@ async fn setup_sigterm_handler(
 
     // Check if a package mutation is in progress via the coordinator
     if coordinator.is_operation_in_progress() {
-        info!("Package mutation in progress — waiting up to 80s for it to complete before shutting down");
+        info!("Package mutation in progress — waiting up to 100s for it to complete before shutting down");
 
-        let deadline = Instant::now() + Duration::from_secs(80);
+        let deadline = Instant::now() + Duration::from_secs(100);
         let mut waited = 0u64;
 
         while coordinator.is_operation_in_progress() {
@@ -888,7 +907,7 @@ async fn setup_sigterm_handler(
             if now >= deadline {
                 warn!(
                     waited_seconds = waited,
-                    "Package mutation still in progress after 80s — shutting down anyway (systemd will SIGKILL in ~10s)"
+                    "Package mutation still in progress after 100s — shutting down anyway (systemd will SIGKILL in ~20s)"
                 );
                 break;
             }
