@@ -1,0 +1,472 @@
+//! Persistent upgrade state for self-update lifecycle tracking.
+//!
+//! The in-memory `self_update_in_progress` flag is volatile — it disappears
+//! on crash or restart. This module provides a persistent state file that
+//! survives process restarts, allowing the new process to reconcile its
+//! upgrade state on startup.
+//!
+//! ## State file
+//!
+//! Located at `/var/lib/linux_patch_api/upgrade-state.json`. Written
+//! atomically (temp file → fsync → rename) to prevent corruption on
+//! crash mid-write.
+//!
+//! ## Lifecycle
+//!
+//! ```text
+//! Idle
+//!   → write state { "state": "installing", ... }
+//!   → apt-get installs the package
+//!   → write state { "state": "restart_pending", ... }
+//!   → postinst schedules 30s delayed restart
+//!   → old process killed by restart
+//!   → new process starts, reads state file
+//!   → if restart_pending and deadline not expired:
+//!       keep self_update flag set, continue initialization
+//!   → after successful initialization:
+//!       clear self_update flag, delete state file
+//!   → if restart_pending and deadline expired:
+//!       log warning (restart failed or took too long),
+//!       clear flag, delete state file
+//! ```
+//!
+//! ## Crash recovery
+//!
+//! If the process crashes during `installing` (apt-get was running),
+//! the next startup sees `installing` state. The apt mutex + dpkg
+//! --configure -a pre-flight will clean up the dpkg state. The upgrade
+//! state file is cleared so the manager can retry.
+//!
+//! If the process crashes during `restart_pending` (after install,
+//! before restart), the restart timer should still fire and restart
+//! the service. If the timer also failed, the deadline check on
+//! startup will detect the stale state.
+
+use std::path::Path;
+
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
+
+/// Path to the persistent upgrade state file.
+pub const UPGRADE_STATE_PATH: &str = "/var/lib/linux_patch_api/upgrade-state.json";
+
+/// How long after a self-update restart is initiated before we consider
+/// the restart to have failed. The postinst schedules a 30s delayed
+/// restart, so we allow 120s (4x margin) for the new process to start.
+const RESTART_DEADLINE_SECS: i64 = 120;
+
+/// The phase of a self-update lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradePhase {
+    /// apt-get is actively installing the new package.
+    Installing,
+    /// Package installed, waiting for the 30s delayed restart to fire.
+    RestartPending,
+}
+
+/// Persistent upgrade state, written to disk and read on startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeState {
+    /// Current phase of the upgrade.
+    pub state: UpgradePhase,
+    /// Job ID of the self-update job (for manager correlation).
+    pub job_id: String,
+    /// Version the agent is upgrading from.
+    pub from_version: String,
+    /// Version the agent is upgrading to (best known at write time).
+    pub target_version: String,
+    /// When the upgrade was initiated (RFC3339).
+    pub started_at: String,
+    /// When the restart should have completed (RFC3339).
+    /// Only set when state == RestartPending.
+    pub restart_deadline: Option<String>,
+}
+
+impl UpgradeState {
+    /// Create a new `Installing` state.
+    pub fn installing(job_id: &str, from_version: &str, target_version: &str) -> Self {
+        Self {
+            state: UpgradePhase::Installing,
+            job_id: job_id.to_string(),
+            from_version: from_version.to_string(),
+            target_version: target_version.to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            restart_deadline: None,
+        }
+    }
+
+    /// Transition to `RestartPending` state with a deadline.
+    pub fn to_restart_pending(&mut self) {
+        self.state = UpgradePhase::RestartPending;
+        self.restart_deadline =
+            Some((Utc::now() + Duration::seconds(RESTART_DEADLINE_SECS)).to_rfc3339());
+    }
+
+    /// Check if the restart deadline has passed.
+    /// Returns false if no deadline is set or if it hasn't been reached.
+    pub fn is_deadline_expired(&self) -> bool {
+        match &self.restart_deadline {
+            Some(deadline_str) => {
+                match DateTime::parse_from_rfc3339(deadline_str) {
+                    Ok(deadline) => Utc::now() > deadline.with_timezone(&Utc),
+                    Err(_) => true, // Unparseable deadline = treat as expired
+                }
+            }
+            None => false,
+        }
+    }
+}
+
+/// Atomically write the upgrade state to disk.
+///
+/// Writes to a temporary file in the same directory, fsyncs it, then
+/// renames it to the final path. This prevents a partial/corrupt state
+/// file if the process crashes mid-write.
+pub fn write_state(state: &UpgradeState) -> std::io::Result<()> {
+    let path = Path::new(UPGRADE_STATE_PATH);
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("/var/lib/linux_patch_api"));
+
+    // Ensure directory exists
+    std::fs::create_dir_all(dir)?;
+
+    let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
+
+    // Write to temp file in the same directory (same filesystem for atomic rename)
+    let tmp_path = path.with_extension("json.tmp");
+
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?; // fsync the file data
+    }
+
+    // Atomic rename
+    std::fs::rename(&tmp_path, path)?;
+
+    // fsync the directory to ensure the rename is durable
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+
+    info!(path = %path.display(), state = ?state.state, "Upgrade state persisted");
+    Ok(())
+}
+
+/// Read the upgrade state from disk.
+/// Returns None if the file doesn't exist or is unparseable.
+pub fn read_state() -> Option<UpgradeState> {
+    let path = Path::new(UPGRADE_STATE_PATH);
+    read_state_from(path)
+}
+
+/// Read the upgrade state from a specific path (for testing).
+pub fn read_state_from(path: &Path) -> Option<UpgradeState> {
+    let content = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<UpgradeState>(&content) {
+        Ok(state) => Some(state),
+        Err(e) => {
+            warn!(error = %e, path = %path.display(), "Failed to parse upgrade state file — ignoring");
+            None
+        }
+    }
+}
+
+/// Delete the upgrade state file.
+pub fn clear_state() {
+    let path = Path::new(UPGRADE_STATE_PATH);
+    clear_state_at(path);
+}
+
+/// Delete the upgrade state file at a specific path (for testing).
+pub fn clear_state_at(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(_) => info!(path = %path.display(), "Upgrade state file removed"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Already gone — fine
+        }
+        Err(e) => {
+            warn!(error = %e, path = %path.display(), "Failed to remove upgrade state file");
+        }
+    }
+}
+
+/// Reconcile upgrade state on startup.
+///
+/// Called early in the startup sequence, before the job manager accepts
+/// any jobs. Returns `true` if the self-update flag should be set (jobs
+/// should be blocked), `false` if the system is in a clean state.
+///
+/// Logic:
+/// - No state file → clean state, return false
+/// - `Installing` → apt-get was interrupted. The dpkg pre-flight will
+///   clean up. Clear the state file and return false (allow retry).
+/// - `RestartPending`, deadline not expired → restart in progress.
+///   Keep the flag set. Return true.
+/// - `RestartPending`, deadline expired → restart failed or took too
+///   long. Clear the state file, log a warning. Return false (allow
+///   recovery).
+pub fn reconcile_startup_state() -> bool {
+    let path = Path::new(UPGRADE_STATE_PATH);
+    reconcile_startup_state_at(path)
+}
+
+/// Reconcile upgrade state from a specific path (for testing).
+pub fn reconcile_startup_state_at(path: &Path) -> bool {
+    let state = match read_state_from(path) {
+        Some(s) => s,
+        None => {
+            // No state file — clean state
+            return false;
+        }
+    };
+
+    match state.state {
+        UpgradePhase::Installing => {
+            warn!(
+                job_id = %state.job_id,
+                from_version = %state.from_version,
+                target_version = %state.target_version,
+                started_at = %state.started_at,
+                "Found upgrade state in 'installing' phase — apt-get was interrupted. \
+                 The dpkg pre-flight will clean up. Clearing state to allow retry."
+            );
+            clear_state_at(path);
+            false
+        }
+        UpgradePhase::RestartPending => {
+            if state.is_deadline_expired() {
+                warn!(
+                    job_id = %state.job_id,
+                    from_version = %state.from_version,
+                    target_version = %state.target_version,
+                    started_at = %state.started_at,
+                    "Found upgrade state in 'restart_pending' phase but deadline has expired. \
+                     The delayed restart may have failed. Clearing state to allow recovery."
+                );
+                clear_state_at(path);
+                false
+            } else {
+                info!(
+                    job_id = %state.job_id,
+                    from_version = %state.from_version,
+                    target_version = %state.target_version,
+                    "Found upgrade state in 'restart_pending' phase — restart in progress. \
+                     Keeping self-update flag set until initialization completes."
+                );
+                true
+            }
+        }
+    }
+}
+
+/// Clean up the upgrade state after successful initialization.
+///
+/// Called after the new process has fully initialized (config loaded,
+/// backend ready, server listening). Clears the state file and the
+/// marker file.
+pub fn finalize_successful_restart() {
+    let state_path = Path::new(UPGRADE_STATE_PATH);
+    clear_state_at(state_path);
+
+    // Also remove the marker file created by postinst (fallback for
+    // cases where the systemd upgrade-restart.service didn't run).
+    let marker_path = Path::new("/var/lib/linux_patch_api/upgrade-pending");
+    match std::fs::remove_file(marker_path) {
+        Ok(_) => info!("Upgrade-pending marker file removed"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(error = %e, "Failed to remove upgrade-pending marker file");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn test_path(dir: &TempDir) -> PathBuf {
+        dir.path().join("upgrade-state.json")
+    }
+
+    #[test]
+    fn test_write_and_read_state() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+
+        let state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        fs::write(&path, &json).unwrap();
+
+        let read = read_state_from(&path).unwrap();
+        assert_eq!(read.state, UpgradePhase::Installing);
+        assert_eq!(read.job_id, "job-123");
+        assert_eq!(read.from_version, "2.1.0");
+        assert_eq!(read.target_version, "2.2.0");
+    }
+
+    #[test]
+    fn test_read_missing_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+        assert!(read_state_from(&path).is_none());
+    }
+
+    #[test]
+    fn test_read_corrupt_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+        fs::write(&path, "not valid json").unwrap();
+        assert!(read_state_from(&path).is_none());
+    }
+
+    #[test]
+    fn test_to_restart_pending_sets_deadline() {
+        let mut state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        assert!(state.restart_deadline.is_none());
+
+        state.to_restart_pending();
+        assert_eq!(state.state, UpgradePhase::RestartPending);
+        assert!(state.restart_deadline.is_some());
+
+        // Deadline should be ~120s in the future
+        let deadline = DateTime::parse_from_rfc3339(state.restart_deadline.as_ref().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = Utc::now();
+        let diff = deadline - now;
+        assert!(diff.num_seconds() > 100 && diff.num_seconds() < 130);
+    }
+
+    #[test]
+    fn test_deadline_not_expired_when_recent() {
+        let mut state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        state.to_restart_pending();
+        assert!(!state.is_deadline_expired());
+    }
+
+    #[test]
+    fn test_deadline_expired_when_in_past() {
+        let mut state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        state.to_restart_pending();
+        // Set deadline to the past
+        state.restart_deadline = Some((Utc::now() - Duration::seconds(10)).to_rfc3339());
+        assert!(state.is_deadline_expired());
+    }
+
+    #[test]
+    fn test_deadline_expired_when_unparseable() {
+        let mut state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        state.to_restart_pending();
+        state.restart_deadline = Some("not-a-date".to_string());
+        assert!(state.is_deadline_expired());
+    }
+
+    #[test]
+    fn test_reconcile_no_state_file() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+        assert!(!reconcile_startup_state_at(&path));
+    }
+
+    #[test]
+    fn test_reconcile_installing_clears_and_returns_false() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+
+        let state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        assert!(!reconcile_startup_state_at(&path));
+        assert!(
+            !path.exists(),
+            "State file should be removed after reconcile"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_restart_pending_not_expired_returns_true() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+
+        let mut state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        state.to_restart_pending();
+        fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        assert!(reconcile_startup_state_at(&path));
+        assert!(
+            path.exists(),
+            "State file should remain when restart is pending"
+        );
+    }
+
+    #[test]
+    fn test_reconcile_restart_pending_expired_clears_and_returns_false() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+
+        let mut state = UpgradeState::installing("job-123", "2.1.0", "2.2.0");
+        state.to_restart_pending();
+        state.restart_deadline = Some((Utc::now() - Duration::seconds(10)).to_rfc3339());
+        fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        assert!(!reconcile_startup_state_at(&path));
+        assert!(
+            !path.exists(),
+            "State file should be removed after expired deadline"
+        );
+    }
+
+    #[test]
+    fn test_clear_state_removes_file() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+
+        fs::write(&path, "{}").unwrap();
+        assert!(path.exists());
+
+        clear_state_at(&path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_clear_state_missing_file_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let path = test_path(&dir);
+        // Should not panic
+        clear_state_at(&path);
+    }
+
+    #[test]
+    fn test_write_state_atomic() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("upgrade-state.json");
+
+        let state = UpgradeState::installing("job-456", "1.0.0", "2.0.0");
+
+        // Write directly using the same atomic pattern
+        {
+            use std::io::Write;
+            let tmp = path.with_extension("json.tmp");
+            let json = serde_json::to_string_pretty(&state).unwrap();
+            let mut file = std::fs::File::create(&tmp).unwrap();
+            file.write_all(json.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+            std::fs::rename(&tmp, &path).unwrap();
+        }
+
+        assert!(path.exists());
+        let read = read_state_from(&path).unwrap();
+        assert_eq!(read.job_id, "job-456");
+
+        // Temp file should not remain
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+}

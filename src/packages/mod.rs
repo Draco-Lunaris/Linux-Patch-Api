@@ -210,6 +210,40 @@ pub trait PackageManagerBackend: Send + Sync {
 
     /// Get the last cache update timestamp
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>>;
+
+    /// Check if a package-manager operation (install/upgrade/remove/patch) is
+    /// currently in progress. Used by the SIGTERM handler to decide whether to
+    /// wait for the operation to complete before exiting, or to exit immediately.
+    /// Returns false for backends that don't track operation state.
+    fn is_operation_in_progress(&self) -> bool {
+        false
+    }
+
+    /// Restart the agent's own service (not the whole system).
+    ///
+    /// On systemd: `systemctl restart linux-patch-api.service`
+    /// On OpenRC: `rc-service linux-patch-api restart`
+    ///
+    /// Used by the self-update flow after draining active operations.
+    /// The restart kills this process and starts the new binary.
+    /// Default implementation uses systemctl (most common).
+    fn restart_own_service(&self) -> Result<()> {
+        let program = "systemctl";
+        let args = ["restart", "linux-patch-api.service"];
+        let output = Command::new(program)
+            .args(args)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .output()
+            .context("Failed to execute service restart command")?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "Service restart failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Package specification for installation
@@ -220,9 +254,24 @@ pub struct PackageSpec {
 }
 
 /// APT package manager backend (Debian/Ubuntu)
+///
+/// All apt/dpkg operations are serialized via a process-wide mutex. This prevents
+/// concurrent apt-get invocations (which would fail on the dpkg frontend lock and
+/// leave the package manager in a broken state) and ensures that dpkg cleanup
+/// (`dpkg --configure -a`) runs atomically before/after every operation.
 pub struct AptBackend {
     _marker: std::marker::PhantomData<()>,
 }
+
+/// Process-wide mutex serializing all apt/dpkg operations.
+/// Only one apt-get or dpkg command runs at a time, ever.
+static APT_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+/// Process-wide flag indicating an apt operation is in progress.
+/// Set true while inside `run_apt_safe`, false when done. Used by the
+/// SIGTERM handler to decide whether to wait before exiting.
+static APT_IN_PROGRESS: std::sync::OnceLock<std::sync::atomic::AtomicBool> =
+    std::sync::OnceLock::new();
 
 impl AptBackend {
     pub fn new() -> Self {
@@ -231,33 +280,164 @@ impl AptBackend {
         }
     }
 
+    fn get_apt_mutex() -> &'static std::sync::Mutex<()> {
+        APT_MUTEX.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn get_apt_in_progress() -> &'static std::sync::atomic::AtomicBool {
+        APT_IN_PROGRESS.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Run `dpkg --configure -a` to clean up any half-configured packages from
+    /// a prior interrupted transaction (agent crash, OOM kill, SIGKILL, power loss).
+    ///
+    /// This is called before every apt operation (pre-flight) and after every
+    /// apt failure (cleanup). It is the same recovery step a human would run
+    /// after a failed `apt upgrade`.
+    ///
+    /// Returns Ok(()) if dpkg is clean or was successfully cleaned up.
+    /// Returns Err if `dpkg --configure -a` itself fails (dpkg is broken beyond
+    /// simple cleanup — requires manual intervention).
+    fn ensure_dpkg_clean(&self) -> Result<()> {
+        tracing::info!("Running dpkg --configure -a (pre-flight cleanup)");
+        match self.run_dpkg(&["--configure", "-a"]) {
+            Ok(_) => {
+                tracing::info!("dpkg --configure -a completed (clean or fixed)");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(error = ?e, "dpkg --configure -a failed — dpkg may require manual intervention");
+                Err(e.context("dpkg --configure -a failed: package manager is in a broken state that requires manual intervention"))
+            }
+        }
+    }
+
+    /// Run `dpkg --audit` to verify no packages are left half-configured or
+    /// unpacked after an apt operation. This catches the known edge case where
+    /// apt-get exits 0 but dpkg triggers haven't fully completed (common with
+    /// kernel packages and initramfs-tools).
+    ///
+    /// If audit finds problems, runs `dpkg --configure -a` to attempt cleanup.
+    /// Returns Ok(()) if audit is clean (or was cleaned up), Err if problems
+    /// remain after cleanup.
+    fn verify_dpkg_clean(&self) -> Result<()> {
+        let audit_output = self.run_dpkg(&["--audit"])?;
+        if audit_output.trim().is_empty() {
+            tracing::info!("dpkg --audit is clean (no half-configured packages)");
+            return Ok(());
+        }
+
+        tracing::warn!(
+            audit_output = %audit_output.trim(),
+            "dpkg --audit found half-configured packages after apt operation — running dpkg --configure -a"
+        );
+        self.ensure_dpkg_clean()?;
+
+        let recheck = self.run_dpkg(&["--audit"])?;
+        if recheck.trim().is_empty() {
+            tracing::info!("dpkg --audit is clean after cleanup");
+            Ok(())
+        } else {
+            tracing::error!(
+                audit_output = %recheck.trim(),
+                "dpkg --audit still dirty after dpkg --configure -a — packages may be in a broken state"
+            );
+            Err(anyhow::anyhow!(
+                "dpkg --audit shows half-configured packages after operation and cleanup: {}",
+                recheck.trim()
+            ))
+        }
+    }
+
+    /// Run apt command with dpkg cleanup and serialization.
+    ///
+    /// This is the core wrapper for all apt-get operations. It:
+    /// 1. Acquires the process-wide mutex (no concurrent apt calls)
+    /// 2. Runs `dpkg --configure -a` pre-flight (clean up prior interrupted state)
+    /// 3. Runs the apt-get command
+    /// 4. On success: runs `dpkg --audit` post-verification
+    /// 5. On failure: runs `dpkg --configure -a` cleanup before returning the error
+    ///
+    /// The mutex is held for the entire duration including pre-flight and cleanup,
+    /// ensuring atomicity of the full operation.
+    fn run_apt_safe(&self, args: &[&str]) -> Result<String> {
+        let _guard = Self::get_apt_mutex()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("apt mutex poisoned: {}", e))?;
+
+        // Mark operation in progress for SIGTERM handler. The guard ensures
+        // the flag is cleared on ALL return paths (including early returns
+        // from ensure_dpkg_clean failures, apt-get spawn failures, etc).
+        // Without this, a pre-flight failure would leave the flag true forever,
+        // causing the SIGTERM handler to wait 25s on every shutdown.
+        struct InProgressGuard;
+        impl Drop for InProgressGuard {
+            fn drop(&mut self) {
+                AptBackend::get_apt_in_progress().store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        Self::get_apt_in_progress().store(true, std::sync::atomic::Ordering::SeqCst);
+        let _in_progress_guard = InProgressGuard;
+
+        // Pre-flight: clean up any half-configured state from prior crashes
+        self.ensure_dpkg_clean()?;
+
+        // Set DEBIAN_FRONTEND=noninteractive explicitly so apt-get never
+        // prompts for user input (conffile conflicts, service restarts, etc).
+        // Without this, apt-get can hang forever waiting for input on a TTY-less
+        // service, and a subsequent SIGKILL leaves dpkg mid-transaction.
+        let program = "apt-get";
+        let output = match Command::new(program)
+            .args(args)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                let err = anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
+                    .context("Failed to execute apt command");
+                // Cleanup on spawn failure (unlikely but possible)
+                let _ = self.ensure_dpkg_clean();
+                // Flag is cleared by _in_progress_guard drop
+                return Err(err);
+            }
+        };
+
+        if !output.status.success() {
+            let err = anyhow::Error::new(CommandError::from_output(program, args, &output));
+
+            // Cleanup: run dpkg --configure -a after ANY apt failure, not just
+            // dependency errors. A lock contention, disk space error, network
+            // timeout, or OOM kill can all leave packages half-configured.
+            tracing::warn!(error = ?err, "apt-get failed — running dpkg --configure -a cleanup");
+            let _ = self.ensure_dpkg_clean();
+
+            // Flag is cleared by _in_progress_guard drop
+            return Err(err);
+        }
+
+        // Post-verification: apt-get exited 0, but dpkg triggers may not have
+        // completed (known edge case with kernel packages + initramfs-tools).
+        let verify_result = self.verify_dpkg_clean();
+
+        // Flag is cleared by _in_progress_guard drop
+
+        // Audit found problems even after cleanup. This is a serious state —
+        // the operation partially succeeded. Return an error so the manager
+        // knows the system needs attention, but the dpkg state is at least
+        // as clean as we could make it.
+        verify_result?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
     /// Run apt command and capture output.
     ///
     /// On failure, returns a [`CommandError`] (wrapped in anyhow) that preserves the
     /// exit code, stdout, and stderr so the manager receives the same diagnostics the
     /// local journal would show.
     fn run_apt(&self, args: &[&str]) -> Result<String> {
-        // Service runs as root - no sudo needed for apt commands
-        let program = "apt-get";
-        let cmd_args: Vec<&str> = args.to_vec();
-
-        let output = match Command::new(program).args(&cmd_args).output() {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(
-                    anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
-                        .context("Failed to execute apt command"),
-                );
-            }
-        };
-
-        if !output.status.success() {
-            return Err(anyhow::Error::new(CommandError::from_output(
-                program, args, &output,
-            )));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        self.run_apt_safe(args)
     }
 
     /// Run dpkg command and capture output.
@@ -612,13 +792,16 @@ impl PackageManagerBackend for AptBackend {
             }
             None => {
                 // Run fix-broken first to resolve any unmet dependencies from
-                // interrupted package operations (e.g. agent crash during upgrade).
-                // We log the result but don't fail here — dist-upgrade may still
-                // succeed even if fix-broken reports nothing to fix.
+                // interrupted package operations. run_apt_safe already runs
+                // dpkg --configure -a as pre-flight, but fix-broken handles
+                // dependency resolution that dpkg --configure -a alone cannot.
+                // If fix-broken fails, return the error — proceeding with
+                // dist-upgrade on a broken-dependency system can make things worse.
                 match self.run_apt(&["-f", "install", "-y"]) {
                     Ok(_) => info!("apt-get -f install completed (no broken packages or fixed)"),
                     Err(e) => {
-                        tracing::warn!(error = ?e, "apt-get -f install failed — proceeding with dist-upgrade anyway")
+                        tracing::error!(error = ?e, "apt-get -f install failed — aborting dist-upgrade to avoid worsening dependency state");
+                        return Err(e.context("Pre-upgrade fix-broken failed — resolve dependency issues before retrying"));
                     }
                 }
                 vec!["dist-upgrade", "-y"]
@@ -631,19 +814,23 @@ impl PackageManagerBackend for AptBackend {
                 Ok(())
             }
             Err(e) => {
-                // If dist-upgrade fails with unmet dependencies, try fix-broken
-                // and retry once. This handles the case where the first fix-broken
-                // partially resolved things but dist-upgrade needs another pass.
+                // run_apt_safe already ran dpkg --configure -a cleanup on failure.
+                // If the error looks like a dependency issue, try fix-broken +
+                // one retry. For any other error, return immediately — the
+                // cleanup has already been done.
                 let err_str = e.to_string().to_lowercase();
                 if err_str.contains("unmet dependencies")
                     || err_str.contains("broken")
                     || err_str.contains("dependency")
                 {
-                    tracing::warn!(error = ?e, "dist-upgrade failed with dependency issues — running fix-broken and retrying");
+                    tracing::warn!(error = ?e, "dist-upgrade failed with dependency issues — running fix-broken and retrying once");
                     match self.run_apt(&["-f", "install", "-y"]) {
                         Ok(_) => info!("apt-get -f install completed on retry"),
                         Err(fix_err) => {
-                            tracing::warn!(error = ?fix_err, "apt-get -f install failed on retry")
+                            tracing::error!(error = ?fix_err, "apt-get -f install failed on retry — not retrying dist-upgrade");
+                            return Err(fix_err.context(
+                                "fix-broken failed on retry — dependency issues remain unresolved",
+                            ));
                         }
                     }
                     self.run_apt(&args).map(|_| ())
@@ -812,6 +999,10 @@ impl PackageManagerBackend for AptBackend {
 
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
+    }
+
+    fn is_operation_in_progress(&self) -> bool {
+        Self::get_apt_in_progress().load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -1520,6 +1711,23 @@ impl PackageManagerBackend for ApkBackend {
 
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>> {
         cache_state.status().last_update
+    }
+
+    fn restart_own_service(&self) -> Result<()> {
+        let program = "rc-service";
+        let args = ["linux-patch-api", "restart"];
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .context("Failed to execute rc-service restart")?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "rc-service restart failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
     }
 }
 

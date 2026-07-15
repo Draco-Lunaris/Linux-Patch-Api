@@ -82,6 +82,31 @@ pub struct ApiError {
     pub retryable: bool,
 }
 
+/// Convert a `JobAdmissionError` into an HTTP response.
+///
+/// Used by all handlers that call `admit_job` — provides consistent error
+/// responses across install, update, remove, patch-apply, reboot, and rollback.
+pub fn admission_error_response(err: &crate::jobs::manager::JobAdmissionError) -> HttpResponse {
+    match err {
+        crate::jobs::manager::JobAdmissionError::SelfUpdateInProgress => HttpResponse::Conflict()
+            .insert_header(("Retry-After", "60"))
+            .json(ApiResponse::<()>::error(
+                "SELF_UPDATE_IN_PROGRESS",
+                "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
+                None,
+                true,
+            )),
+        crate::jobs::manager::JobAdmissionError::QueueFull => HttpResponse::TooManyRequests()
+            .insert_header(("Retry-After", "60"))
+            .json(ApiResponse::<()>::error(
+                "QUEUE_FULL",
+                "Job queue is at capacity. Please retry later.",
+                None,
+                true,
+            )),
+    }
+}
+
 /// Package list response data
 #[derive(Debug, Serialize)]
 pub struct PackageListData {
@@ -253,36 +278,10 @@ pub async fn install_packages(
 
     info!(request_id = %request_id, packages = ?package_names, "Installing packages");
 
-    // Block new jobs while a self-update is in progress
-    if job_manager.is_self_update_in_progress().await {
-        warn!(request_id = %request_id, "Install rejected — self-update in progress");
-        let response = ApiResponse::<()>::error(
-            "SELF_UPDATE_IN_PROGRESS",
-            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
-            None,
-            true,
-        );
-        return HttpResponse::Conflict()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
-    // Check job queue capacity
-    if !job_manager.can_accept_job().await {
-        let response = ApiResponse::<()>::error(
-            "QUEUE_FULL",
-            "Job queue is at capacity. Please retry later.",
-            None,
-            true,
-        );
-        return HttpResponse::TooManyRequests()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
-    // Create async job
+    // Atomically admit the job — checks self-update flag and queue capacity
+    // under a single lock to prevent race with self-update reservation.
     match job_manager
-        .create_job(JobOperation::Install, package_names.clone())
+        .admit_job(JobOperation::Install, package_names.clone())
         .await
     {
         Ok(job_id) => {
@@ -333,15 +332,9 @@ pub async fn install_packages(
 
             HttpResponse::Accepted().json(response)
         }
-        Err(e) => {
-            error!(request_id = %request_id, error = ?e, "Failed to create job");
-            let response = ApiResponse::<()>::error(
-                "JOB_CREATE_ERROR",
-                &format!("Failed to create job: {}", e),
-                None,
-                true,
-            );
-            HttpResponse::InternalServerError().json(response)
+        Err(ref admission_err) => {
+            warn!(request_id = %request_id, error = %admission_err, "Install job admission rejected");
+            admission_error_response(admission_err)
         }
     }
 }
@@ -372,27 +365,18 @@ pub async fn update_package(
     // package operation mid-transaction, leaving the package manager in a
     // broken state.
     let is_self_update = package_name == SELF_PACKAGE_NAME;
-    if is_self_update {
-        let running_count = job_manager.running_count().await;
-        if running_count > 0 {
-            warn!(request_id = %request_id, package = %package_name, running_jobs = running_count, "Self-update blocked by running jobs");
-            let response = ApiResponse::<()>::error(
-                "SELF_UPDATE_BLOCKED",
-                "Cannot self-update while other jobs are running. Retry after jobs complete.",
-                Some(serde_json::json!({"running_jobs": running_count})),
-                true,
-            );
-            return HttpResponse::Conflict()
-                .insert_header(("Retry-After", "60"))
-                .json(response);
-        }
 
+    if is_self_update {
         // Pre-self-update repo-config self-heal: ensure the manager-hosted
         // package repo is configured before attempting the upgrade. Without
         // this, `apt-get install --only-upgrade linux-patch-api` silently finds
         // "already newest version" and reports success without upgrading.
         // This catches hosts that were enrolled before repo_config was added
         // to the enrollment bundle, or where the repo files were lost.
+        //
+        // This runs BEFORE the atomic reservation (try_reserve_self_update)
+        // because it's a network call that should not hold the job-manager
+        // lock. If the repo config is missing, we reject before reserving.
         match manager_url.as_ref() {
             Some(url) => {
                 info!(request_id = %request_id, "Pre-self-update repo config check");
@@ -422,33 +406,233 @@ pub async fn update_package(
             }
         }
 
-        job_manager.set_self_update_in_progress().await;
-        info!(request_id = %request_id, "Self-update flag set — other job endpoints will reject new jobs");
-    }
+        // Atomically reserve the self-update slot. This performs all checks
+        // (no running jobs, no existing self-update, queue capacity) and
+        // state changes (set flag, create job) under a single lock
+        // acquisition, preventing the check-then-set race where a competing
+        // patch/install/remove request interleaves between the running-count
+        // check and the flag set.
+        match job_manager
+            .try_reserve_self_update(vec![package_name.clone()])
+            .await
+        {
+            Ok(job_id) => {
+                info!(
+                    request_id = %request_id,
+                    job_id = %job_id,
+                    "Self-update reserved atomically — flag set, job created, other endpoints rejecting new jobs"
+                );
 
-    // Check job queue capacity
-    if !job_manager.can_accept_job().await {
-        if is_self_update {
-            job_manager.clear_self_update().await;
+                // Write persistent upgrade state so the new process can
+                // reconcile on startup if this process crashes or is
+                // restarted. The state file survives process restarts,
+                // unlike the in-memory flag.
+                let from_version = env!("CARGO_PKG_VERSION").to_string();
+                let upgrade_state = crate::jobs::upgrade_state::UpgradeState::installing(
+                    &job_id.to_string(),
+                    &from_version,
+                    &from_version, // target version unknown until apt resolves it
+                );
+                if let Err(e) = crate::jobs::upgrade_state::write_state(&upgrade_state) {
+                    warn!(error = %e, "Failed to write persistent upgrade state — self-update will proceed but crash recovery may not work correctly");
+                }
+
+                // Spawn background task to execute the update
+                let backend_clone = backend.clone();
+                let job_manager_clone = job_manager.clone();
+                let pkg_name = package_name.clone();
+
+                tokio::spawn(async move {
+                    let job_id_clone = job_id;
+
+                    // Update job to running
+                    let _ = job_manager_clone
+                        .update_job(
+                            &job_id_clone,
+                            JobStatus::Running,
+                            Some(0),
+                            Some("Starting self-update...".to_string()),
+                        )
+                        .await;
+                    let _ = job_manager_clone
+                        .add_job_log(&job_id_clone, "Job started".to_string())
+                        .await;
+
+                    // Execute update
+                    match backend_clone.update_package(&pkg_name) {
+                        Ok(_) => {
+                            let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                            info!(job_id = %job_id_clone, package = %pkg_name, "Self-update completed");
+
+                            // Transition persistent state to restart_pending.
+                            let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
+                                &job_id_clone.to_string(),
+                                &from_version,
+                                &from_version,
+                            );
+                            state.to_restart_pending();
+                            if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
+                                error!(error = %e, "Failed to write restart_pending upgrade state — crash recovery may not work correctly");
+                            }
+                        }
+                        Err(e) => {
+                            let _ = job_manager_clone
+                                .fail_job_with_diagnostics(&job_id_clone, &e)
+                                .await;
+                            error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Self-update failed");
+                        }
+                    }
+
+                    // Self-update flag lifecycle:
+                    //
+                    // On SUCCESS: Do NOT clear the flag. The self-update has
+                    // installed a new binary and the postinst has scheduled a
+                    // 30s fallback timer. Instead of relying on the timer,
+                    // we actively drain the system and trigger the restart
+                    // immediately once all operations have completed.
+                    //
+                    // State-based drain (replaces the fixed 30s timer as the
+                    // primary synchronization mechanism):
+                    // 1. The self_update_in_progress flag is already set,
+                    //    so no new mutable operations can start.
+                    // 2. Wait for running_count() == 0 (no active jobs).
+                    // 3. Wait for is_operation_in_progress() == false (no
+                    //    apt/dpkg child process running).
+                    // 4. Call restart_own_service() to restart immediately.
+                    //
+                    // The 30s timer in the postinst remains as a fallback
+                    // safety net — if this process crashes before completing
+                    // the drain, the timer ensures the restart still happens.
+                    //
+                    // On FAILURE: Clear the flag and persistent state so the
+                    // system can recover.
+                    let job = job_manager_clone.get_job(&job_id_clone).await;
+                    let is_failed = job
+                        .as_ref()
+                        .map(|j| j.status == JobStatus::Failed)
+                        .unwrap_or(true);
+                    if is_failed {
+                        // Release the self-update lock using the job_id as
+                        // the ownership permit. This only clears the lock if
+                        // this job still owns it — if a second self-update
+                        // somehow took over, this is a no-op.
+                        job_manager_clone.release_self_update(&job_id_clone).await;
+                        crate::jobs::upgrade_state::clear_state();
+                        info!(package = %pkg_name, "Self-update failed — lock and state cleared, job endpoints accepting new jobs");
+                    } else {
+                        info!(package = %pkg_name, "Self-update succeeded — beginning state-based drain before restart");
+
+                        // State-based drain: wait for all active operations to complete.
+                        // The self_update_in_progress flag prevents new operations from
+                        // starting, so we only need to wait for existing ones to finish.
+                        // We check active_count() (running + pending) because a pending
+                        // job could transition to running after the check — both must
+                        // be zero before restarting.
+                        let drain_deadline =
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
+                        let mut drain_log_interval =
+                            tokio::time::interval(tokio::time::Duration::from_secs(10));
+                        drain_log_interval.tick().await; // skip first immediate tick
+
+                        loop {
+                            let active = job_manager_clone.active_count().await;
+                            let apt_busy = backend_clone.is_operation_in_progress();
+
+                            if active == 0 && !apt_busy {
+                                info!(
+                                    job_id = %job_id_clone,
+                                    active_jobs = active,
+                                    apt_in_progress = apt_busy,
+                                    "Drain complete — all operations finished, triggering restart"
+                                );
+                                break;
+                            }
+
+                            if tokio::time::Instant::now() >= drain_deadline {
+                                warn!(
+                                    job_id = %job_id_clone,
+                                    active_jobs = active,
+                                    apt_in_progress = apt_busy,
+                                    "Drain timeout (120s) reached — restarting with {} active operations (postinst timer is fallback)",
+                                    active
+                                );
+                                break;
+                            }
+
+                            drain_log_interval.tick().await;
+                            info!(
+                                job_id = %job_id_clone,
+                                active_jobs = active,
+                                apt_in_progress = apt_busy,
+                                "Waiting for operations to drain before restart..."
+                            );
+                        }
+
+                        // Trigger the restart immediately. The postinst's 30s
+                        // timer is a fallback in case this call fails or the
+                        // process crashes before reaching this point.
+                        info!(job_id = %job_id_clone, "Initiating service restart after self-update drain");
+                        match backend_clone.restart_own_service() {
+                            Ok(_) => {
+                                info!(job_id = %job_id_clone, "Service restart command executed — process will be replaced");
+                            }
+                            Err(e) => {
+                                error!(
+                                    job_id = %job_id_clone,
+                                    error = ?e,
+                                    "Failed to trigger service restart — relying on postinst 30s fallback timer"
+                                );
+                            }
+                        }
+                    }
+                });
+
+                let response = ApiResponse::success(JobResponseData {
+                    job_id: job_id.to_string(),
+                    status: "pending".to_string(),
+                    operation: "update".to_string(),
+                    packages: None,
+                    package: Some(package_name),
+                });
+
+                return HttpResponse::Accepted().json(response);
+            }
+            Err(admission_err) => {
+                warn!(request_id = %request_id, error = %admission_err, "Self-update reservation rejected");
+                let (code, message, data, retry) = match admission_err {
+                    crate::jobs::manager::SelfUpdateAdmissionError::AlreadyInProgress => (
+                        "SELF_UPDATE_IN_PROGRESS",
+                        "A self-update is already in progress. Retry after it completes.".to_string(),
+                        None,
+                        true,
+                    ),
+                    crate::jobs::manager::SelfUpdateAdmissionError::JobsInProgress { count } => (
+                        "SELF_UPDATE_BLOCKED",
+                        format!("Cannot self-update while {} jobs are in progress. Retry after jobs complete.", count),
+                        Some(serde_json::json!({"running_jobs": count})),
+                        true,
+                    ),
+                    crate::jobs::manager::SelfUpdateAdmissionError::QueueFull => (
+                        "QUEUE_FULL",
+                        "Job queue is at capacity. Please retry later.".to_string(),
+                        None,
+                        true,
+                    ),
+                };
+                let response = ApiResponse::<()>::error(code, &message, data, retry);
+                return HttpResponse::Conflict()
+                    .insert_header(("Retry-After", "60"))
+                    .json(response);
+            }
         }
-        let response = ApiResponse::<()>::error(
-            "QUEUE_FULL",
-            "Job queue is at capacity. Please retry later.",
-            None,
-            true,
-        );
-        return HttpResponse::TooManyRequests()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
     }
 
-    // Create async job
+    // Non-self-update path: atomically admit the job
     match job_manager
-        .create_job(JobOperation::Update, vec![package_name.clone()])
+        .admit_job(JobOperation::Update, vec![package_name.clone()])
         .await
     {
         Ok(job_id) => {
-            // Spawn background task to execute the update
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
             let pkg_name = package_name.clone();
@@ -456,7 +640,6 @@ pub async fn update_package(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                // Update job to running
                 let _ = job_manager_clone
                     .update_job(
                         &job_id_clone,
@@ -469,7 +652,6 @@ pub async fn update_package(
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute update
                 match backend_clone.update_package(&pkg_name) {
                     Ok(_) => {
                         let _ = job_manager_clone.complete_job(&job_id_clone).await;
@@ -481,14 +663,6 @@ pub async fn update_package(
                             .await;
                         error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Package update failed");
                     }
-                }
-
-                // Clear the self-update flag regardless of outcome so other
-                // jobs can resume. The delayed restart (30s) will swap the
-                // binary; by then all package operations have been blocked.
-                if pkg_name == SELF_PACKAGE_NAME {
-                    job_manager_clone.clear_self_update().await;
-                    info!(package = %pkg_name, "Self-update flag cleared — job endpoints accepting new jobs");
                 }
             });
 
@@ -502,18 +676,9 @@ pub async fn update_package(
 
             HttpResponse::Accepted().json(response)
         }
-        Err(e) => {
-            if is_self_update {
-                job_manager.clear_self_update().await;
-            }
-            error!(request_id = %request_id, error = ?e, "Failed to create job");
-            let response = ApiResponse::<()>::error(
-                "JOB_CREATE_ERROR",
-                &format!("Failed to create job: {}", e),
-                None,
-                true,
-            );
-            HttpResponse::InternalServerError().json(response)
+        Err(ref admission_err) => {
+            warn!(request_id = %request_id, error = %admission_err, "Update job admission rejected");
+            admission_error_response(admission_err)
         }
     }
 }
@@ -537,35 +702,10 @@ pub async fn remove_package(
 
     info!(request_id = %request_id, package = %package_name, "Removing package");
 
-    // Block new jobs while a self-update is in progress
-    if job_manager.is_self_update_in_progress().await {
-        warn!(request_id = %request_id, "Remove rejected — self-update in progress");
-        let response = ApiResponse::<()>::error(
-            "SELF_UPDATE_IN_PROGRESS",
-            "Cannot accept new jobs while a self-update is in progress. Retry after it completes.",
-            None,
-            true,
-        );
-        return HttpResponse::Conflict()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
-    // Check job queue capacity
-    if !job_manager.can_accept_job().await {
-        let response = ApiResponse::<()>::error(
-            "QUEUE_FULL",
-            "Job queue is at capacity. Please retry later.",
-            None,
-            true,
-        );
-        return HttpResponse::TooManyRequests()
-            .insert_header(("Retry-After", "60"))
-            .json(response);
-    }
-
+    // Atomically admit the job — checks self-update flag and queue capacity
+    // under a single lock to prevent race with self-update reservation.
     match job_manager
-        .create_job(JobOperation::Remove, vec![package_name.clone()])
+        .admit_job(JobOperation::Remove, vec![package_name.clone()])
         .await
     {
         Ok(job_id) => {
@@ -615,15 +755,9 @@ pub async fn remove_package(
 
             HttpResponse::Accepted().json(response)
         }
-        Err(e) => {
-            error!(request_id = %request_id, error = ?e, "Failed to create job");
-            let response = ApiResponse::<()>::error(
-                "JOB_CREATE_ERROR",
-                &format!("Failed to create job: {}", e),
-                None,
-                true,
-            );
-            HttpResponse::InternalServerError().json(response)
+        Err(ref admission_err) => {
+            warn!(request_id = %request_id, error = %admission_err, "Remove job admission rejected");
+            admission_error_response(admission_err)
         }
     }
 }

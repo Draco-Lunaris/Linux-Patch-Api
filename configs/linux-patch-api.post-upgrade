@@ -1,10 +1,24 @@
 #!/bin/sh
 # Alpine Linux post-upgrade script for linux-patch-api
 # Runs after the new package version is installed during an upgrade.
-# Schedules a 30s delayed restart so the running process (old binary)
-# keeps serving while the new binary is already on disk.
-# The bidirectional self-update guard ensures no concurrent package
-# operations are running during this window.
+#
+# Schedules a 30s delayed restart as a FALLBACK safety net.
+#
+# The agent itself performs state-based draining after the package
+# install completes: it waits for all active operations to finish,
+# then triggers the restart immediately. This timer is a fallback
+# in case the agent crashes before completing the drain.
 
-nohup sh -c 'sleep 30 && rc-service linux-patch-api restart' >/dev/null 2>&1 &
-echo "Upgrade complete — scheduled 30s delayed restart via OpenRC"
+# Create upgrade-pending marker so the new process knows it's starting
+# after a self-update restart. The new process clears this after init.
+# Also used by the delayed-restart script as a precondition to prevent
+# spurious restarts.
+mkdir -p /var/lib/linux_patch_api
+touch /var/lib/linux_patch_api/upgrade-pending
+
+# Schedule a 30s fallback restart using the deduplication helper script.
+# The helper uses a PID file to ensure only one restart is pending at a
+# time — if a previous restart is still waiting, it is killed and replaced.
+mkdir -p /var/run
+nohup /usr/lib/linux-patch-api/delayed-restart.sh >/dev/null 2>&1 &
+echo "Upgrade complete — scheduled 30s fallback restart via supervised helper"

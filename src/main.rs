@@ -25,6 +25,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::crl::{self, CrlStatus};
@@ -264,6 +265,29 @@ async fn main() -> Result<()> {
         "Job manager initialized"
     );
 
+    // Reconcile persistent upgrade state on startup.
+    //
+    // The in-memory self_update_in_progress flag is volatile — it disappears
+    // on crash or restart. The persistent state file at
+    // /var/lib/linux_patch_api/upgrade-state.json survives process restarts
+    // and allows the new process to know whether it's starting after a
+    // self-update restart.
+    //
+    // If the state is "restart_pending" and the deadline hasn't expired,
+    // we set the self-update flag to block all package operations until
+    // initialization completes. If the state is "installing" (apt-get was
+    // interrupted) or the deadline expired, we clear the state and allow
+    // normal operation — the dpkg pre-flight will clean up any interrupted
+    // transactions.
+    let should_block_for_upgrade = linux_patch_api::jobs::upgrade_state::reconcile_startup_state();
+    if should_block_for_upgrade {
+        info!("Setting self-update flag based on persistent upgrade state — blocking all package operations until initialization completes");
+        // Use a synthetic UUID as the owner — the new process doesn't have
+        // a job_id from the old process. force_clear_self_update is used
+        // later to release it regardless of ownership.
+        job_manager.set_self_update_in_progress(Uuid::nil()).await;
+    }
+
     // Initialize package manager backend
     let package_backend = match create_backend() {
         Ok(backend) => {
@@ -322,6 +346,20 @@ async fn main() -> Result<()> {
         }
     };
 
+    // If this process started after a self-update restart, clear the
+    // self-update flag now that initialization is complete (config loaded,
+    // package backend initialized, CRL loaded, whitelist loaded).
+    // Also remove the persistent state file and the marker file.
+    //
+    // This must happen before job_manager is moved into web::Data below.
+    if should_block_for_upgrade {
+        info!("Self-update restart initialization complete — clearing self-update flag and persistent state");
+        // Force-clear regardless of ownership — the new process doesn't
+        // know the old process's job_id, and the old process is gone.
+        job_manager.force_clear_self_update().await;
+        linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+    }
+
     // Store job manager and backend in Arc for sharing
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
@@ -342,6 +380,13 @@ async fn main() -> Result<()> {
     // Initialize shared CRL state (available even when TLS is off for health reporting)
     let shared_crl_state = crl::new_shared_state();
     let crl_state_data = web::Data::new(shared_crl_state.clone());
+
+    // Clone backend for the SIGTERM handler — it needs to check if an apt
+    // operation is in progress and wait for it to complete before allowing
+    // the server to shut down. Without this, systemd's SIGTERM → SIGKILL
+    // cycle (TimeoutStopSec=30s) can kill apt-get mid-transaction, leaving
+    // dpkg in a half-configured state.
+    let sigterm_backend = backend_data.clone();
 
     // Configure bind address
     let bind_address = format!("{}:{}", config.server.bind, config.server.port);
@@ -546,10 +591,19 @@ async fn main() -> Result<()> {
         info!("Binding server with TLS 1.3 - non-TLS connections will be rejected");
 
         // Bind with TLS using rustls 0.23 - non-TLS connections fail at handshake
-        server_builder
+        let server = server_builder
             .listen_rustls_0_23(tcp_listener, server_config)?
-            .run()
-            .await?;
+            .run();
+
+        // Spawn SIGTERM handler that waits for in-progress apt operations
+        // to complete before stopping the server. This prevents SIGKILL from
+        // killing apt-get mid-transaction (which leaves dpkg half-configured).
+        let server_handle = server.handle();
+        tokio::spawn(async move {
+            setup_sigterm_handler(server_handle, sigterm_backend).await;
+        });
+
+        server.await?;
     } else {
         // Create TCP listener with SO_REUSEADDR for non-TLS mode
         let socket = socket2::Socket::new(
@@ -581,9 +635,100 @@ async fn main() -> Result<()> {
         info!("Listening on {} (no TLS)", bind_address);
 
         warn!("TLS is disabled - running without mTLS authentication (INSECURE)");
-        server_builder.listen(tcp_listener)?.run().await?;
+        let server = server_builder.listen(tcp_listener)?.run();
+
+        // Spawn SIGTERM handler (same as TLS path)
+        let server_handle = server.handle();
+        tokio::spawn(async move {
+            setup_sigterm_handler(server_handle, sigterm_backend).await;
+        });
+
+        server.await?;
     }
 
     info!("Linux Patch API shutting down");
     Ok(())
+}
+
+/// SIGTERM handler that waits for in-progress package operations to complete
+/// before stopping the HTTP server.
+///
+/// When systemd stops the service (`systemctl stop`), it sends SIGTERM, waits
+/// `TimeoutStopSec=30s`, then sends SIGKILL. If apt-get is mid-transaction when
+/// SIGKILL arrives, dpkg is left in a half-configured state — packages unpacked
+/// but not configured, kernel installed but initramfs not generated, etc.
+///
+/// This handler:
+/// 1. Catches SIGTERM
+/// 2. Checks if a package operation is in progress (via `is_operation_in_progress`)
+/// 3. If yes: waits up to 25s (leaving 5s margin before SIGKILL) for it to complete
+/// 4. Stops the HTTP server gracefully (stops accepting new connections, drains)
+/// 5. If no operation in progress: stops immediately
+///
+/// The 25s deadline is based on the systemd service's `TimeoutStopSec=30s` —
+/// we leave a 5s margin for the server to drain in-flight HTTP requests after
+/// we call `stop()`.
+async fn setup_sigterm_handler(
+    server_handle: actix_web::dev::ServerHandle,
+    backend: web::Data<Box<dyn linux_patch_api::packages::PackageManagerBackend>>,
+) {
+    use std::time::{Duration, Instant};
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "Failed to install SIGTERM handler — apt operations may be killed mid-transaction on shutdown");
+            return;
+        }
+    };
+
+    // Wait for SIGTERM
+    sigterm.recv().await;
+    info!("Received SIGTERM — initiating graceful shutdown");
+
+    // Check if a package operation is in progress
+    if backend.is_operation_in_progress() {
+        info!("Package operation in progress — waiting up to 25s for it to complete before shutting down");
+
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let mut waited = 0u64;
+
+        while backend.is_operation_in_progress() {
+            let now = Instant::now();
+            if now >= deadline {
+                warn!(
+                    waited_seconds = waited,
+                    "Package operation still in progress after 25s — shutting down anyway (systemd will SIGKILL in ~5s)"
+                );
+                break;
+            }
+
+            let remaining = deadline - now;
+            let sleep_dur = Duration::from_secs(1).min(remaining);
+            tokio::time::sleep(sleep_dur).await;
+            waited += sleep_dur.as_secs();
+
+            if backend.is_operation_in_progress() {
+                info!(
+                    waited_seconds = waited,
+                    "Still waiting for package operation to complete..."
+                );
+            }
+        }
+
+        if !backend.is_operation_in_progress() {
+            info!(
+                waited_seconds = waited,
+                "Package operation completed — proceeding with shutdown"
+            );
+        }
+    } else {
+        info!("No package operation in progress — shutting down immediately");
+    }
+
+    // Stop the HTTP server gracefully — stops accepting new connections and
+    // drains in-flight requests. The server's own drain timeout is set by
+    // client_disconnect_timeout (5s).
+    let _ = server_handle.stop(true).await;
 }

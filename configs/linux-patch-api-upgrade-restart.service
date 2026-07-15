@@ -4,6 +4,11 @@ ConditionPathExists=/var/lib/linux_patch_api/upgrade-pending
 
 [Service]
 Type=oneshot
+# Verify the marker still exists before restarting. The marker is removed
+# by ExecStartPost and also by the new process on successful startup.
+# If a prior restart already succeeded and the new process removed the
+# marker, this guard prevents a duplicate restart.
+ExecStartPre=/bin/sh -c 'test -f /var/lib/linux_patch_api/upgrade-pending || exit 55'
 ExecStart=systemctl restart linux-patch-api.service
 ExecStartPost=rm -f /var/lib/linux_patch_api/upgrade-pending
 RemainAfterExit=no

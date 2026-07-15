@@ -99,17 +99,20 @@ if [ "$1" = "configure" ]; then
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
         systemctl daemon-reload
         
-        # Schedule a 30s delayed restart using an installed systemd timer.
-        # The running process keeps serving on the old binary while dpkg has
-        # already placed the new one on disk. After 30s, the timer fires the
-        # one-shot restart service which restarts the agent and removes the
-        # marker file. This is enough time to drain in-flight HTTP requests.
-        # The bidirectional self-update guard in the agent ensures no new
-        # package operations start during this window.
+        # Schedule a 30s delayed restart as a FALLBACK safety net.
+        #
+        # The agent itself performs state-based draining after the package
+        # install completes: it waits for all active operations to finish,
+        # then triggers the restart immediately. This timer is a fallback
+        # in case the agent crashes before completing the drain.
+        #
+        # Using `systemctl restart` (not `start`) ensures idempotency:
+        # if a previous timer is still running from a retried upgrade,
+        # it is reset rather than duplicated.
         mkdir -p /var/lib/linux_patch_api
         touch /var/lib/linux_patch_api/upgrade-pending
         systemctl daemon-reload
-        systemctl start linux-patch-api-upgrade-restart.timer
+        systemctl restart linux-patch-api-upgrade-restart.timer
     fi
 fi
 

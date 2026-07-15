@@ -80,7 +80,12 @@ cp target/x86_64-unknown-linux-musl/release/linux-patch-api "$PKGDIR"/usr/bin/
 cp configs/linux-patch-api-openrc "$PKGDIR"/etc/init.d/linux-patch-api
 chmod 755 "$PKGDIR"/etc/init.d/linux-patch-api
 
+# Copy delayed-restart helper script (used by post-upgrade for supervised
+# restart deduplication — replaces anonymous nohup sleep processes)
 mkdir -p "$PKGDIR"/usr/lib/linux-patch-api
+cp configs/linux-patch-api-delayed-restart.sh "$PKGDIR"/usr/lib/linux-patch-api/delayed-restart.sh
+chmod 755 "$PKGDIR"/usr/lib/linux-patch-api/delayed-restart.sh
+
 mkdir -p "$PKGDIR"/usr/lib/systemd/system
 
 # Copy example configs (as .example files - install script creates live configs)
