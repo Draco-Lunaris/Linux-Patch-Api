@@ -261,11 +261,11 @@ async fn test_job_queue_depth_cap() {
 
     // Fill the queue with pending jobs
     job_manager
-        .create_job(JobOperation::Install, vec!["pkg1".to_string()])
+        .create_job_unchecked(JobOperation::Install, vec!["pkg1".to_string()])
         .await
         .unwrap();
     job_manager
-        .create_job(JobOperation::Install, vec!["pkg2".to_string()])
+        .create_job_unchecked(JobOperation::Install, vec!["pkg2".to_string()])
         .await
         .unwrap();
 
@@ -310,15 +310,15 @@ async fn test_can_accept_job_respects_queue_depth() {
 
     // Fill to capacity
     job_manager
-        .create_job(JobOperation::Install, vec!["a".to_string()])
+        .create_job_unchecked(JobOperation::Install, vec!["a".to_string()])
         .await
         .unwrap();
     job_manager
-        .create_job(JobOperation::Install, vec!["b".to_string()])
+        .create_job_unchecked(JobOperation::Install, vec!["b".to_string()])
         .await
         .unwrap();
     job_manager
-        .create_job(JobOperation::Install, vec!["c".to_string()])
+        .create_job_unchecked(JobOperation::Install, vec!["c".to_string()])
         .await
         .unwrap();
 

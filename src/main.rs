@@ -273,20 +273,36 @@ async fn main() -> Result<()> {
     // and allows the new process to know whether it's starting after a
     // self-update restart.
     //
-    // If the state is "restart_pending" and the deadline hasn't expired,
-    // we set the self-update flag to block all package operations until
-    // initialization completes. If the state is "installing" (apt-get was
-    // interrupted) or the deadline expired, we clear the state and allow
-    // normal operation — the dpkg pre-flight will clean up any interrupted
-    // transactions.
-    let should_block_for_upgrade = linux_patch_api::jobs::upgrade_state::reconcile_startup_state();
+    // Fail-closed: corrupt/missing state with marker → recovery mode.
+    // No early clearing: state is only cleared in finalize_successful_restart,
+    // called AFTER listener bind + READY=1.
+    let startup_reconciliation = linux_patch_api::jobs::upgrade_state::reconcile_startup_state();
+    let should_block_for_upgrade = match startup_reconciliation {
+        linux_patch_api::jobs::upgrade_state::StartupReconciliation::Clean => false,
+        linux_patch_api::jobs::upgrade_state::StartupReconciliation::RestartInProgress => true,
+        linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall => true,
+        linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode => {
+            error!(
+                "Entering recovery mode — upgrade state is corrupt, missing with marker, or inconsistent. \
+                 All package operations will be blocked. dpkg --configure -a will run via pre-flight. \
+                 Health endpoint will report degraded status."
+            );
+            // Write recovering state so a crash during recovery also enters recovery mode
+            linux_patch_api::jobs::upgrade_state::write_recovering_state();
+            true
+        }
+    };
     if should_block_for_upgrade {
         info!("Setting self-update flag based on persistent upgrade state — blocking all package operations until initialization completes");
-        // Use a synthetic UUID as the owner — the new process doesn't have
+        // Use a random UUID as the owner — the new process doesn't have
         // a job_id from the old process. force_clear_self_update is used
         // later to release it regardless of ownership.
-        job_manager.set_self_update_in_progress(Uuid::nil()).await;
+        job_manager
+            .set_self_update_in_progress(Uuid::new_v4())
+            .await;
     }
+    let in_recovery_mode = startup_reconciliation
+        == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode;
 
     // Initialize package manager backend
     let package_backend = match create_backend() {
@@ -346,18 +362,23 @@ async fn main() -> Result<()> {
         }
     };
 
-    // If this process started after a self-update restart, clear the
-    // self-update flag now that initialization is complete (config loaded,
-    // package backend initialized, CRL loaded, whitelist loaded).
-    // Also remove the persistent state file and the marker file.
+    // If this process started after a self-update restart, we do NOT clear
+    // the self-update flag yet. The state and marker are only cleared AFTER
+    // the listener is bound and READY=1 is sent to systemd (see below).
     //
-    // This must happen before job_manager is moved into web::Data below.
+    // However, we need to clear the flag BEFORE job_manager is moved into
+    // web::Data. So we use an Arc<AtomicBool> flag to track whether we
+    // should finalize after listener bind, and do the state/marker cleanup
+    // separately.
+    //
+    // Actually, the flag clearing must happen before the move. But the
+    // state file and marker can be cleared after listener bind. So:
+    // 1. Clear the in-memory flag now (before move into web::Data).
+    // 2. Clear the state file and marker after listener bind.
+    let needs_state_finalize = should_block_for_upgrade;
     if should_block_for_upgrade {
-        info!("Self-update restart initialization complete — clearing self-update flag and persistent state");
-        // Force-clear regardless of ownership — the new process doesn't
-        // know the old process's job_id, and the old process is gone.
+        info!("Clearing self-update flag before moving job_manager into web::Data");
         job_manager.force_clear_self_update().await;
-        linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
     }
 
     // Store job manager and backend in Arc for sharing
@@ -585,6 +606,21 @@ async fn main() -> Result<()> {
         // Log listening AFTER successful bind
         info!("Listening on {} (mTLS enabled)", bind_address);
 
+        // Listener is bound — finalize the self-update restart if applicable.
+        // The in-memory flag was already cleared before the move into web::Data.
+        // Now clear the persistent state file and marker.
+        if needs_state_finalize {
+            info!("Listener bound — clearing upgrade state file and marker");
+            linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+        }
+
+        // Notify systemd that we're ready (Type=notify)
+        notify_systemd_ready();
+        if in_recovery_mode {
+            warn!("Notifying systemd of degraded status (recovery mode)");
+            notify_systemd_status("Running in recovery mode — package operations blocked");
+        }
+
         // Clone the ServerConfig from Arc for listen_rustls_0_23
         let server_config = (*rustls_config).clone();
 
@@ -634,6 +670,19 @@ async fn main() -> Result<()> {
         // Log listening AFTER successful bind
         info!("Listening on {} (no TLS)", bind_address);
 
+        // Listener is bound — finalize the self-update restart if applicable.
+        if needs_state_finalize {
+            info!("Listener bound — clearing upgrade state file and marker");
+            linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+        }
+
+        // Notify systemd that we're ready (Type=notify)
+        notify_systemd_ready();
+        if in_recovery_mode {
+            warn!("Notifying systemd of degraded status (recovery mode)");
+            notify_systemd_status("Running in recovery mode — package operations blocked");
+        }
+
         warn!("TLS is disabled - running without mTLS authentication (INSECURE)");
         let server = server_builder.listen(tcp_listener)?.run();
 
@@ -648,6 +697,38 @@ async fn main() -> Result<()> {
 
     info!("Linux Patch API shutting down");
     Ok(())
+}
+
+/// Send READY=1 to systemd's notification socket (for Type=notify services).
+/// If the socket is unavailable (not running under systemd), this is a no-op.
+fn notify_systemd_ready() {
+    use systemd::daemon::{notify, STATE_READY};
+    let state = [(STATE_READY, "1")];
+    if let Err(e) = notify(false, state.iter()) {
+        tracing::debug!(error = ?e, "sd_notify READY=1 failed (not running under systemd?)");
+    } else {
+        info!("Notified systemd: READY=1");
+    }
+}
+
+/// Send a custom status message to systemd.
+fn notify_systemd_status(status: &str) {
+    use systemd::daemon::{notify, STATE_STATUS};
+    let state = [(STATE_STATUS, status)];
+    if let Err(e) = notify(false, state.iter()) {
+        tracing::debug!(error = ?e, "sd_notify status failed");
+    }
+}
+
+/// Send STOPPING=1 to systemd's notification socket.
+fn notify_systemd_stopping() {
+    use systemd::daemon::{notify, STATE_STOPPING};
+    let state = [(STATE_STOPPING, "1")];
+    if let Err(e) = notify(false, state.iter()) {
+        tracing::debug!(error = ?e, "sd_notify STOPPING=1 failed");
+    } else {
+        info!("Notified systemd: STOPPING=1");
+    }
 }
 
 /// SIGTERM handler that waits for in-progress package operations to complete
@@ -686,6 +767,9 @@ async fn setup_sigterm_handler(
     // Wait for SIGTERM
     sigterm.recv().await;
     info!("Received SIGTERM — initiating graceful shutdown");
+
+    // Notify systemd that we're stopping
+    notify_systemd_stopping();
 
     // Check if a package operation is in progress
     if backend.is_operation_in_progress() {

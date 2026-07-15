@@ -384,7 +384,23 @@ pub async fn refresh_crl(
     }
 
     let tmp_path = crl_path.with_extension("pem.tmp");
-    fs::write(&tmp_path, &crl_pem).map_err(|e| format!("Failed to write temp CRL file: {}", e))?;
+    // Use O_EXCL (create_new) to prevent symlink attacks
+    if tmp_path.exists() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&tmp_path)
+            .map_err(|e| format!("Failed to create temp CRL file: {}", e))?;
+        file.write_all(crl_pem.as_bytes())
+            .map_err(|e| format!("Failed to write temp CRL file: {}", e))?;
+        let _ = file.sync_all();
+    }
 
     fs::rename(&tmp_path, crl_path)
         .map_err(|e| format!("Failed to rename temp CRL file: {}", e))?;

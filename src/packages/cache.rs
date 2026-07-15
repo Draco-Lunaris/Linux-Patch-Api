@@ -136,17 +136,43 @@ impl PackageCacheState {
             last_cache_update: inner.last_update.map(|dt| dt.to_rfc3339()),
             last_update_success: inner.last_update_success,
         };
-        drop(inner); // release lock before I/O
+        drop(inner);
 
-        // Create parent directory if needed
         if let Some(parent) = std::path::Path::new(CACHE_STATE_PATH).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
         match serde_json::to_string_pretty(&state) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(CACHE_STATE_PATH, json) {
-                    warn!("Failed to persist cache state: {}", e);
+                // Use atomic write (temp + rename) with O_EXCL to prevent symlink attacks
+                let path = std::path::Path::new(CACHE_STATE_PATH);
+                let tmp_path = path.with_extension("json.tmp");
+                if tmp_path.exists() {
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
+                let write_result = {
+                    use std::io::Write;
+                    use std::os::unix::fs::OpenOptionsExt;
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o644)
+                        .open(&tmp_path)
+                    {
+                        Ok(mut file) => file
+                            .write_all(json.as_bytes())
+                            .and_then(|_| file.sync_all()),
+                        Err(e) => Err(e),
+                    }
+                };
+                match write_result {
+                    Ok(_) => {
+                        if let Err(e) = std::fs::rename(&tmp_path, path) {
+                            warn!("Failed to persist cache state (rename): {}", e);
+                            let _ = std::fs::remove_file(&tmp_path);
+                        }
+                    }
+                    Err(e) => warn!("Failed to persist cache state (write): {}", e),
                 }
             }
             Err(e) => warn!("Failed to serialize cache state: {}", e),

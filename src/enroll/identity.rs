@@ -432,7 +432,14 @@ mod tests {
 
     #[test]
     fn machine_id_is_not_empty() {
-        let id = get_machine_id().expect("Failed to get machine-id");
+        // Skip on systems without a machine-id (e.g. CI containers, chroots).
+        let id = match get_machine_id() {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Skipping: no machine-id available ({})", e);
+                return;
+            }
+        };
         assert!(!id.is_empty(), "machine-id should not be empty");
         assert_eq!(id.len(), 32, "machine-id should be 32 hex chars");
     }

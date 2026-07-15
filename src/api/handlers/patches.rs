@@ -46,12 +46,21 @@ pub async fn list_patches(
 
     info!(request_id = %request_id, "Listing available patches");
 
-    // Refresh package cache if stale so the manager sees current patch data
+    // Refresh package cache if stale so the manager sees current patch data.
+    // Spawn a background refresh instead of blocking the response — this
+    // prevents the patch-list endpoint from racing with in-progress package
+    // operations on the dpkg/rpm/pacman frontend lock.
     if cache_state.is_stale() {
-        info!(request_id = %request_id, "Package cache stale, refreshing before listing patches");
-        if let Err(e) = backend.refresh_package_cache(&cache_state) {
-            error!(request_id = %request_id, error = ?e, "Cache refresh failed before listing patches — serving potentially stale data");
-        }
+        info!(request_id = %request_id, "Package cache stale, spawning background refresh before listing patches");
+        let backend_clone = backend.clone();
+        let cache_state_clone = cache_state.clone();
+        actix_web::rt::spawn(async move {
+            if !backend_clone.is_operation_in_progress() {
+                if let Err(e) = backend_clone.refresh_package_cache(&cache_state_clone) {
+                    tracing::warn!(error = ?e, "Background cache refresh from patch-list failed");
+                }
+            }
+        });
     }
 
     match backend.list_patches() {
