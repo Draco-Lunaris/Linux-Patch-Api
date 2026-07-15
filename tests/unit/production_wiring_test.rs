@@ -440,11 +440,10 @@ async fn sigterm_waits_for_active_mutation() {
 // =============================================================================
 
 /// The coordinator's `op_in_progress` flag is the single source of truth for
-/// whether a mutation is in progress — not a backend-specific flag like
-/// `APT_IN_PROGRESS`. This test verifies the coordinator flag is the one the
-/// SIGTERM handler would consult, and that a default
-/// `PackageManagerBackend::is_operation_in_progress()` returns false (the
-/// coordinator overrides it).
+/// whether a mutation is in progress. The old APT-specific `APT_IN_PROGRESS`
+/// static has been removed — all backends rely on the coordinator. This test
+/// verifies the coordinator flag is the authoritative source and that a
+/// default `PackageManagerBackend::is_operation_in_progress()` returns false.
 #[test]
 fn coordinator_op_in_progress_is_single_source_of_truth() {
     let coord = OperationCoordinator::new(5);

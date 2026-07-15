@@ -18,9 +18,9 @@
 //! Read-only operations (list, get, list-patches) do NOT acquire the mutation
 //! semaphore — they can run concurrently with each other.
 //!
-//! The `op_in_progress` flag replaces the APT-only `APT_IN_PROGRESS` global.
-//! It works across all backends because it's set by the coordinator, not by
-//! individual backend code.
+//! The `op_in_progress` flag is the sole authority for whether a package-DB
+//! mutation is running. The old APT-only `APT_IN_PROGRESS` static has been
+//! removed — the coordinator works across all backends.
 
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
