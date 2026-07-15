@@ -10,11 +10,13 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::enroll::{check_and_provision_repo_config, RepoHealResult};
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
+use crate::packages::coordinator::OperationCoordinator;
 use crate::packages::{
     validate_package_name, validate_version_string, InstallOptions, Package, PackageManagerBackend,
     PackageSpec, SELF_PACKAGE_NAME,
@@ -264,6 +266,7 @@ pub async fn install_packages(
     body: web::Json<InstallRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -288,6 +291,7 @@ pub async fn install_packages(
             // Spawn background task to execute the installation
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
+            let coordinator_clone = coordinator.clone();
             let options = body.options.clone();
             let packages = body.packages.clone();
 
@@ -307,8 +311,14 @@ pub async fn install_packages(
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute installation
-                match backend_clone.install_packages(&packages, &options) {
+                // Execute installation through the coordinator's mutation
+                // semaphore — this serializes all package-DB mutations across
+                // ALL backends (APT, DNF, YUM, APK, Pacman).
+                let install_result = coordinator_clone
+                    .run_mutation(|| backend_clone.install_packages(&packages, &options))
+                    .await;
+
+                match install_result {
                     Ok(_) => {
                         let _ = job_manager_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, "Package installation completed");
@@ -344,6 +354,7 @@ pub async fn update_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     manager_url: web::Data<Option<String>>,
     _req: HttpRequest,
 ) -> impl Responder {
@@ -416,7 +427,8 @@ pub async fn update_package(
             .try_reserve_self_update(vec![package_name.clone()])
             .await
         {
-            Ok(job_id) => {
+            Ok(reservation) => {
+                let job_id = reservation.job_id;
                 info!(
                     request_id = %request_id,
                     job_id = %job_id,
@@ -425,8 +437,12 @@ pub async fn update_package(
 
                 // Write persistent upgrade state — start in Reserving phase.
                 // The state file survives process restarts, unlike the in-memory flag.
-                let from_version = env!("CARGO_PKG_VERSION").to_string();
-                // Try to resolve the target version before installing.
+                // FAIL-CLOSED: If we cannot persist the Reserving state, we MUST
+                // abort the self-update before invoking the package manager.
+                let from_version = backend
+                    .get_installed_version(&package_name)
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
                 let target_version = backend
                     .get_candidate_version(&package_name)
                     .unwrap_or(None)
@@ -440,18 +456,35 @@ pub async fn update_package(
                 } else {
                     warn!("Could not resolve target version — using from_version as placeholder");
                 }
-                let upgrade_state = crate::jobs::upgrade_state::UpgradeState::installing(
+                let upgrade_state = crate::jobs::upgrade_state::UpgradeState::reserving(
                     &job_id.to_string(),
                     &from_version,
                     &target_version,
                 );
                 if let Err(e) = crate::jobs::upgrade_state::write_state(&upgrade_state) {
-                    warn!(error = %e, "Failed to write persistent upgrade state — self-update will proceed but crash recovery may not work correctly");
+                    // FAIL-CLOSED: abort the self-update
+                    // The reservation will be dropped here, rolling back
+                    // the owner and job automatically.
+                    error!(error = %e, "Failed to write persistent Reserving state — aborting self-update before invoking package manager");
+                    job_manager.release_self_update(&job_id).await;
+                    let response = ApiResponse::<()>::error(
+                        "PERSISTENCE_FAILED",
+                        "Failed to persist upgrade state — self-update aborted for safety. Retry after resolving the disk issue.",
+                        Some(serde_json::json!({"error": e.to_string()})),
+                        true,
+                    );
+                    return HttpResponse::InternalServerError().json(response);
                 }
+
+                // Commit the reservation — transfer ownership to the spawned task.
+                // If we don't reach this point (cancellation/panic), the
+                // reservation guard will roll back the owner and job on drop.
+                let job_id = reservation.commit();
 
                 // Spawn background task to execute the update
                 let backend_clone = backend.clone();
                 let job_manager_clone = job_manager.clone();
+                let coordinator_clone = coordinator.clone();
                 let pkg_name = package_name.clone();
 
                 tokio::spawn(async move {
@@ -470,13 +503,40 @@ pub async fn update_package(
                         .add_job_log(&job_id_clone, "Job started".to_string())
                         .await;
 
-                    // Execute update
-                    match backend_clone.update_package(&pkg_name) {
+                    // Transition from Reserving to Installing before invoking
+                    // the package manager. FAIL-CLOSED: if this persistence
+                    // fails, abort the self-update.
+                    let installing_state = crate::jobs::upgrade_state::UpgradeState::installing(
+                        &job_id_clone.to_string(),
+                        &from_version,
+                        &target_version,
+                    );
+                    if let Err(e) = crate::jobs::upgrade_state::write_state(&installing_state) {
+                        error!(error = %e, "Failed to write Installing state — aborting self-update before invoking package manager");
+                        crate::jobs::upgrade_state::write_recovering_state();
+                        let _ = job_manager_clone
+                            .fail_job(
+                                &job_id_clone,
+                                format!("Failed to persist Installing state: {}", e),
+                            )
+                            .await;
+                        return;
+                    }
+
+                    // Execute update through the coordinator's mutation semaphore
+                    let update_result = coordinator_clone
+                        .run_mutation(|| backend_clone.update_package(&pkg_name))
+                        .await;
+
+                    match update_result {
                         Ok(_) => {
                             info!(job_id = %job_id_clone, package = %pkg_name, "Self-update install completed");
 
                             // Transition to Verifying phase — check that the
                             // installed version actually changed.
+                            // FAIL-CLOSED: If we cannot persist the Verifying state,
+                            // do NOT restart and do NOT clear the admission block.
+                            // Enter Recovering state instead.
                             let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
                                 &job_id_clone.to_string(),
                                 &from_version,
@@ -484,7 +544,17 @@ pub async fn update_package(
                             );
                             state.to_verifying();
                             if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
-                                error!(error = %e, "Failed to write verifying upgrade state");
+                                error!(
+                                    error = %e,
+                                    "Failed to write Verifying upgrade state — entering recovery mode, NOT restarting"
+                                );
+                                crate::jobs::upgrade_state::write_recovering_state();
+                                let _ = job_manager_clone
+                                    .fail_job(&job_id_clone, format!(
+                                        "Failed to persist Verifying state: {}. Entered recovery mode — manual intervention required.", e
+                                    ))
+                                    .await;
+                                return;
                             }
 
                             // Verify the installed version changed
@@ -539,6 +609,8 @@ pub async fn update_package(
                             let _ = job_manager_clone.complete_job(&job_id_clone).await;
 
                             // Transition to RestartPending
+                            // FAIL-CLOSED: If we cannot persist the RestartPending
+                            // state, do NOT restart. Enter Recovering state.
                             let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
                                 &job_id_clone.to_string(),
                                 &from_version,
@@ -546,7 +618,13 @@ pub async fn update_package(
                             );
                             state.to_restart_pending();
                             if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
-                                error!(error = %e, "Failed to write restart_pending upgrade state — crash recovery may not work correctly");
+                                error!(
+                                    error = %e,
+                                    "Failed to write RestartPending upgrade state — entering recovery mode, NOT restarting"
+                                );
+                                crate::jobs::upgrade_state::write_recovering_state();
+                                // Keep the admission block set — do not clear
+                                return;
                             }
                         }
                         Err(e) => {
@@ -615,13 +693,13 @@ pub async fn update_package(
 
                         loop {
                             let active = job_manager_clone.active_count().await;
-                            let apt_busy = backend_clone.is_operation_in_progress();
+                            let mutation_busy = coordinator_clone.is_operation_in_progress();
 
-                            if active == 0 && !apt_busy {
+                            if active == 0 && !mutation_busy {
                                 info!(
                                     job_id = %job_id_clone,
                                     active_jobs = active,
-                                    apt_in_progress = apt_busy,
+                                    mutation_in_progress = mutation_busy,
                                     "Drain complete — all operations finished, triggering restart"
                                 );
                                 break;
@@ -631,7 +709,7 @@ pub async fn update_package(
                                 warn!(
                                     job_id = %job_id_clone,
                                     active_jobs = active,
-                                    apt_in_progress = apt_busy,
+                                    mutation_in_progress = mutation_busy,
                                     "Drain timeout (120s) reached — restarting with {} active operations (postinst timer is fallback)",
                                     active
                                 );
@@ -642,18 +720,29 @@ pub async fn update_package(
                             info!(
                                 job_id = %job_id_clone,
                                 active_jobs = active,
-                                apt_in_progress = apt_busy,
+                                mutation_in_progress = mutation_busy,
                                 "Waiting for operations to drain before restart..."
                             );
                         }
 
-                        // Cancel the fallback timer before triggering the
-                        // restart. The marker file is the cancellation signal —
-                        // the timer's ExecStartPre checks for the marker and
-                        // aborts if it's gone. Removing it prevents a duplicate
-                        // restart from the fallback timer.
-                        info!(job_id = %job_id_clone, "Cancelling fallback restart timer by removing marker");
-                        crate::jobs::upgrade_state::clear_marker();
+                        // Transition to StartingNewProcess before issuing
+                        // the restart command. This persists the state so
+                        // the new process knows it's the replacement.
+                        let mut restart_state =
+                            crate::jobs::upgrade_state::UpgradeState::installing(
+                                &job_id_clone.to_string(),
+                                &from_version,
+                                &target_version,
+                            );
+                        restart_state.to_starting_new_process();
+                        if let Err(e) = crate::jobs::upgrade_state::write_state(&restart_state) {
+                            error!(
+                                error = %e,
+                                "Failed to write StartingNewProcess state — keeping fallback timer armed, not cancelling marker"
+                            );
+                            // Don't cancel the marker — the fallback timer
+                            // is still needed since we can't persist state.
+                        }
 
                         // Trigger the restart immediately. restart_own_service
                         // is fire-and-forget (spawn, not output) so it doesn't
@@ -663,13 +752,20 @@ pub async fn update_package(
                         match backend_clone.restart_own_service() {
                             Ok(_) => {
                                 info!(job_id = %job_id_clone, "Service restart command spawned — process will be replaced");
+                                // Cancel the fallback timer only AFTER
+                                // successful restart launch. The marker
+                                // file is the cancellation signal.
+                                info!(job_id = %job_id_clone, "Cancelling fallback restart timer by removing marker");
+                                crate::jobs::upgrade_state::clear_marker();
                             }
                             Err(e) => {
                                 error!(
                                     job_id = %job_id_clone,
                                     error = ?e,
-                                    "Failed to trigger service restart — fallback timer was cancelled, manual restart may be needed"
+                                    "Failed to trigger service restart — keeping fallback timer armed (marker preserved)"
                                 );
+                                // Do NOT clear the marker — the fallback
+                                // timer is still armed and will retry.
                             }
                         }
                     }
@@ -723,6 +819,7 @@ pub async fn update_package(
         Ok(job_id) => {
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
+            let coordinator_clone = coordinator.clone();
             let pkg_name = package_name.clone();
 
             tokio::spawn(async move {
@@ -740,7 +837,12 @@ pub async fn update_package(
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                match backend_clone.update_package(&pkg_name) {
+                // Execute update through the coordinator's mutation semaphore
+                let update_result = coordinator_clone
+                    .run_mutation(|| backend_clone.update_package(&pkg_name))
+                    .await;
+
+                match update_result {
                     Ok(_) => {
                         let _ = job_manager_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package update completed");
@@ -776,6 +878,7 @@ pub async fn remove_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -800,6 +903,7 @@ pub async fn remove_package(
             // Spawn background task to execute the removal
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
+            let coordinator_clone = coordinator.clone();
             let pkg_name = package_name.clone();
 
             tokio::spawn(async move {
@@ -818,8 +922,12 @@ pub async fn remove_package(
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute removal (purge=false for standard removal)
-                match backend_clone.remove_package(&pkg_name, false) {
+                // Execute removal through the coordinator's mutation semaphore
+                let remove_result = coordinator_clone
+                    .run_mutation(|| backend_clone.remove_package(&pkg_name, false))
+                    .await;
+
+                match remove_result {
                     Ok(_) => {
                         let _ = job_manager_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package removal completed");

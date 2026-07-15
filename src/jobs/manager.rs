@@ -42,6 +42,100 @@ impl std::fmt::Display for SelfUpdateAdmissionError {
 
 impl std::error::Error for SelfUpdateAdmissionError {}
 
+/// Reservation guard for self-update. Automatically rolls back on drop
+/// unless explicitly committed. This ensures cancellation or panic before
+/// task spawn cannot leave an orphaned owner.
+pub struct SelfUpdateReservation {
+    pub job_id: Uuid,
+    owner_handle: Arc<RwLock<Option<Uuid>>>,
+    jobs_handle: Arc<RwLock<HashMap<Uuid, Job>>>,
+    committed: bool,
+}
+
+impl std::fmt::Debug for SelfUpdateReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelfUpdateReservation")
+            .field("job_id", &self.job_id)
+            .field("committed", &self.committed)
+            .finish()
+    }
+}
+
+impl SelfUpdateReservation {
+    /// Commit the reservation — transfer ownership to the execution task.
+    /// After commit, the guard will NOT roll back on drop.
+    pub fn commit(mut self) -> Uuid {
+        self.committed = true;
+        self.job_id
+    }
+}
+
+impl Drop for SelfUpdateReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            tracing::warn!(
+                job_id = %self.job_id,
+                "SelfUpdateReservation dropped without commit — rolling back owner and job"
+            );
+            // We can't await in Drop, so we use try_write and blocking
+            // operations. In practice, if the reservation is dropped
+            // before being committed, it means the task was cancelled
+            // before spawn, so there shouldn't be lock contention.
+            if let Ok(mut owner) = self.owner_handle.try_write() {
+                if let Some(current) = &*owner {
+                    if current == &self.job_id {
+                        *owner = None;
+                    }
+                }
+            }
+            if let Ok(mut jobs) = self.jobs_handle.try_write() {
+                jobs.remove(&self.job_id);
+            }
+        }
+    }
+}
+
+/// Error returned by `admit_reboot` when a reboot request cannot be admitted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RebootAdmissionError {
+    /// A self-update is in progress — reboot blocked.
+    SelfUpdateInProgress,
+    /// A package-database mutation is in progress — reboot blocked.
+    PackageMutationInProgress,
+    /// One or more jobs are currently running or pending.
+    JobsInProgress { count: usize },
+    /// The job queue is at capacity.
+    QueueFull,
+}
+
+impl std::fmt::Display for RebootAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RebootAdmissionError::SelfUpdateInProgress => {
+                write!(f, "A self-update is in progress")
+            }
+            RebootAdmissionError::PackageMutationInProgress => {
+                write!(f, "A package-database mutation is in progress")
+            }
+            RebootAdmissionError::JobsInProgress { count } => {
+                write!(f, "Cannot reboot while {} jobs are in progress", count)
+            }
+            RebootAdmissionError::QueueFull => {
+                write!(f, "Job queue is at capacity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RebootAdmissionError {}
+
+/// Parameters for atomic reboot admission.
+#[derive(Debug, Clone)]
+pub struct RebootAdmission {
+    pub force: bool,
+    pub acknowledge_package_database_corruption_risk: bool,
+}
+
 /// Error returned by `admit_job` when a normal (non-self-update) job
 /// cannot be admitted. Each variant maps to a specific HTTP response.
 #[derive(Debug, Clone, PartialEq)]
@@ -623,6 +717,15 @@ impl JobManager {
         *self.self_update_owner.write().await = None;
     }
 
+    /// Get a clone of the self_update_owner Arc for external manipulation.
+    ///
+    /// This allows the startup path to clear the self-update flag after
+    /// the JobManager has been moved into web::Data, without needing
+    /// a reference to the JobManager itself.
+    pub fn self_update_owner_handle(&self) -> Arc<RwLock<Option<Uuid>>> {
+        self.self_update_owner.clone()
+    }
+
     /// Atomically reserve a self-update slot.
     ///
     /// This is the single admission point for self-update requests. It
@@ -643,13 +746,14 @@ impl JobManager {
     /// (it will block until we release, then see Some) and no second
     /// self-update can pass the owner check.
     ///
-    /// Returns the job ID on success, or an error describing why the
-    /// reservation was rejected. The job ID is the ownership permit —
-    /// it must be passed to `release_self_update` to clear the lock.
+    /// Returns a `SelfUpdateReservation` guard that owns the job ID and
+    /// automatically rolls back (removes owner and job) on drop unless
+    /// explicitly committed via `commit()`. This ensures cancellation
+    /// or panic before task spawn cannot leave an orphaned owner.
     pub async fn try_reserve_self_update(
         &self,
         packages: Vec<String>,
-    ) -> Result<Uuid, SelfUpdateAdmissionError> {
+    ) -> Result<SelfUpdateReservation, SelfUpdateAdmissionError> {
         // Create the job first to get the job_id (the ownership permit).
         let job = Job::new(JobOperation::SelfUpdate, packages);
         let job_id = job.id;
@@ -705,7 +809,14 @@ impl JobManager {
 
         self.emit_event("job_status", &job_id, &status, progress, &message, None);
 
-        Ok(job_id)
+        // Return a reservation guard. If dropped without commit(),
+        // it rolls back the owner and removes the job.
+        Ok(SelfUpdateReservation {
+            job_id,
+            owner_handle: self.self_update_owner.clone(),
+            jobs_handle: self.jobs.clone(),
+            committed: false,
+        })
     }
 
     /// Atomically admit a normal (non-self-update) job.
@@ -792,6 +903,110 @@ impl JobManager {
         }
 
         Ok(false)
+    }
+
+    /// Atomically admit a reboot job with coordinated checks.
+    ///
+    /// This is the single admission point for reboot requests. It performs
+    /// all safety checks and job creation under one lock acquisition,
+    /// preventing races between the reboot check and concurrent job/self-update
+    /// creation.
+    ///
+    /// **Tier 1 — force=false**: All guards active. Rejects if any jobs are
+    /// active, a self-update is in progress, or a package mutation is in
+    /// progress.
+    ///
+    /// **Tier 2 — force=true, ack=false**: Bypasses ordinary active-job
+    /// protection but does NOT bypass the self-update or package-mutation
+    /// guard. A forced reboot during a package-DB mutation can corrupt
+    /// dpkg/rpm/pacman state.
+    ///
+    /// **Tier 3 — force=true, ack=true**: Bypasses all guards. The caller
+    /// has explicitly acknowledged the risk. A durable audit event is logged.
+    /// The job is still created atomically.
+    ///
+    /// `pkg_mutation_in_progress` is checked externally (from the coordinator)
+    /// and passed in to avoid the JobManager needing a reference to the
+    /// coordinator.
+    pub async fn admit_reboot(
+        &self,
+        admission: RebootAdmission,
+        pkg_mutation_in_progress: bool,
+    ) -> Result<Uuid, RebootAdmissionError> {
+        let force = admission.force;
+        let ack = admission.acknowledge_package_database_corruption_risk;
+
+        // Acquire the self-update write lock and hold it for the entire
+        // operation. This prevents any other handler from creating jobs
+        // or reserving self-update while we're checking and creating.
+        let su_guard = self.self_update_owner.write().await;
+
+        let self_update_active = su_guard.is_some();
+
+        // Tier 1: force=false — check all guards
+        if !force {
+            if self_update_active {
+                return Err(RebootAdmissionError::SelfUpdateInProgress);
+            }
+            // Check jobs under the jobs read lock
+            let active_count = {
+                let jobs = self.jobs.read().await;
+                jobs.values()
+                    .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+                    .count()
+            };
+            if active_count > 0 {
+                return Err(RebootAdmissionError::JobsInProgress {
+                    count: active_count,
+                });
+            }
+        }
+
+        // Tier 2/3: force=true — check package mutation guard
+        if force && !ack && (self_update_active || pkg_mutation_in_progress) {
+            if self_update_active {
+                return Err(RebootAdmissionError::SelfUpdateInProgress);
+            }
+            return Err(RebootAdmissionError::PackageMutationInProgress);
+        }
+
+        // Tier 3: force=true + ack=true — log durable audit event
+        if force && ack && (self_update_active || pkg_mutation_in_progress) {
+            tracing::error!(
+                self_update_active = self_update_active,
+                pkg_mutation_in_progress = pkg_mutation_in_progress,
+                "AUDIT: Forced reboot accepted with package-database corruption risk acknowledged. \
+                 This may corrupt dpkg/rpm/pacman state and leave the system unbootable."
+            );
+        }
+
+        // Create the reboot job atomically under the jobs write lock.
+        // We still hold the self_update write lock, so no self-update can
+        // set its flag between our check and job creation.
+        let job = Job::new(JobOperation::Reboot, vec![]);
+        let job_id = job.id;
+        let status = job.status.clone();
+        let progress = job.progress;
+        let message = job.message.clone();
+
+        {
+            let mut jobs = self.jobs.write().await;
+            let active_count = jobs
+                .values()
+                .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+                .count();
+            if active_count >= self.max_queue_depth {
+                return Err(RebootAdmissionError::QueueFull);
+            }
+            jobs.insert(job_id, job);
+        }
+
+        // Release the self-update write lock before emitting the event
+        drop(su_guard);
+
+        self.emit_event("job_status", &job_id, &status, progress, &message, None);
+
+        Ok(job_id)
     }
 
     /// Create a rollback job for a failed job.

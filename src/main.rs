@@ -35,6 +35,7 @@ use linux_patch_api::auth::{
 use linux_patch_api::config::loader::{validate_certs, CertStatus};
 use linux_patch_api::enroll;
 use linux_patch_api::packages::cache::PackageCacheState;
+use linux_patch_api::packages::coordinator::OperationCoordinator;
 use linux_patch_api::packages::create_backend;
 use linux_patch_api::{init_logging, AppConfig, JobManager};
 
@@ -265,6 +266,15 @@ async fn main() -> Result<()> {
         "Job manager initialized"
     );
 
+    // Initialize the OperationCoordinator — the single chokepoint for all
+    // package-database mutations. One shared Arc instance is injected into
+    // web::Data and used by all handlers and the SIGTERM handler.
+    let coordinator = Arc::new(OperationCoordinator::new(config.jobs.max_concurrent));
+    info!(
+        max_concurrent = config.jobs.max_concurrent,
+        "Operation coordinator initialized"
+    );
+
     // Reconcile persistent upgrade state on startup.
     //
     // The in-memory self_update_in_progress flag is volatile — it disappears
@@ -277,6 +287,8 @@ async fn main() -> Result<()> {
     // No early clearing: state is only cleared in finalize_successful_restart,
     // called AFTER listener bind + READY=1.
     let startup_reconciliation = linux_patch_api::jobs::upgrade_state::reconcile_startup_state();
+    // Clean up any stale temp files from prior crashes
+    linux_patch_api::jobs::upgrade_state::cleanup_stale_temp_files();
     let should_block_for_upgrade = match startup_reconciliation {
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::Clean => false,
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::RestartInProgress => true,
@@ -364,26 +376,62 @@ async fn main() -> Result<()> {
 
     // If this process started after a self-update restart, we do NOT clear
     // the self-update flag yet. The state and marker are only cleared AFTER
-    // the listener is bound and READY=1 is sent to systemd (see below).
+    // the listener is bound, the server is started, and READY=1 is sent to
+    // systemd (see below).
     //
-    // However, we need to clear the flag BEFORE job_manager is moved into
-    // web::Data. So we use an Arc<AtomicBool> flag to track whether we
-    // should finalize after listener bind, and do the state/marker cleanup
-    // separately.
+    // The self_update_owner flag remains set, blocking all mutating API
+    // requests (admit_job and try_reserve_self_update both check it) until
+    // we explicitly clear it after successful initialization. This is the
+    // fail-closed behavior: if the process crashes before clearing, the
+    // next startup will see the persistent state file and re-block.
     //
-    // Actually, the flag clearing must happen before the move. But the
-    // state file and marker can be cleared after listener bind. So:
-    // 1. Clear the in-memory flag now (before move into web::Data).
-    // 2. Clear the state file and marker after listener bind.
+    // We get a handle to the self_update_owner Arc BEFORE moving the
+    // JobManager into web::Data, so we can clear it later without needing
+    // a reference to the JobManager.
     let needs_state_finalize = should_block_for_upgrade;
-    if should_block_for_upgrade {
-        info!("Clearing self-update flag before moving job_manager into web::Data");
-        job_manager.force_clear_self_update().await;
+    let self_update_owner_handle = job_manager.self_update_owner_handle();
+    // DO NOT call force_clear_self_update() here — the flag stays set
+    // until the server is fully initialized (see finalization below).
+
+    // Run startup repair for interrupted installs or recovery mode.
+    // This runs under the coordinator's mutation semaphore to serialize
+    // with any other operations (there shouldn't be any since the admission
+    // block is set, but the semaphore ensures correctness).
+    let mut repair_failed = false;
+    if startup_reconciliation
+        == linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall
+        || startup_reconciliation
+            == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode
+    {
+        info!("Running startup package database repair under coordinator");
+        let repair_backend = &package_backend;
+        let repair_result = coordinator
+            .run_mutation(|| repair_backend.repair_package_database())
+            .await;
+
+        match repair_result {
+            Ok(_) => {
+                info!("Startup package database repair succeeded");
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Startup package database repair FAILED — retaining recovery state. \
+                     All package operations will remain blocked. Manual intervention required."
+                );
+                linux_patch_api::jobs::upgrade_state::write_recovering_state();
+                repair_failed = true;
+                // The admission block stays set — mutations are blocked.
+                // The server will start in recovery mode (health reports degraded).
+                // Only health and read-only diagnostic endpoints are available.
+            }
+        }
     }
 
     // Store job manager and backend in Arc for sharing
     let job_manager_data = web::Data::new(job_manager);
     let backend_data = web::Data::new(package_backend);
+    let coordinator_data = web::Data::new(coordinator.clone());
 
     // Manager URL for repo-config self-heal during self-update.
     // Extracted from enrollment config; None when not configured.
@@ -402,12 +450,11 @@ async fn main() -> Result<()> {
     let shared_crl_state = crl::new_shared_state();
     let crl_state_data = web::Data::new(shared_crl_state.clone());
 
-    // Clone backend for the SIGTERM handler — it needs to check if an apt
-    // operation is in progress and wait for it to complete before allowing
-    // the server to shut down. Without this, systemd's SIGTERM → SIGKILL
-    // cycle (TimeoutStopSec=30s) can kill apt-get mid-transaction, leaving
-    // dpkg in a half-configured state.
-    let sigterm_backend = backend_data.clone();
+    // Clone the coordinator for the SIGTERM handler — it needs to check if a
+    // package mutation is in progress and wait for it to complete before
+    // allowing the server to shut down. The coordinator is the authoritative
+    // source for this check, working across ALL backends (not just APT).
+    let sigterm_coordinator = coordinator.clone();
 
     // Configure bind address
     let bind_address = format!("{}:{}", config.server.bind, config.server.port);
@@ -417,6 +464,10 @@ async fn main() -> Result<()> {
 
     // Clone rate limit config for use inside the HttpServer closure
     let rate_limit_config = config.rate_limit.clone();
+
+    // Clone backend_data for use in the finalization code after server
+    // construction (the HttpServer::new closure moves the original).
+    let finalize_backend = backend_data.clone();
 
     // Create server builder
     // Security middleware stack (order matters):
@@ -434,6 +485,7 @@ async fn main() -> Result<()> {
             .wrap(Logger::default())
             .app_data(job_manager_data.clone())
             .app_data(backend_data.clone())
+            .app_data(coordinator_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
             .app_data(manager_url_data.clone())
@@ -442,6 +494,7 @@ async fn main() -> Result<()> {
                     cfg,
                     job_manager_data.clone(),
                     backend_data.clone(),
+                    coordinator_data.clone(),
                     cache_state.clone(),
                 );
             })
@@ -452,6 +505,17 @@ async fn main() -> Result<()> {
     .client_request_timeout(std::time::Duration::from_secs(5))
     // FIX: Set explicit client disconnect timeout to prevent connection resets on larger responses
     .client_disconnect_timeout(std::time::Duration::from_secs(5))
+    // Graceful shutdown timeout: how long Actix waits for in-flight requests
+    // to complete after receiving the stop signal. Must be less than
+    // TimeoutStopSec (120s) minus the package-mutation drain window (100s) =
+    // 20s margin. We use 10s for Actix, leaving 10s safety margin.
+    .shutdown_timeout(10)
+    // Disable Actix's built-in signal handling — we install our own
+    // SIGTERM handler (setup_sigterm_handler) that drains package
+    // mutations before stopping the server. Without disable_signals(),
+    // Actix would install a competing SIGTERM handler that stops the
+    // server immediately without waiting for mutations to complete.
+    .disable_signals()
     .keep_alive(std::time::Duration::from_secs(15))
     .max_connection_rate(1000);
     info!(
@@ -606,21 +670,6 @@ async fn main() -> Result<()> {
         // Log listening AFTER successful bind
         info!("Listening on {} (mTLS enabled)", bind_address);
 
-        // Listener is bound — finalize the self-update restart if applicable.
-        // The in-memory flag was already cleared before the move into web::Data.
-        // Now clear the persistent state file and marker.
-        if needs_state_finalize {
-            info!("Listener bound — clearing upgrade state file and marker");
-            linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-        }
-
-        // Notify systemd that we're ready (Type=notify)
-        notify_systemd_ready();
-        if in_recovery_mode {
-            warn!("Notifying systemd of degraded status (recovery mode)");
-            notify_systemd_status("Running in recovery mode — package operations blocked");
-        }
-
         // Clone the ServerConfig from Arc for listen_rustls_0_23
         let server_config = (*rustls_config).clone();
 
@@ -631,13 +680,113 @@ async fn main() -> Result<()> {
             .listen_rustls_0_23(tcp_listener, server_config)?
             .run();
 
-        // Spawn SIGTERM handler that waits for in-progress apt operations
+        // Spawn SIGTERM handler that waits for in-progress package operations
         // to complete before stopping the server. This prevents SIGKILL from
-        // killing apt-get mid-transaction (which leaves dpkg half-configured).
+        // killing apt-get/dnf/apk/pacman mid-transaction.
         let server_handle = server.handle();
         tokio::spawn(async move {
-            setup_sigterm_handler(server_handle, sigterm_backend).await;
+            setup_sigterm_handler(server_handle, sigterm_coordinator).await;
         });
+
+        // Finalize the self-update restart AFTER the server is constructed
+        // and the SIGTERM handler is installed, but BEFORE we start serving.
+        //
+        // Per Section 5 ordering:
+        // 1. Listener bound ✓
+        // 2. Server constructed ✓
+        // 3. SIGTERM handler installed ✓
+        // 4. Verify running version (TODO: Section 9 — for now, skip)
+        // 5. Transition persistent state to Ready
+        // 6. Send READY=1 to systemd
+        // 7. Clear upgrade state, marker, and admission block
+        if needs_state_finalize && !repair_failed {
+            info!("Server initialized — finalizing self-update restart");
+
+            // Section 9: Verify running binary version, installed package
+            // version, and expected target version all agree before
+            // clearing state. If they don't, enter recovery mode.
+            let running_version = env!("CARGO_PKG_VERSION").to_string();
+            let installed_version = finalize_backend
+                .get_installed_version(linux_patch_api::packages::SELF_PACKAGE_NAME)
+                .unwrap_or(None);
+
+            // Read the persistent state to get the expected target version
+            let state_result = linux_patch_api::jobs::upgrade_state::read_state();
+            let expected_target = match &state_result {
+                Ok(s) => s.target_version.clone(),
+                Err(_) => String::new(),
+            };
+
+            let versions_match = if expected_target.is_empty() {
+                // No target version in state (e.g. InterruptedInstall with
+                // empty target) — accept if installed version matches running
+                installed_version.as_deref() == Some(&running_version)
+            } else {
+                // All three must agree: running == installed == target
+                installed_version.as_deref() == Some(&running_version)
+                    && installed_version.as_deref() == Some(&expected_target)
+            };
+
+            if !versions_match && !expected_target.is_empty() {
+                error!(
+                    running_version = %running_version,
+                    installed_version = ?installed_version,
+                    expected_target = %expected_target,
+                    "Version mismatch on startup after self-update — entering recovery mode, NOT clearing state"
+                );
+                linux_patch_api::jobs::upgrade_state::write_recovering_state();
+                notify_systemd_ready();
+                notify_systemd_status(
+                    "Running in recovery mode — version mismatch after self-update",
+                );
+                // Keep admission block set — mutations blocked
+            } else {
+                // Versions agree (or no target to compare) — proceed
+                info!(
+                    running_version = %running_version,
+                    installed_version = ?installed_version,
+                    expected_target = %expected_target,
+                    "Version verification passed — clearing upgrade state"
+                );
+
+                // Transition persistent state to Ready
+                let mut ready_state =
+                    linux_patch_api::jobs::upgrade_state::UpgradeState::installing(
+                        "startup", "", "",
+                    );
+                ready_state.to_ready();
+                if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
+                    error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
+                } else {
+                    notify_systemd_ready();
+                    if in_recovery_mode {
+                        warn!("Notifying systemd of degraded status (recovery mode)");
+                        notify_systemd_status(
+                            "Running in recovery mode — package operations blocked",
+                        );
+                    }
+
+                    linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+                    *self_update_owner_handle.write().await = None;
+                    info!("Self-update admission block cleared — server ready for mutations");
+                }
+            }
+        } else if needs_state_finalize && repair_failed {
+            // Repair failed — server starts but mutations remain blocked.
+            // Health reports degraded. Only read-only endpoints available.
+            info!("Server starting in recovery mode — repair failed, mutations blocked");
+            notify_systemd_ready();
+            notify_systemd_status(
+                "Running in recovery mode — package operations blocked (repair failed)",
+            );
+        } else {
+            // Normal startup — just send READY=1
+            notify_systemd_ready();
+            if in_recovery_mode {
+                warn!("Notifying systemd of degraded status (recovery mode)");
+                notify_systemd_status("Running in recovery mode — package operations blocked");
+            }
+        }
 
         server.await?;
     } else {
@@ -670,27 +819,82 @@ async fn main() -> Result<()> {
         // Log listening AFTER successful bind
         info!("Listening on {} (no TLS)", bind_address);
 
-        // Listener is bound — finalize the self-update restart if applicable.
-        if needs_state_finalize {
-            info!("Listener bound — clearing upgrade state file and marker");
-            linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-        }
-
-        // Notify systemd that we're ready (Type=notify)
-        notify_systemd_ready();
-        if in_recovery_mode {
-            warn!("Notifying systemd of degraded status (recovery mode)");
-            notify_systemd_status("Running in recovery mode — package operations blocked");
-        }
-
         warn!("TLS is disabled - running without mTLS authentication (INSECURE)");
         let server = server_builder.listen(tcp_listener)?.run();
 
         // Spawn SIGTERM handler (same as TLS path)
         let server_handle = server.handle();
         tokio::spawn(async move {
-            setup_sigterm_handler(server_handle, sigterm_backend).await;
+            setup_sigterm_handler(server_handle, sigterm_coordinator).await;
         });
+
+        // Finalize the self-update restart (same ordering as TLS path)
+        if needs_state_finalize && !repair_failed {
+            info!("Server initialized — finalizing self-update restart");
+
+            // Section 9: Verify versions match before clearing state
+            let running_version = env!("CARGO_PKG_VERSION").to_string();
+            let installed_version = finalize_backend
+                .get_installed_version(linux_patch_api::packages::SELF_PACKAGE_NAME)
+                .unwrap_or(None);
+            let state_result = linux_patch_api::jobs::upgrade_state::read_state();
+            let expected_target = match &state_result {
+                Ok(s) => s.target_version.clone(),
+                Err(_) => String::new(),
+            };
+            let versions_match = if expected_target.is_empty() {
+                installed_version.as_deref() == Some(&running_version)
+            } else {
+                installed_version.as_deref() == Some(&running_version)
+                    && installed_version.as_deref() == Some(&expected_target)
+            };
+
+            if !versions_match && !expected_target.is_empty() {
+                error!(
+                    running_version = %running_version,
+                    installed_version = ?installed_version,
+                    expected_target = %expected_target,
+                    "Version mismatch — entering recovery mode, NOT clearing state"
+                );
+                linux_patch_api::jobs::upgrade_state::write_recovering_state();
+                notify_systemd_ready();
+                notify_systemd_status(
+                    "Running in recovery mode — version mismatch after self-update",
+                );
+            } else {
+                let mut ready_state =
+                    linux_patch_api::jobs::upgrade_state::UpgradeState::installing(
+                        "startup", "", "",
+                    );
+                ready_state.to_ready();
+                if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
+                    error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
+                } else {
+                    notify_systemd_ready();
+                    if in_recovery_mode {
+                        warn!("Notifying systemd of degraded status (recovery mode)");
+                        notify_systemd_status(
+                            "Running in recovery mode — package operations blocked",
+                        );
+                    }
+                    linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+                    *self_update_owner_handle.write().await = None;
+                    info!("Self-update admission block cleared — server ready for mutations");
+                }
+            }
+        } else if needs_state_finalize && repair_failed {
+            info!("Server starting in recovery mode — repair failed, mutations blocked");
+            notify_systemd_ready();
+            notify_systemd_status(
+                "Running in recovery mode — package operations blocked (repair failed)",
+            );
+        } else {
+            notify_systemd_ready();
+            if in_recovery_mode {
+                warn!("Notifying systemd of degraded status (recovery mode)");
+                notify_systemd_status("Running in recovery mode — package operations blocked");
+            }
+        }
 
         server.await?;
     }
@@ -700,14 +904,33 @@ async fn main() -> Result<()> {
 }
 
 /// Send READY=1 to systemd's notification socket (for Type=notify services).
-/// If the socket is unavailable (not running under systemd), this is a no-op.
+///
+/// If running under systemd (detected via `/run/systemd/system`), a failure
+/// to send READY=1 is treated as a fatal startup error — the service is
+/// `Type=notify`, so systemd will kill us if we never notify. We exit with
+/// an error code rather than silently continuing.
+///
+/// If NOT running under systemd (no `/run/systemd/system`), this is a no-op
+/// — the notification socket doesn't exist and there's nothing to notify.
 fn notify_systemd_ready() {
     use systemd::daemon::{notify, STATE_READY};
     let state = [(STATE_READY, "1")];
-    if let Err(e) = notify(false, state.iter()) {
-        tracing::debug!(error = ?e, "sd_notify READY=1 failed (not running under systemd?)");
-    } else {
-        info!("Notified systemd: READY=1");
+    let running_under_systemd = std::path::Path::new("/run/systemd/system").exists();
+
+    match notify(false, state.iter()) {
+        Ok(_) => info!("Notified systemd: READY=1"),
+        Err(e) => {
+            if running_under_systemd {
+                error!(
+                    error = ?e,
+                    "sd_notify READY=1 failed while running under systemd (Type=notify) — \
+                     treating as fatal startup failure"
+                );
+                std::process::exit(ExitCode::Error as i32);
+            } else {
+                tracing::debug!(error = ?e, "sd_notify READY=1 failed (not running under systemd)");
+            }
+        }
     }
 }
 
@@ -735,23 +958,25 @@ fn notify_systemd_stopping() {
 /// before stopping the HTTP server.
 ///
 /// When systemd stops the service (`systemctl stop`), it sends SIGTERM, waits
-/// `TimeoutStopSec=30s`, then sends SIGKILL. If apt-get is mid-transaction when
-/// SIGKILL arrives, dpkg is left in a half-configured state — packages unpacked
+/// `TimeoutStopSec=90s`, then sends SIGKILL. If a package-manager operation
+/// (apt-get/dnf/apk/pacman) is mid-transaction when SIGKILL arrives, the
+/// package database is left in a half-configured state — packages unpacked
 /// but not configured, kernel installed but initramfs not generated, etc.
 ///
 /// This handler:
 /// 1. Catches SIGTERM
-/// 2. Checks if a package operation is in progress (via `is_operation_in_progress`)
-/// 3. If yes: waits up to 25s (leaving 5s margin before SIGKILL) for it to complete
+/// 2. Checks if a package mutation is in progress (via the coordinator's
+///    `op_in_progress` flag, which works across ALL backends)
+/// 3. If yes: waits up to 80s (leaving margin before SIGKILL) for it to complete
 /// 4. Stops the HTTP server gracefully (stops accepting new connections, drains)
 /// 5. If no operation in progress: stops immediately
 ///
-/// The 25s deadline is based on the systemd service's `TimeoutStopSec=30s` —
-/// we leave a 5s margin for the server to drain in-flight HTTP requests after
-/// we call `stop()`.
+/// The 100s deadline is based on the systemd service's `TimeoutStopSec=120s` —
+/// we leave a 20s margin: 100s for mutation drain + 10s for Actix graceful
+/// shutdown = 110s, leaving 10s safety margin before SIGKILL.
 async fn setup_sigterm_handler(
     server_handle: actix_web::dev::ServerHandle,
-    backend: web::Data<Box<dyn linux_patch_api::packages::PackageManagerBackend>>,
+    coordinator: Arc<OperationCoordinator>,
 ) {
     use std::time::{Duration, Instant};
     use tokio::signal::unix::{signal, SignalKind};
@@ -759,7 +984,7 @@ async fn setup_sigterm_handler(
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(s) => s,
         Err(e) => {
-            error!(error = %e, "Failed to install SIGTERM handler — apt operations may be killed mid-transaction on shutdown");
+            error!(error = %e, "Failed to install SIGTERM handler — package operations may be killed mid-transaction on shutdown");
             return;
         }
     };
@@ -771,19 +996,19 @@ async fn setup_sigterm_handler(
     // Notify systemd that we're stopping
     notify_systemd_stopping();
 
-    // Check if a package operation is in progress
-    if backend.is_operation_in_progress() {
-        info!("Package operation in progress — waiting up to 25s for it to complete before shutting down");
+    // Check if a package mutation is in progress via the coordinator
+    if coordinator.is_operation_in_progress() {
+        info!("Package mutation in progress — waiting up to 100s for it to complete before shutting down");
 
-        let deadline = Instant::now() + Duration::from_secs(25);
+        let deadline = Instant::now() + Duration::from_secs(100);
         let mut waited = 0u64;
 
-        while backend.is_operation_in_progress() {
+        while coordinator.is_operation_in_progress() {
             let now = Instant::now();
             if now >= deadline {
                 warn!(
                     waited_seconds = waited,
-                    "Package operation still in progress after 25s — shutting down anyway (systemd will SIGKILL in ~5s)"
+                    "Package mutation still in progress after 100s — shutting down anyway (systemd will SIGKILL in ~20s)"
                 );
                 break;
             }
@@ -793,26 +1018,26 @@ async fn setup_sigterm_handler(
             tokio::time::sleep(sleep_dur).await;
             waited += sleep_dur.as_secs();
 
-            if backend.is_operation_in_progress() {
+            if coordinator.is_operation_in_progress() {
                 info!(
                     waited_seconds = waited,
-                    "Still waiting for package operation to complete..."
+                    "Still waiting for package mutation to complete..."
                 );
             }
         }
 
-        if !backend.is_operation_in_progress() {
+        if !coordinator.is_operation_in_progress() {
             info!(
                 waited_seconds = waited,
-                "Package operation completed — proceeding with shutdown"
+                "Package mutation completed — proceeding with shutdown"
             );
         }
     } else {
-        info!("No package operation in progress — shutting down immediately");
+        info!("No package mutation in progress — shutting down immediately");
     }
 
     // Stop the HTTP server gracefully — stops accepting new connections and
     // drains in-flight requests. The server's own drain timeout is set by
-    // client_disconnect_timeout (5s).
+    // shutdown_timeout() on the server builder.
     let _ = server_handle.stop(true).await;
 }

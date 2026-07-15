@@ -76,6 +76,8 @@ const RESTART_DEADLINE_SECS: i64 = 120;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpgradePhase {
+    /// No upgrade in progress. Normal operation.
+    Idle,
     /// Self-update reserved, before apt starts. If process dies here,
     /// the reservation is orphaned — recovery clears it.
     Reserving,
@@ -87,6 +89,10 @@ pub enum UpgradePhase {
     Verifying,
     /// Package installed and verified, waiting for the delayed restart.
     RestartPending,
+    /// Restart command has been issued; the new process is starting.
+    /// If the old process dies here, the new process should appear and
+    /// transition to Ready after initialization.
+    StartingNewProcess,
     /// New process started, listener bound, READY=1 sent. Marker and
     /// state can be safely cleared.
     Ready,
@@ -111,6 +117,12 @@ pub struct UpgradeState {
     /// When the restart should have completed (RFC3339).
     /// Only set when state == RestartPending.
     pub restart_deadline: Option<String>,
+    /// Monotonic generation/operation ID. Incremented on each state
+    /// transition. Used to prevent stale timers from acting on a
+    /// later upgrade. The restart marker file contains the same
+    /// generation — if they don't match, the marker is stale.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 impl UpgradeState {
@@ -123,6 +135,7 @@ impl UpgradeState {
             target_version: target_version.to_string(),
             started_at: Utc::now().to_rfc3339(),
             restart_deadline: None,
+            generation: next_generation(),
         }
     }
 
@@ -135,29 +148,80 @@ impl UpgradeState {
             target_version: target_version.to_string(),
             started_at: Utc::now().to_rfc3339(),
             restart_deadline: None,
+            generation: next_generation(),
         }
     }
 
-    /// Transition to `Verifying` state.
+    /// Create a new `Reserving` state with a specific generation.
+    /// Used when the caller needs to control the generation (e.g. when
+    /// transitioning from Reserving to Installing — same generation).
+    pub fn reserving_with_generation(
+        job_id: &str,
+        from_version: &str,
+        target_version: &str,
+        generation: u64,
+    ) -> Self {
+        Self {
+            state: UpgradePhase::Reserving,
+            job_id: job_id.to_string(),
+            from_version: from_version.to_string(),
+            target_version: target_version.to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            restart_deadline: None,
+            generation,
+        }
+    }
+
+    /// Create a new `Installing` state with a specific generation.
+    pub fn installing_with_generation(
+        job_id: &str,
+        from_version: &str,
+        target_version: &str,
+        generation: u64,
+    ) -> Self {
+        Self {
+            state: UpgradePhase::Installing,
+            job_id: job_id.to_string(),
+            from_version: from_version.to_string(),
+            target_version: target_version.to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            restart_deadline: None,
+            generation,
+        }
+    }
+
+    /// Transition to `Verifying` state (preserves generation).
     pub fn to_verifying(&mut self) {
         self.state = UpgradePhase::Verifying;
     }
 
-    /// Transition to `RestartPending` state with a deadline.
+    /// Transition to `RestartPending` state with a deadline (preserves generation).
     pub fn to_restart_pending(&mut self) {
         self.state = UpgradePhase::RestartPending;
         self.restart_deadline =
             Some((Utc::now() + Duration::seconds(RESTART_DEADLINE_SECS)).to_rfc3339());
     }
 
-    /// Transition to `Ready` state.
+    /// Transition to `Ready` state (preserves generation).
     pub fn to_ready(&mut self) {
         self.state = UpgradePhase::Ready;
     }
 
-    /// Transition to `Recovering` state.
+    /// Transition to `StartingNewProcess` state (preserves generation).
+    /// Called after the restart command is issued but before the new
+    /// process has completed initialization.
+    pub fn to_starting_new_process(&mut self) {
+        self.state = UpgradePhase::StartingNewProcess;
+    }
+
+    /// Transition to `Recovering` state (preserves generation).
     pub fn to_recovering(&mut self) {
         self.state = UpgradePhase::Recovering;
+    }
+
+    /// Get the generation/operation ID.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Check if the restart deadline has passed.
@@ -171,6 +235,14 @@ impl UpgradeState {
             None => false,
         }
     }
+}
+
+/// Global monotonic generation counter. Uses a static AtomicU64 so each
+/// state transition gets a unique generation within the process lifetime.
+static GENERATION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Result of reconciling upgrade state on startup.
@@ -203,8 +275,13 @@ pub enum StateError {
 
 /// Atomically write the upgrade state to disk.
 ///
-/// Uses `O_EXCL` (create_new) for the temp file to prevent symlink attacks.
-/// Writes to temp file → fsync → rename for crash safety.
+/// Uses a unique temp filename (including generation) with `O_EXCL`
+/// (create_new) to prevent symlink attacks and collisions with stale
+/// temp files from prior crashes. Writes to temp file → fsync → rename
+/// for crash safety. Directory is fsynced after rename.
+///
+/// If a temp file from a prior generation exists, it is removed only
+/// if its filename doesn't match the current generation (stale cleanup).
 pub fn write_state(state: &UpgradeState) -> std::io::Result<()> {
     let path = Path::new(UPGRADE_STATE_PATH);
     let dir = path
@@ -215,32 +292,67 @@ pub fn write_state(state: &UpgradeState) -> std::io::Result<()> {
 
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
 
-    let tmp_path = path.with_extension("json.tmp");
+    // Use a unique temp filename including the generation to prevent
+    // collisions with stale temp files from prior crashes.
+    let tmp_path = path.with_extension(format!("json.tmp.{}", state.generation));
 
     {
         use std::io::Write;
         // Use create_new (O_EXCL) to prevent symlink attacks.
-        // If the temp file already exists (from a prior crash), remove it first.
-        if tmp_path.exists() {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
+        // If the temp file already exists (same generation — shouldn't
+        // happen in normal flow), return an error rather than silently
+        // removing it.
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o644)
-            .open(&tmp_path)?;
+            .open(&tmp_path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!(
+                            "Temp file {} already exists — possible concurrent write or stale temp from same generation",
+                            tmp_path.display()
+                        ),
+                    )
+                } else {
+                    e
+                }
+            })?;
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
     }
 
     std::fs::rename(&tmp_path, path)?;
 
+    // fsync the directory to ensure the rename is durable
     if let Ok(dir_file) = std::fs::File::open(dir) {
         let _ = dir_file.sync_all();
     }
 
-    info!(path = %path.display(), state = ?state.state, "Upgrade state persisted");
+    info!(path = %path.display(), state = ?state.state, generation = state.generation, "Upgrade state persisted");
     Ok(())
+}
+
+/// Clean up stale temp files from prior generations.
+/// Called on startup to remove any leftover .json.tmp.* files that
+/// don't match the current state's generation.
+pub fn cleanup_stale_temp_files() {
+    let dir = Path::new(UPGRADE_STATE_PATH)
+        .parent()
+        .unwrap_or_else(|| Path::new("/var/lib/linux_patch_api"));
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("upgrade-state.json.tmp") {
+                warn!(path = %entry.path().display(), "Removing stale upgrade state temp file");
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Read the upgrade state from disk.
@@ -367,6 +479,19 @@ pub fn reconcile_startup_state_at(state_path: &Path, marker_path: &Path) -> Star
     };
 
     match state.state {
+        UpgradePhase::Idle => {
+            // Idle state — no upgrade in progress. If marker exists, it's
+            // inconsistent (marker without an active upgrade). Enter recovery.
+            if marker_path.exists() {
+                warn!(
+                    "Upgrade state is 'idle' but marker exists — inconsistent, entering recovery mode"
+                );
+                return StartupReconciliation::RecoveryMode;
+            }
+            info!("Upgrade state is 'idle' — normal startup");
+            clear_state_at(state_path);
+            StartupReconciliation::Clean
+        }
         UpgradePhase::Reserving => {
             warn!(
                 job_id = %state.job_id,
@@ -421,6 +546,19 @@ pub fn reconcile_startup_state_at(state_path: &Path, marker_path: &Path) -> Star
                 StartupReconciliation::RestartInProgress
             }
         }
+        UpgradePhase::StartingNewProcess => {
+            // The old process issued the restart command and transitioned
+            // to StartingNewProcess. We are the new process. Keep the
+            // admission block set until initialization completes.
+            info!(
+                job_id = %state.job_id,
+                from_version = %state.from_version,
+                target_version = %state.target_version,
+                "Found upgrade state in 'starting_new_process' phase — new process is initializing. \
+                 Keeping self_update flag set until initialization completes."
+            );
+            StartupReconciliation::RestartInProgress
+        }
         UpgradePhase::Ready => {
             // State says Ready but we're starting up — this means the previous
             // process wrote Ready but didn't finish clearing. Clear now.
@@ -474,6 +612,7 @@ pub fn write_recovering_state() {
         target_version: String::new(),
         started_at: Utc::now().to_rfc3339(),
         restart_deadline: None,
+        generation: next_generation(),
     };
     if let Err(e) = write_state(&state) {
         warn!(error = %e, "Failed to write recovering state — next startup may not detect recovery mode");
@@ -513,7 +652,7 @@ mod tests {
         let dir = path.parent().unwrap();
         std::fs::create_dir_all(dir)?;
         let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
-        let tmp_path = path.with_extension("json.tmp");
+        let tmp_path = path.with_extension(format!("json.tmp.{}", state.generation));
         if tmp_path.exists() {
             let _ = std::fs::remove_file(&tmp_path);
         }
@@ -759,7 +898,8 @@ mod tests {
         let read = read_state_from(&path).unwrap();
         assert_eq!(read.job_id, "job-456");
 
-        assert!(!path.with_extension("json.tmp").exists());
+        // The temp file should have been renamed (not left behind)
+        assert!(!path.with_extension("json.tmp.0").exists());
     }
 
     #[test]

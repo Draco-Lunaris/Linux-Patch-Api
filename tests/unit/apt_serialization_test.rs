@@ -8,15 +8,14 @@
 //! The mutex is a process-wide static (`OnceLock<Mutex<()>>`), shared across
 //! all AptBackend instances. These tests verify that:
 //! 1. Two concurrent operations cannot both be "in progress" at the same time
-//! 2. The `is_operation_in_progress` flag correctly tracks the operation state
+//! 2. The coordinator's `op_in_progress` flag tracks mutation state (sole authority)
 //! 3. Three concurrent operations also serialize
 //!
 //! Note: In the test environment, apt-get/dpkg may not exist, so the operations
-//! fail quickly. The tests use the `is_operation_in_progress` flag (which is
-//! set while the mutex is held) to observe serialization, rather than relying
-//! on wall-clock timing of the full operation.
+//! fail quickly. The APT mutex tests verify serialization via wall-clock timing.
+//! The coordinator flag test uses a mock closure to deterministically observe
+//! the flag being set during a mutation.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -228,75 +227,52 @@ fn test_second_operation_blocks_until_first_completes() {
     );
 }
 
-/// The `is_operation_in_progress` flag must be false when no operation is running.
+/// The coordinator's `op_in_progress` flag must be false when no mutation
+/// is running. The backend's `is_operation_in_progress()` always returns
+/// false now — the coordinator is the sole authority.
 #[test]
 #[serial_test::serial]
 fn test_is_operation_in_progress_false_at_rest() {
-    // Ensure no other test is running an apt operation. The #[serial] attribute
-    // ensures this test runs alone, but the static flag may be left true if a
-    // prior test was interrupted. We wait briefly for any in-progress operation
-    // to complete.
     let backend = AptBackend::with_system_runner();
-    for _ in 0..100 {
-        if !backend.is_operation_in_progress() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert!(
         !backend.is_operation_in_progress(),
-        "is_operation_in_progress should be false when no apt operation is running"
+        "backend is_operation_in_progress should always be false (coordinator is sole authority)"
     );
 }
 
-/// The `is_operation_in_progress` flag must be true while an operation is running.
+/// The coordinator's `op_in_progress` flag must be true while a mutation
+/// closure is running, and false after it completes.
 ///
-/// This test spawns a thread that calls `install_packages` (which will fail
-/// since apt-get isn't available), and from the main thread, polls
-/// `is_operation_in_progress` to verify it returns true at some point during
-/// the operation.
-#[test]
-#[serial_test::serial]
-fn test_is_operation_in_progress_true_during_operation() {
-    let backend = Arc::new(AptBackend::with_system_runner());
-    let flag_seen_true = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel();
+/// This test uses the coordinator's `run_mutation` with a closure that
+/// observes the flag from inside the closure, deterministically proving
+/// the flag is set during the mutation.
+#[tokio::test]
+async fn test_coordinator_op_in_progress_true_during_mutation() {
+    use linux_patch_api::packages::coordinator::OperationCoordinator;
+    use std::sync::Arc;
 
-    let b = backend.clone();
-    let flag_clone = flag_seen_true.clone();
+    let coord = Arc::new(OperationCoordinator::new(5));
 
-    // Thread 1: poll is_operation_in_progress rapidly
-    let poller = std::thread::spawn(move || {
-        // Wait for the operation to start
-        tx.send(()).expect("notify failed");
-        for _ in 0..10000 {
-            if b.is_operation_in_progress() {
-                flag_clone.store(true, Ordering::SeqCst);
-                break;
-            }
-            std::thread::sleep(Duration::from_micros(10));
-        }
-    });
+    // Before the mutation, flag should be false
+    assert!(!coord.is_operation_in_progress());
 
-    // Wait for poller to be ready
-    rx.recv().expect("poller not ready");
-
-    // Thread 2 (current): call install_packages
-    let packages = vec![PackageSpec {
-        name: "test-pkg-flag".to_string(),
-        version: None,
-    }];
-    let options = InstallOptions::default();
-    let _ = backend.install_packages(&packages, &options);
-
-    poller.join().expect("poller panicked");
+    // Run a mutation that observes the flag from inside
+    let coord_inner = coord.clone();
+    let flag_seen_true = coord
+        .run_mutation(|| {
+            // From inside the closure, the flag should be true
+            Ok(coord_inner.is_operation_in_progress())
+        })
+        .await
+        .unwrap();
 
     assert!(
-        flag_seen_true.load(Ordering::SeqCst),
-        "is_operation_in_progress was never observed as true during the operation. \
-         This may be a timing issue — re-run the test. If it persists, the flag \
-         is not being set correctly in run_apt_safe."
+        flag_seen_true,
+        "coordinator op_in_progress should be true inside run_mutation closure"
     );
+
+    // After the mutation, flag should be false again
+    assert!(!coord.is_operation_in_progress());
 }
 
 /// Three concurrent apt operations must also execute serially.

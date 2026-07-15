@@ -182,7 +182,8 @@ async fn restart_pending_state_blocks_jobs_after_install_finishes() {
     let su_job_id = jm
         .try_reserve_self_update(vec!["linux-patch-api".to_string()])
         .await
-        .expect("reservation should succeed");
+        .expect("reservation should succeed")
+        .commit();
 
     // The flag is still set (we don't clear it on success — the restart will
     // kill the process)
@@ -378,7 +379,8 @@ async fn wrong_owner_release_does_not_clear_lock() {
     let job_a = jm
         .try_reserve_self_update(vec!["linux-patch-api".to_string()])
         .await
-        .expect("Update A should reserve");
+        .expect("Update A should reserve")
+        .commit();
 
     // Simulate Update B somehow taking over (force-set with a different job_id)
     let job_b = Uuid::new_v4();
@@ -411,7 +413,8 @@ async fn release_after_force_clear_is_noop() {
     let job_id = jm
         .try_reserve_self_update(vec!["linux-patch-api".to_string()])
         .await
-        .expect("reservation should succeed");
+        .expect("reservation should succeed")
+        .commit();
 
     // Force-clear (as the new process does on startup)
     jm.force_clear_self_update().await;
@@ -857,6 +860,7 @@ async fn recovering_state_with_marker_continues_recovery() {
         target_version: String::new(),
         started_at: chrono::Utc::now().to_rfc3339(),
         restart_deadline: None,
+        generation: 0,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     std::fs::write(&state_path, &json).unwrap();
@@ -888,6 +892,7 @@ async fn recovering_state_without_marker() {
         target_version: String::new(),
         started_at: chrono::Utc::now().to_rfc3339(),
         restart_deadline: None,
+        generation: 0,
     };
     let json = serde_json::to_string_pretty(&state).unwrap();
     std::fs::write(&state_path, &json).unwrap();

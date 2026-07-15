@@ -18,9 +18,9 @@
 //! Read-only operations (list, get, list-patches) do NOT acquire the mutation
 //! semaphore — they can run concurrently with each other.
 //!
-//! The `op_in_progress` flag replaces the APT-only `APT_IN_PROGRESS` global.
-//! It works across all backends because it's set by the coordinator, not by
-//! individual backend code.
+//! The `op_in_progress` flag is the sole authority for whether a package-DB
+//! mutation is running. The old APT-only `APT_IN_PROGRESS` static has been
+//! removed — the coordinator works across all backends.
 
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,9 +134,13 @@ pub fn run_command_with_acceptable_exit(
 
 /// Operation Coordinator — the single point of control for package operations.
 ///
-/// Held in `web::Data` and shared across all handlers. All mutating package
-/// operations go through `run_mutation`, which serializes them via a
-/// `Semaphore(1)`. Job concurrency is enforced via `job_semaphore`.
+/// Always shared via `Arc<OperationCoordinator>` (or `web::Data<Arc<...>>`).
+/// All mutating package operations go through `run_mutation`, which serializes
+/// them via a `Semaphore(1)`. Job concurrency is enforced via `job_semaphore`.
+///
+/// **Never clone this struct directly** — there is no `Clone` impl. All shared
+/// references must go through `Arc`. This guarantees every handler shares the
+/// same semaphores and atomic flags.
 pub struct OperationCoordinator {
     /// Serializes all package-DB mutations (install/update/remove/patch/refresh).
     /// Only one mutation runs at a time, across ALL backends.
@@ -157,6 +161,7 @@ pub struct OperationCoordinator {
 
 impl OperationCoordinator {
     /// Create a new coordinator with the given concurrency limits.
+    /// Wrap the result in `Arc` before sharing.
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             mutation_semaphore: Semaphore::new(1),
@@ -228,29 +233,52 @@ impl OperationCoordinator {
     }
 
     /// Try to run a mutation without blocking. Returns `Err(MutationBusy)`
-    /// if the semaphore is currently held by another operation.
+    /// if the semaphore is currently held by another operation, or
+    /// `Err(MutationFailed)` if the closure returned an error.
     ///
     /// Used by health-check-triggered cache refreshes: if a mutation is in
     /// progress, the health check skips the refresh and reports stale cache
     /// instead of blocking.
-    pub fn try_run_mutation<F, T>(&self, f: F) -> Result<T, MutationBusy>
+    pub fn try_run_mutation<F, T>(&self, f: F) -> Result<T, TryMutationError>
     where
         F: FnOnce() -> Result<T>,
     {
         let _permit = self
             .mutation_semaphore
             .try_acquire()
-            .map_err(|_| MutationBusy)?;
+            .map_err(|_| TryMutationError::Busy)?;
 
         self.op_in_progress.store(true, Ordering::SeqCst);
         let result = f();
         self.op_in_progress.store(false, Ordering::SeqCst);
 
-        result.map_err(|_| MutationBusy)
+        result.map_err(TryMutationError::Failed)
     }
 }
 
+/// Error returned by `try_run_mutation`.
+#[derive(Debug)]
+pub enum TryMutationError {
+    /// The mutation semaphore was already held by another operation.
+    Busy,
+    /// The closure returned an error.
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for TryMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TryMutationError::Busy => write!(f, "A package-DB mutation is already in progress"),
+            TryMutationError::Failed(e) => write!(f, "Mutation failed: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for TryMutationError {}
+
 /// Error returned by `try_run_mutation` when the mutation semaphore is busy.
+/// Kept for backwards compatibility with existing callers that only check
+/// for the busy case.
 #[derive(Debug, Clone, Copy)]
 pub struct MutationBusy;
 
@@ -262,24 +290,13 @@ impl std::fmt::Display for MutationBusy {
 
 impl std::error::Error for MutationBusy {}
 
-impl Clone for OperationCoordinator {
-    fn clone(&self) -> Self {
-        Self {
-            mutation_semaphore: Semaphore::new(1),
-            job_semaphore: Semaphore::new(self.job_semaphore().available_permits().max(1)),
-            op_in_progress: self.op_in_progress.clone(),
-            job_in_progress: self.job_in_progress.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn test_run_mution_serializes() {
-        let coord = OperationCoordinator::new(5);
+        let coord = Arc::new(OperationCoordinator::new(5));
 
         let coord1 = coord.clone();
         let coord2 = coord.clone();
@@ -316,6 +333,14 @@ mod tests {
         let result = coord.try_run_mutation(|| Ok(123));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 123);
+    }
+
+    #[test]
+    fn test_try_run_mutation_failed() {
+        let coord = OperationCoordinator::new(5);
+        let result: Result<(), TryMutationError> =
+            coord.try_run_mutation(|| Err(anyhow::anyhow!("command failed")));
+        assert!(matches!(result, Err(TryMutationError::Failed(_))));
     }
 
     #[test]

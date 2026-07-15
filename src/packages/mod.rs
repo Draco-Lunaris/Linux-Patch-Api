@@ -213,10 +213,12 @@ pub trait PackageManagerBackend: Send + Sync {
     /// Get the last cache update timestamp
     fn last_cache_update(&self, cache_state: &cache::PackageCacheState) -> Option<DateTime<Utc>>;
 
-    /// Check if a package-manager operation (install/upgrade/remove/patch) is
-    /// currently in progress. Used by the SIGTERM handler to decide whether to
-    /// wait for the operation to complete before exiting, or to exit immediately.
-    /// Returns false for backends that don't track operation state.
+    /// Check if a package-manager operation is in progress.
+    ///
+    /// **Deprecated**: The `OperationCoordinator`'s `is_operation_in_progress()`
+    /// is the sole authority. This trait method always returns `false` and is
+    /// kept only for backward compatibility with tests that call it directly.
+    /// Production code must use the coordinator.
     fn is_operation_in_progress(&self) -> bool {
         false
     }
@@ -235,6 +237,20 @@ pub trait PackageManagerBackend: Send + Sync {
     fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
         let _ = name;
         Ok(None)
+    }
+
+    /// Repair the package database after an interrupted operation.
+    ///
+    /// For APT: runs `dpkg --configure -a` and `dpkg --audit`.
+    /// For DNF/YUM: runs `rpm --rebuilddb` (safe, non-destructive).
+    /// For APK: runs `apk fix` (repares dependencies).
+    /// For Pacman: no standard repair — returns Ok(()).
+    ///
+    /// Called by the startup recovery path when an interrupted install is
+    /// detected. Runs under the coordinator's mutation semaphore.
+    fn repair_package_database(&self) -> Result<()> {
+        // Default: no repair available
+        Ok(())
     }
 
     /// Restart the agent's own service (not the whole system).
@@ -513,12 +529,6 @@ pub struct AptBackend {
 /// Only one apt-get or dpkg command runs at a time, ever.
 static APT_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
-/// Process-wide flag indicating an apt operation is in progress.
-/// Set true while inside `run_apt_safe`, false when done. Used by the
-/// SIGTERM handler to decide whether to wait before exiting.
-static APT_IN_PROGRESS: std::sync::OnceLock<std::sync::atomic::AtomicBool> =
-    std::sync::OnceLock::new();
-
 impl AptBackend {
     pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
         Self { runner }
@@ -531,10 +541,6 @@ impl AptBackend {
 
     fn get_apt_mutex() -> &'static std::sync::Mutex<()> {
         APT_MUTEX.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    fn get_apt_in_progress() -> &'static std::sync::atomic::AtomicBool {
-        APT_IN_PROGRESS.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
     }
 
     /// Run `dpkg --configure -a` to clean up any half-configured packages from
@@ -613,20 +619,6 @@ impl AptBackend {
         let _guard = Self::get_apt_mutex()
             .lock()
             .map_err(|e| anyhow::anyhow!("apt mutex poisoned: {}", e))?;
-
-        // Mark operation in progress for SIGTERM handler. The guard ensures
-        // the flag is cleared on ALL return paths (including early returns
-        // from ensure_dpkg_clean failures, apt-get spawn failures, etc).
-        // Without this, a pre-flight failure would leave the flag true forever,
-        // causing the SIGTERM handler to wait 25s on every shutdown.
-        struct InProgressGuard;
-        impl Drop for InProgressGuard {
-            fn drop(&mut self) {
-                AptBackend::get_apt_in_progress().store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        Self::get_apt_in_progress().store(true, std::sync::atomic::Ordering::SeqCst);
-        let _in_progress_guard = InProgressGuard;
 
         // Pre-flight: clean up any half-configured state from prior crashes
         self.ensure_dpkg_clean()?;
@@ -1056,9 +1048,9 @@ impl PackageManagerBackend for AptBackend {
 
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing APT package cache");
-        // Route through run_apt_safe so cache refresh acquires the APT mutex
-        // and sets APT_IN_PROGRESS. This prevents concurrent apt-get update
-        // and apt-get install from racing on the dpkg frontend lock.
+        // Route through run_apt_safe so cache refresh acquires the APT mutex.
+        // The coordinator's mutation semaphore provides cross-backend
+        // serialization; the APT mutex provides APT-internal serialization.
         match self.run_apt(&["update"]) {
             Ok(_) => {
                 cache_state.update_success();
@@ -1077,8 +1069,12 @@ impl PackageManagerBackend for AptBackend {
         cache_state.status().last_update
     }
 
-    fn is_operation_in_progress(&self) -> bool {
-        Self::get_apt_in_progress().load(std::sync::atomic::Ordering::SeqCst)
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running APT package database repair (dpkg --configure -a + audit)");
+        self.ensure_dpkg_clean()?;
+        self.verify_dpkg_clean()?;
+        info!("APT package database repair completed successfully");
+        Ok(())
     }
 
     fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
@@ -1580,6 +1576,13 @@ impl PackageManagerBackend for ApkBackend {
             }
             Err(_) => Ok(None),
         }
+    }
+
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running APK package database repair (apk fix)");
+        self.run_apk(&["fix"])?;
+        info!("APK package database repair completed successfully");
+        Ok(())
     }
 }
 
@@ -2085,6 +2088,13 @@ impl PackageManagerBackend for DnfBackend {
             _ => Ok(None),
         }
     }
+
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running DNF package database repair (rpm --rebuilddb)");
+        self.run_rpm(&["--rebuilddb"])?;
+        info!("DNF package database repair completed successfully");
+        Ok(())
+    }
 }
 
 impl Default for DnfBackend {
@@ -2552,6 +2562,13 @@ impl PackageManagerBackend for YumBackend {
             }
             _ => Ok(None),
         }
+    }
+
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running YUM package database repair (rpm --rebuilddb)");
+        self.run_rpm(&["--rebuilddb"])?;
+        info!("YUM package database repair completed successfully");
+        Ok(())
     }
 }
 

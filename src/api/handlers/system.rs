@@ -8,12 +8,14 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
-use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
+use crate::jobs::manager::{JobManager, JobStatus, RebootAdmission};
+use crate::packages::coordinator::OperationCoordinator;
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
@@ -128,6 +130,7 @@ pub async fn health_check(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     crl_state: web::Data<SharedCrlState>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let _request_id = Uuid::new_v4().to_string();
@@ -150,20 +153,38 @@ pub async fn health_check(
     // Check cache status — report stale without synchronously refreshing.
     // Health checks must NOT mutate package state. If the cache is stale,
     // we spawn an async refresh task (best-effort) and report the current
-    // status immediately. This prevents health checks from racing with
-    // package operations on the dpkg/rpm/pacman frontend lock.
+    // status immediately. The refresh uses the coordinator's non-blocking
+    // try_run_mutation — if a mutation is already in progress, the refresh
+    // is skipped and stale cache is reported.
     let cache_status_val = cache_state.status();
     let (mut status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
-        // Spawn a best-effort background refresh — do NOT block the health
-        // response. The task will acquire the mutation semaphore via the
-        // backend's refresh_package_cache method, so it won't race with
-        // in-progress operations.
+        // Spawn a best-effort background refresh using the coordinator's
+        // non-blocking mutation admission. This deduplicates refreshes
+        // (only one can hold the mutation semaphore at a time) and never
+        // blocks the health response.
         let backend_clone = backend.clone();
         let cache_state_clone = cache_state.clone();
+        let coordinator_clone = coordinator.clone();
         actix_web::rt::spawn(async move {
-            if !backend_clone.is_operation_in_progress() {
-                if let Err(e) = backend_clone.refresh_package_cache(&cache_state_clone) {
-                    tracing::warn!(error = ?e, "Background cache refresh from health check failed");
+            // Run in spawn_blocking because refresh_package_cache is a
+            // blocking command execution.
+            let refresh_result = tokio::task::spawn_blocking(move || {
+                coordinator_clone
+                    .try_run_mutation(|| backend_clone.refresh_package_cache(&cache_state_clone))
+            })
+            .await;
+            match refresh_result {
+                Ok(Ok(_)) => info!("Background cache refresh from health check succeeded"),
+                Ok(Err(crate::packages::coordinator::TryMutationError::Busy)) => {
+                    info!(
+                        "Background cache refresh from health check skipped — mutation in progress"
+                    );
+                }
+                Ok(Err(crate::packages::coordinator::TryMutationError::Failed(e))) => {
+                    warn!(error = ?e, "Background cache refresh from health check failed");
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Background cache refresh task panicked");
                 }
             }
         });
@@ -230,6 +251,7 @@ pub async fn reboot_system(
     body: web::Json<RebootRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -246,121 +268,16 @@ pub async fn reboot_system(
         "Initiating system reboot"
     );
 
-    // Two-tier force model:
-    //
-    // Tier 1 — force=false: All guards active. Reboot is blocked if any
-    //   jobs are active or a self-update is in progress. This is the normal
-    //   safe path.
-    //
-    // Tier 2 — force=true, ack=false: Bypasses ordinary active-job protection
-    //   (pending/running jobs) but does NOT bypass the self-update or
-    //   package-operation guard. A forced reboot during a package-database
-    //   mutation can corrupt dpkg/rpm/pacman state, leaving the system
-    //   unbootable. The caller must explicitly acknowledge this risk.
-    //
-    // Tier 3 — force=true, ack=true: Bypasses all guards. The caller has
-    //   explicitly acknowledged the risk of package-database corruption.
-    //   A durable audit event is logged.
-
-    let self_update_active = job_manager.is_self_update_in_progress().await;
-    let pkg_op_active = backend.is_operation_in_progress();
-    let active_jobs = if !force {
-        Some(job_manager.active_count().await)
-    } else {
-        None
+    // Use the atomic admit_reboot method — all checks and job creation
+    // happen under one coordinated lock, preventing races between the
+    // reboot check and concurrent job/self-update/mutation creation.
+    let pkg_op_active = coordinator.is_operation_in_progress();
+    let admission = RebootAdmission {
+        force,
+        acknowledge_package_database_corruption_risk: ack_corruption_risk,
     };
 
-    // Tier 1: force=false — check all guards
-    if !force {
-        if self_update_active {
-            warn!(request_id = %request_id, "Reboot blocked — self-update in progress");
-            let response = ApiResponse::<()>::error(
-                "SELF_UPDATE_IN_PROGRESS",
-                "Cannot reboot while a self-update is in progress. Use force=true to override, or force=true with acknowledge_package_database_corruption_risk=true if a package operation is in progress.",
-                None,
-                false,
-            );
-            return HttpResponse::Conflict().json(response);
-        }
-        if let Some(count) = active_jobs {
-            if count > 0 {
-                warn!(request_id = %request_id, active_jobs = count, "Reboot blocked by active jobs");
-                let response = ApiResponse::<()>::error(
-                    "REBOOT_BLOCKED",
-                    "Cannot reboot while jobs are running or pending. Use force=true to override.",
-                    Some(serde_json::json!({"active_jobs": count})),
-                    false,
-                );
-                return HttpResponse::Conflict().json(response);
-            }
-        }
-    }
-
-    // Tier 2/3: force=true — check if a package-database mutation is in progress.
-    // If so, require the explicit corruption-risk acknowledgment.
-    if force && (self_update_active || pkg_op_active) && !ack_corruption_risk {
-        warn!(
-            request_id = %request_id,
-            self_update_active = self_update_active,
-            pkg_op_active = pkg_op_active,
-            "Forced reboot blocked — package-database mutation in progress without corruption-risk acknowledgment"
-        );
-        let response = ApiResponse::<()>::error(
-            "PACKAGE_DB_MUTATION_IN_PROGRESS",
-            "A package-manager operation or self-update is in progress. A forced reboot now may corrupt the package database (dpkg/rpm/pacman), leaving the system unbootable. \
-             To proceed, set acknowledge_package_database_corruption_risk=true in the request body.",
-            Some(serde_json::json!({
-                "self_update_in_progress": self_update_active,
-                "package_operation_in_progress": pkg_op_active,
-            })),
-            false,
-        );
-        return HttpResponse::Conflict().json(response);
-    }
-
-    // Tier 3: force=true + ack=true during package mutation — log durable audit event
-    if force && ack_corruption_risk && (self_update_active || pkg_op_active) {
-        error!(
-            request_id = %request_id,
-            self_update_active = self_update_active,
-            pkg_op_active = pkg_op_active,
-            delay_seconds = delay,
-            "AUDIT: Forced reboot accepted with package-database corruption risk acknowledged. \
-             A package-manager operation or self-update is in progress. \
-             This may corrupt dpkg/rpm/pacman state and leave the system unbootable."
-        );
-    }
-
-    // Admit the reboot job.
-    //
-    // Normal path (force=false or force=true without package mutation):
-    //   Use admit_job — atomically checks self-update flag and queue capacity.
-    //
-    // Emergency path (force=true + ack=true + package mutation in progress):
-    //   Use create_job directly — bypasses the self-update guard because the
-    //   caller has explicitly acknowledged the corruption risk. This is the
-    //   ONLY handler that is permitted to bypass admit_job, and only under
-    //   these specific conditions.
-    let bypass_self_update_guard =
-        force && ack_corruption_risk && (self_update_active || pkg_op_active);
-
-    let job_admission = if bypass_self_update_guard {
-        // Emergency path: bypass the self-update guard.
-        // Queue capacity is still checked via can_accept_job.
-        if !job_manager.can_accept_job().await {
-            Err(crate::jobs::manager::JobAdmissionError::QueueFull)
-        } else {
-            job_manager
-                .create_job_unchecked(JobOperation::Reboot, vec![])
-                .await
-                .map_err(|_| crate::jobs::manager::JobAdmissionError::QueueFull)
-        }
-    } else {
-        // Normal path: admit_job checks self-update flag and queue capacity.
-        job_manager.admit_job(JobOperation::Reboot, vec![]).await
-    };
-
-    match job_admission {
+    match job_manager.admit_reboot(admission, pkg_op_active).await {
         Ok(job_id) => {
             // Spawn background task to execute the reboot
             let backend_clone = backend.clone();
@@ -419,8 +336,35 @@ pub async fn reboot_system(
             HttpResponse::Accepted().json(response)
         }
         Err(ref admission_err) => {
-            warn!(request_id = %request_id, error = %admission_err, "Reboot job admission rejected");
-            super::packages::admission_error_response(admission_err)
+            warn!(request_id = %request_id, error = %admission_err, "Reboot admission rejected");
+            let (code, message, data, retry) = match admission_err {
+                crate::jobs::manager::RebootAdmissionError::SelfUpdateInProgress => (
+                    "SELF_UPDATE_IN_PROGRESS",
+                    "Cannot reboot while a self-update is in progress. Use force=true with acknowledge_package_database_corruption_risk=true to override.".to_string(),
+                    None,
+                    false,
+                ),
+                crate::jobs::manager::RebootAdmissionError::PackageMutationInProgress => (
+                    "PACKAGE_DB_MUTATION_IN_PROGRESS",
+                    "A package-manager operation is in progress. A forced reboot now may corrupt the package database. Set acknowledge_package_database_corruption_risk=true to override.".to_string(),
+                    Some(serde_json::json!({"package_operation_in_progress": true})),
+                    false,
+                ),
+                crate::jobs::manager::RebootAdmissionError::JobsInProgress { count } => (
+                    "REBOOT_BLOCKED",
+                    format!("Cannot reboot while {} jobs are running or pending. Use force=true to override.", count),
+                    Some(serde_json::json!({"active_jobs": count})),
+                    false,
+                ),
+                crate::jobs::manager::RebootAdmissionError::QueueFull => (
+                    "QUEUE_FULL",
+                    "Job queue is at capacity. Please retry later.".to_string(),
+                    None,
+                    true,
+                ),
+            };
+            let response = ApiResponse::<()>::error(code, &message, data, retry);
+            HttpResponse::Conflict().json(response)
         }
     }
 }

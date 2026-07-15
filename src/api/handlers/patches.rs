@@ -7,10 +7,12 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
+use crate::packages::coordinator::OperationCoordinator;
 use crate::packages::{validate_package_name, PackageManagerBackend};
 
 use super::packages::{ApiResponse, JobResponseData};
@@ -39,6 +41,7 @@ pub struct PatchApplyRequest {
 pub async fn list_patches(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -47,17 +50,35 @@ pub async fn list_patches(
     info!(request_id = %request_id, "Listing available patches");
 
     // Refresh package cache if stale so the manager sees current patch data.
-    // Spawn a background refresh instead of blocking the response — this
+    // Use the coordinator's non-blocking try_run_mutation — if a mutation is
+    // already in progress, skip the refresh and report stale cache. This
     // prevents the patch-list endpoint from racing with in-progress package
     // operations on the dpkg/rpm/pacman frontend lock.
     if cache_state.is_stale() {
-        info!(request_id = %request_id, "Package cache stale, spawning background refresh before listing patches");
+        info!(request_id = %request_id, "Package cache stale, attempting non-blocking background refresh before listing patches");
         let backend_clone = backend.clone();
         let cache_state_clone = cache_state.clone();
+        let coordinator_clone = coordinator.clone();
         actix_web::rt::spawn(async move {
-            if !backend_clone.is_operation_in_progress() {
-                if let Err(e) = backend_clone.refresh_package_cache(&cache_state_clone) {
-                    tracing::warn!(error = ?e, "Background cache refresh from patch-list failed");
+            // Run the cache refresh in spawn_blocking because the backend's
+            // refresh_package_cache is a blocking command execution.
+            let refresh_result = tokio::task::spawn_blocking(move || {
+                coordinator_clone
+                    .try_run_mutation(|| backend_clone.refresh_package_cache(&cache_state_clone))
+            })
+            .await;
+            match refresh_result {
+                Ok(Ok(_)) => info!("Background cache refresh from patch-list succeeded"),
+                Ok(Err(crate::packages::coordinator::TryMutationError::Busy)) => {
+                    info!(
+                        "Background cache refresh from patch-list skipped — mutation in progress"
+                    );
+                }
+                Ok(Err(crate::packages::coordinator::TryMutationError::Failed(e))) => {
+                    warn!(error = ?e, "Background cache refresh from patch-list failed");
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Background cache refresh task panicked");
                 }
             }
         });
@@ -99,6 +120,7 @@ pub async fn apply_patches(
     body: web::Json<PatchApplyRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     job_manager: web::Data<JobManager>,
+    coordinator: web::Data<Arc<OperationCoordinator>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     _req: HttpRequest,
 ) -> impl Responder {
@@ -134,6 +156,7 @@ pub async fn apply_patches(
             // Spawn background task to execute the patching
             let backend_clone = backend.clone();
             let job_manager_clone = job_manager.clone();
+            let coordinator_clone = coordinator.clone();
             let cache_state_clone = cache_state.clone();
             let request = body.clone();
 
@@ -166,7 +189,16 @@ pub async fn apply_patches(
                     .add_job_log(&job_id_clone, "Refreshing package cache...".to_string())
                     .await;
 
-                match backend_clone.refresh_package_cache(&cache_state_clone) {
+                // Cache refresh is a mutation — route through the coordinator
+                let cache_state_for_refresh = cache_state_clone.clone();
+                let backend_for_refresh = backend_clone.clone();
+                let refresh_result = coordinator_clone
+                    .run_mutation(|| {
+                        backend_for_refresh.refresh_package_cache(&cache_state_for_refresh)
+                    })
+                    .await;
+
+                match refresh_result {
                     Ok(_) => {
                         let _ = job_manager_clone
                             .add_job_log(
@@ -198,9 +230,12 @@ pub async fn apply_patches(
                     }
                 }
 
-                // Execute patching with 404 retry
+                // Execute patching through the coordinator's mutation semaphore
                 let packages_ref = request.packages.as_deref();
-                let apply_result = backend_clone.apply_patches(packages_ref);
+                let backend_for_apply = backend_clone.clone();
+                let apply_result = coordinator_clone
+                    .run_mutation(|| backend_for_apply.apply_patches(packages_ref))
+                    .await;
 
                 match apply_result {
                     Ok(_) => {
@@ -247,7 +282,16 @@ pub async fn apply_patches(
                             )
                             .await;
 
-                        match backend_clone.refresh_package_cache(&cache_state_clone) {
+                        // Retry cache refresh through the coordinator
+                        let cache_state_for_retry = cache_state_clone.clone();
+                        let backend_for_retry = backend_clone.clone();
+                        let refresh_result = coordinator_clone
+                            .run_mutation(|| {
+                                backend_for_retry.refresh_package_cache(&cache_state_for_retry)
+                            })
+                            .await;
+
+                        match refresh_result {
                             Ok(_) => {
                                 let _ = job_manager_clone
                                     .add_job_log(
@@ -271,8 +315,13 @@ pub async fn apply_patches(
                             }
                         }
 
-                        // Retry the apply
-                        match backend_clone.apply_patches(packages_ref) {
+                        // Retry the apply through the coordinator
+                        let backend_for_retry_apply = backend_clone.clone();
+                        let retry_result = coordinator_clone
+                            .run_mutation(|| backend_for_retry_apply.apply_patches(packages_ref))
+                            .await;
+
+                        match retry_result {
                             Ok(_) => {
                                 let _ = job_manager_clone.complete_job(&job_id_clone).await;
                                 info!(job_id = %job_id_clone, "Patch application completed after retry");
