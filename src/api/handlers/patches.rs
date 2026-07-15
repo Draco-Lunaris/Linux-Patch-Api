@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages::coordinator::OperationCoordinator;
+use crate::jobs::manager::{JobOperation, JobStatus};
+use crate::jobs::scheduler::Scheduler;
 use crate::packages::{validate_package_name, PackageManagerBackend};
 
 use super::packages::{ApiResponse, JobResponseData};
@@ -41,7 +41,7 @@ pub struct PatchApplyRequest {
 pub async fn list_patches(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -50,7 +50,7 @@ pub async fn list_patches(
     info!(request_id = %request_id, "Listing available patches");
 
     // Refresh package cache if stale so the manager sees current patch data.
-    // Use the coordinator's non-blocking try_run_mutation — if a mutation is
+    // Use the scheduler's non-blocking try_run_mutation — if a mutation is
     // already in progress, skip the refresh and report stale cache. This
     // prevents the patch-list endpoint from racing with in-progress package
     // operations on the dpkg/rpm/pacman frontend lock.
@@ -58,27 +58,22 @@ pub async fn list_patches(
         info!(request_id = %request_id, "Package cache stale, attempting non-blocking background refresh before listing patches");
         let backend_clone = backend.clone();
         let cache_state_clone = cache_state.clone();
-        let coordinator_clone = coordinator.clone();
+        let scheduler_clone = scheduler.clone();
         actix_web::rt::spawn(async move {
-            // Run the cache refresh in spawn_blocking because the backend's
-            // refresh_package_cache is a blocking command execution.
-            let refresh_result = tokio::task::spawn_blocking(move || {
-                coordinator_clone
-                    .try_run_mutation(|| backend_clone.refresh_package_cache(&cache_state_clone))
-            })
-            .await;
+            // Run the cache refresh via the scheduler's try_run_mutation.
+            // The closure runs in spawn_blocking, so move clones in (no borrows).
+            let refresh_result = scheduler_clone
+                .try_run_mutation(move || backend_clone.refresh_package_cache(&cache_state_clone))
+                .await;
             match refresh_result {
-                Ok(Ok(_)) => info!("Background cache refresh from patch-list succeeded"),
-                Ok(Err(crate::packages::coordinator::TryMutationError::Busy)) => {
+                Ok(_) => info!("Background cache refresh from patch-list succeeded"),
+                Err(crate::jobs::scheduler::TryMutationError::Busy) => {
                     info!(
                         "Background cache refresh from patch-list skipped — mutation in progress"
                     );
                 }
-                Ok(Err(crate::packages::coordinator::TryMutationError::Failed(e))) => {
+                Err(crate::jobs::scheduler::TryMutationError::Failed(e)) => {
                     warn!(error = ?e, "Background cache refresh from patch-list failed");
-                }
-                Err(e) => {
-                    warn!(error = ?e, "Background cache refresh task panicked");
                 }
             }
         });
@@ -119,8 +114,7 @@ pub async fn list_patches(
 pub async fn apply_patches(
     body: web::Json<PatchApplyRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
-    job_manager: web::Data<JobManager>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
+    scheduler: web::Data<Arc<Scheduler>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     _req: HttpRequest,
 ) -> impl Responder {
@@ -148,15 +142,14 @@ pub async fn apply_patches(
     // Atomically admit the job — checks self-update flag and queue capacity
     // under a single lock to prevent race with self-update reservation.
     let package_list = body.packages.clone().unwrap_or_default();
-    match job_manager
+    match scheduler
         .admit_job(JobOperation::PatchApply, package_list)
         .await
     {
         Ok(job_id) => {
             // Spawn background task to execute the patching
             let backend_clone = backend.clone();
-            let job_manager_clone = job_manager.clone();
-            let coordinator_clone = coordinator.clone();
+            let scheduler_clone = scheduler.clone();
             let cache_state_clone = cache_state.clone();
             let request = body.clone();
 
@@ -164,7 +157,7 @@ pub async fn apply_patches(
                 let job_id_clone = job_id;
 
                 // Update job to running
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .update_job(
                         &job_id_clone,
                         JobStatus::Running,
@@ -172,12 +165,12 @@ pub async fn apply_patches(
                         Some("Starting patch application...".to_string()),
                     )
                     .await;
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
                 // MANDATORY: Refresh package cache before applying patches
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .update_job(
                         &job_id_clone,
                         JobStatus::Running,
@@ -185,28 +178,29 @@ pub async fn apply_patches(
                         Some("Refreshing package index...".to_string()),
                     )
                     .await;
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .add_job_log(&job_id_clone, "Refreshing package cache...".to_string())
                     .await;
 
-                // Cache refresh is a mutation — route through the coordinator
+                // Cache refresh is a mutation — route through the scheduler.
+                // The closure runs in spawn_blocking — move clones in.
                 let cache_state_for_refresh = cache_state_clone.clone();
                 let backend_for_refresh = backend_clone.clone();
-                let refresh_result = coordinator_clone
-                    .run_mutation(|| {
+                let refresh_result = scheduler_clone
+                    .run_mutation(job_id_clone, move || {
                         backend_for_refresh.refresh_package_cache(&cache_state_for_refresh)
                     })
                     .await;
 
                 match refresh_result {
                     Ok(_) => {
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .add_job_log(
                                 &job_id_clone,
                                 "Package cache refreshed successfully".to_string(),
                             )
                             .await;
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .update_job(
                                 &job_id_clone,
                                 JobStatus::Running,
@@ -217,34 +211,38 @@ pub async fn apply_patches(
                     }
                     Err(e) => {
                         error!(job_id = %job_id_clone, error = ?e, "Cache refresh failed");
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .add_job_log(
                                 &job_id_clone,
                                 format!("Package cache refresh failed: {}", e),
                             )
                             .await;
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
                         return; // Exit the spawned task
                     }
                 }
 
-                // Execute patching through the coordinator's mutation semaphore
-                let packages_ref = request.packages.as_deref();
+                // Execute patching through the scheduler's mutation slot.
+                // Move the backend + packages into the closure.
+                let packages_owned: Option<Vec<String>> = request.packages.clone();
                 let backend_for_apply = backend_clone.clone();
-                let apply_result = coordinator_clone
-                    .run_mutation(|| backend_for_apply.apply_patches(packages_ref))
+                let apply_result = scheduler_clone
+                    .run_mutation(job_id_clone, move || {
+                        let packages_ref: Option<&[String]> = packages_owned.as_deref();
+                        backend_for_apply.apply_patches(packages_ref)
+                    })
                     .await;
 
                 match apply_result {
                     Ok(_) => {
-                        let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                        let _ = scheduler_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, "Patch application completed");
 
                         // Handle reboot if requested
                         if request.reboot {
-                            let _ = job_manager_clone
+                            let _ = scheduler_clone
                                 .add_job_log(
                                     &job_id_clone,
                                     format!(
@@ -256,7 +254,7 @@ pub async fn apply_patches(
                             // Trigger actual reboot via system handler
                             match backend_clone.reboot_system(request.reboot_delay_seconds) {
                                 Ok(_) => {
-                                    let _ = job_manager_clone
+                                    let _ = scheduler_clone
                                         .add_job_log(
                                             &job_id_clone,
                                             "Reboot command executed".to_string(),
@@ -264,7 +262,7 @@ pub async fn apply_patches(
                                         .await;
                                 }
                                 Err(e) => {
-                                    let _ = job_manager_clone
+                                    let _ = scheduler_clone
                                         .add_job_log(&job_id_clone, format!("Reboot failed: {}", e))
                                         .await;
                                 }
@@ -274,7 +272,7 @@ pub async fn apply_patches(
                     Err(e) if crate::packages::cache::is_fetch_error(&e) => {
                         // 404/fetch error: refresh cache and retry once
                         info!(job_id = %job_id_clone, "Patch apply failed with fetch error, refreshing cache and retrying");
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .add_job_log(
                                 &job_id_clone,
                                 "Fetch error detected, refreshing cache and retrying..."
@@ -282,18 +280,18 @@ pub async fn apply_patches(
                             )
                             .await;
 
-                        // Retry cache refresh through the coordinator
+                        // Retry cache refresh through the scheduler
                         let cache_state_for_retry = cache_state_clone.clone();
                         let backend_for_retry = backend_clone.clone();
-                        let refresh_result = coordinator_clone
-                            .run_mutation(|| {
+                        let refresh_result = scheduler_clone
+                            .run_mutation(job_id_clone, move || {
                                 backend_for_retry.refresh_package_cache(&cache_state_for_retry)
                             })
                             .await;
 
                         match refresh_result {
                             Ok(_) => {
-                                let _ = job_manager_clone
+                                let _ = scheduler_clone
                                     .add_job_log(
                                         &job_id_clone,
                                         "Cache refreshed, retrying patch apply...".to_string(),
@@ -302,33 +300,38 @@ pub async fn apply_patches(
                             }
                             Err(refresh_err) => {
                                 error!(job_id = %job_id_clone, error = ?refresh_err, "Cache refresh on retry failed");
-                                let _ = job_manager_clone
+                                let _ = scheduler_clone
                                     .add_job_log(
                                         &job_id_clone,
                                         format!("Cache refresh on retry failed: {}", refresh_err),
                                     )
                                     .await;
-                                let _ = job_manager_clone
+                                let _ = scheduler_clone
                                     .fail_job_with_diagnostics(&job_id_clone, &refresh_err)
                                     .await;
                                 return;
                             }
                         }
 
-                        // Retry the apply through the coordinator
+                        // Retry the apply through the scheduler
+                        let packages_owned_retry: Option<Vec<String>> = request.packages.clone();
                         let backend_for_retry_apply = backend_clone.clone();
-                        let retry_result = coordinator_clone
-                            .run_mutation(|| backend_for_retry_apply.apply_patches(packages_ref))
+                        let retry_result = scheduler_clone
+                            .run_mutation(job_id_clone, move || {
+                                let packages_ref: Option<&[String]> =
+                                    packages_owned_retry.as_deref();
+                                backend_for_retry_apply.apply_patches(packages_ref)
+                            })
                             .await;
 
                         match retry_result {
                             Ok(_) => {
-                                let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                                let _ = scheduler_clone.complete_job(&job_id_clone).await;
                                 info!(job_id = %job_id_clone, "Patch application completed after retry");
 
                                 // Handle reboot if requested
                                 if request.reboot {
-                                    let _ = job_manager_clone
+                                    let _ = scheduler_clone
                                         .add_job_log(
                                             &job_id_clone,
                                             format!(
@@ -340,7 +343,7 @@ pub async fn apply_patches(
                                     match backend_clone.reboot_system(request.reboot_delay_seconds)
                                     {
                                         Ok(_) => {
-                                            let _ = job_manager_clone
+                                            let _ = scheduler_clone
                                                 .add_job_log(
                                                     &job_id_clone,
                                                     "Reboot command executed".to_string(),
@@ -348,7 +351,7 @@ pub async fn apply_patches(
                                                 .await;
                                         }
                                         Err(e) => {
-                                            let _ = job_manager_clone
+                                            let _ = scheduler_clone
                                                 .add_job_log(
                                                     &job_id_clone,
                                                     format!("Reboot failed: {}", e),
@@ -359,7 +362,7 @@ pub async fn apply_patches(
                                 }
                             }
                             Err(retry_err) => {
-                                let _ = job_manager_clone
+                                let _ = scheduler_clone
                                     .fail_job_with_diagnostics(&job_id_clone, &retry_err)
                                     .await;
                                 error!(job_id = %job_id_clone, error = ?retry_err, "Patch application failed after retry");
@@ -368,7 +371,7 @@ pub async fn apply_patches(
                     }
                     Err(e) => {
                         // Non-fetch error: fail immediately
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
                         error!(job_id = %job_id_clone, error = ?e, "Patch application failed");

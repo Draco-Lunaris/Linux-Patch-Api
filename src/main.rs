@@ -25,7 +25,6 @@ use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::crl::{self, CrlStatus};
@@ -34,10 +33,10 @@ use linux_patch_api::auth::{
 };
 use linux_patch_api::config::loader::{validate_certs, CertStatus};
 use linux_patch_api::enroll;
+use linux_patch_api::jobs::scheduler::Scheduler;
 use linux_patch_api::packages::cache::PackageCacheState;
-use linux_patch_api::packages::coordinator::OperationCoordinator;
 use linux_patch_api::packages::create_backend;
-use linux_patch_api::{init_logging, AppConfig, JobManager};
+use linux_patch_api::{init_logging, AppConfig};
 
 /// Linux Patch API CLI arguments
 #[derive(Parser, Debug)]
@@ -253,31 +252,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Initialize job manager
-    let job_manager = JobManager::new(
-        config.jobs.max_concurrent,
-        config.jobs.timeout_minutes,
-        config.jobs.max_queue_depth,
-    )?;
+    // Initialize the unified scheduler — the single authoritative control
+    // point for all operation admission and lifecycle decisions.
+    // One shared Arc<Scheduler> is injected into web::Data and used by
+    // all handlers, the SIGTERM handler, and the startup/recovery path.
+    let scheduler = Scheduler::new(config.jobs.max_concurrent, config.jobs.max_queue_depth);
     info!(
         max_jobs = config.jobs.max_concurrent,
         timeout_minutes = config.jobs.timeout_minutes,
         max_queue_depth = config.jobs.max_queue_depth,
-        "Job manager initialized"
-    );
-
-    // Initialize the OperationCoordinator — the single chokepoint for all
-    // package-database mutations. One shared Arc instance is injected into
-    // web::Data and used by all handlers and the SIGTERM handler.
-    let coordinator = Arc::new(OperationCoordinator::new(config.jobs.max_concurrent));
-    info!(
-        max_concurrent = config.jobs.max_concurrent,
-        "Operation coordinator initialized"
+        "Unified scheduler initialized"
     );
 
     // Reconcile persistent upgrade state on startup.
     //
-    // The in-memory self_update_in_progress flag is volatile — it disappears
+    // The in-memory self-update flag is volatile — it disappears
     // on crash or restart. The persistent state file at
     // /var/lib/linux_patch_api/upgrade-state.json survives process restarts
     // and allows the new process to know whether it's starting after a
@@ -305,13 +294,15 @@ async fn main() -> Result<()> {
         }
     };
     if should_block_for_upgrade {
-        info!("Setting self-update flag based on persistent upgrade state — blocking all package operations until initialization completes");
-        // Use a random UUID as the owner — the new process doesn't have
-        // a job_id from the old process. force_clear_self_update is used
-        // later to release it regardless of ownership.
-        job_manager
-            .set_self_update_in_progress(Uuid::new_v4())
-            .await;
+        info!("Blocking package operations based on persistent upgrade state — entering recovery mode until initialization completes");
+        // The scheduler doesn't yet have a set_self_update_in_progress method.
+        // For startup blocking, use enter_recovery() to block all mutations
+        // and jobs. The finalization path below clears this by transitioning
+        // the scheduler back to Open admission (via force_clear_self_update
+        // or a future clear_recovery method).
+        // TODO: Replace with scheduler.enter_recovery().await plus a synthetic
+        // self-update reservation once set_self_update_in_progress is added.
+        scheduler.enter_recovery().await;
     }
     let in_recovery_mode = startup_reconciliation
         == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode;
@@ -379,37 +370,28 @@ async fn main() -> Result<()> {
     // the listener is bound, the server is started, and READY=1 is sent to
     // systemd (see below).
     //
-    // The self_update_owner flag remains set, blocking all mutating API
-    // requests (admit_job and try_reserve_self_update both check it) until
-    // we explicitly clear it after successful initialization. This is the
-    // fail-closed behavior: if the process crashes before clearing, the
-    // next startup will see the persistent state file and re-block.
-    //
-    // We get a handle to the self_update_owner Arc BEFORE moving the
-    // JobManager into web::Data, so we can clear it later without needing
-    // a reference to the JobManager.
+    // The scheduler's recovery mode (or self-update flag, once added) remains
+    // set, blocking all mutating API requests (admit_job and
+    // try_reserve_self_update both check admission mode) until we explicitly
+    // clear it after successful initialization. This is the fail-closed
+    // behavior: if the process crashes before clearing, the next startup
+    // will see the persistent state file and re-block.
     let needs_state_finalize = should_block_for_upgrade;
-    let self_update_owner_handle = job_manager.self_update_owner_handle();
-    // DO NOT call force_clear_self_update() here — the flag stays set
-    // until the server is fully initialized (see finalization below).
 
     // Run startup repair for interrupted installs or recovery mode.
-    // This runs under the coordinator's mutation semaphore to serialize
-    // with any other operations (there shouldn't be any since the admission
-    // block is set, but the semaphore ensures correctness).
+    // At startup the scheduler is in recovery mode (admission blocked) and
+    // the SIGTERM handler is not yet installed, so there's no concurrency
+    // concern — we call repair_package_database directly on the backend
+    // without routing through the scheduler's mutation slot (which would
+    // require moving the non-Clone Box into a Send + 'static closure).
     let mut repair_failed = false;
     if startup_reconciliation
         == linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall
         || startup_reconciliation
             == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode
     {
-        info!("Running startup package database repair under coordinator");
-        let repair_backend = &package_backend;
-        let repair_result = coordinator
-            .run_mutation(|| repair_backend.repair_package_database())
-            .await;
-
-        match repair_result {
+        info!("Running startup package database repair");
+        match package_backend.repair_package_database() {
             Ok(_) => {
                 info!("Startup package database repair succeeded");
             }
@@ -428,10 +410,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Store job manager and backend in Arc for sharing
-    let job_manager_data = web::Data::new(job_manager);
+    // Store scheduler and backend in web::Data for sharing
+    let scheduler_data = web::Data::new(scheduler.clone());
     let backend_data = web::Data::new(package_backend);
-    let coordinator_data = web::Data::new(coordinator.clone());
 
     // Manager URL for repo-config self-heal during self-update.
     // Extracted from enrollment config; None when not configured.
@@ -450,11 +431,11 @@ async fn main() -> Result<()> {
     let shared_crl_state = crl::new_shared_state();
     let crl_state_data = web::Data::new(shared_crl_state.clone());
 
-    // Clone the coordinator for the SIGTERM handler — it needs to check if a
+    // Clone the scheduler for the SIGTERM handler — it needs to check if a
     // package mutation is in progress and wait for it to complete before
-    // allowing the server to shut down. The coordinator is the authoritative
+    // allowing the server to shut down. The scheduler is the authoritative
     // source for this check, working across ALL backends (not just APT).
-    let sigterm_coordinator = coordinator.clone();
+    let sigterm_scheduler = scheduler.clone();
 
     // Configure bind address
     let bind_address = format!("{}:{}", config.server.bind, config.server.port);
@@ -483,18 +464,16 @@ async fn main() -> Result<()> {
                 rate_limit_config.clone(),
             ))
             .wrap(Logger::default())
-            .app_data(job_manager_data.clone())
+            .app_data(scheduler_data.clone())
             .app_data(backend_data.clone())
-            .app_data(coordinator_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
             .app_data(manager_url_data.clone())
             .configure(|cfg| {
                 configure_api_routes(
                     cfg,
-                    job_manager_data.clone(),
+                    scheduler_data.clone(),
                     backend_data.clone(),
-                    coordinator_data.clone(),
                     cache_state.clone(),
                 );
             })
@@ -685,7 +664,7 @@ async fn main() -> Result<()> {
         // killing apt-get/dnf/apk/pacman mid-transaction.
         let server_handle = server.handle();
         tokio::spawn(async move {
-            setup_sigterm_handler(server_handle, sigterm_coordinator).await;
+            setup_sigterm_handler(server_handle, sigterm_scheduler.clone()).await;
         });
 
         // Finalize the self-update restart AFTER the server is constructed
@@ -767,7 +746,7 @@ async fn main() -> Result<()> {
                     }
 
                     linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-                    *self_update_owner_handle.write().await = None;
+                    scheduler.force_clear_self_update().await;
                     info!("Self-update admission block cleared — server ready for mutations");
                 }
             }
@@ -825,7 +804,7 @@ async fn main() -> Result<()> {
         // Spawn SIGTERM handler (same as TLS path)
         let server_handle = server.handle();
         tokio::spawn(async move {
-            setup_sigterm_handler(server_handle, sigterm_coordinator).await;
+            setup_sigterm_handler(server_handle, sigterm_scheduler.clone()).await;
         });
 
         // Finalize the self-update restart (same ordering as TLS path)
@@ -878,7 +857,7 @@ async fn main() -> Result<()> {
                         );
                     }
                     linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-                    *self_update_owner_handle.write().await = None;
+                    scheduler.force_clear_self_update().await;
                     info!("Self-update admission block cleared — server ready for mutations");
                 }
             }
@@ -965,18 +944,19 @@ fn notify_systemd_stopping() {
 ///
 /// This handler:
 /// 1. Catches SIGTERM
-/// 2. Checks if a package mutation is in progress (via the coordinator's
-///    `op_in_progress` flag, which works across ALL backends)
-/// 3. If yes: waits up to 80s (leaving margin before SIGKILL) for it to complete
-/// 4. Stops the HTTP server gracefully (stops accepting new connections, drains)
-/// 5. If no operation in progress: stops immediately
+/// 2. Freezes scheduler admission so no new jobs/mutations start
+/// 3. Checks if a package mutation is in progress (via the scheduler's
+///    `is_mutation_in_progress()`, which works across ALL backends)
+/// 4. If yes: waits up to 100s (leaving margin before SIGKILL) for it to complete
+/// 5. Stops the HTTP server gracefully (stops accepting new connections, drains)
+/// 6. If no operation in progress: stops immediately
 ///
 /// The 100s deadline is based on the systemd service's `TimeoutStopSec=120s` —
 /// we leave a 20s margin: 100s for mutation drain + 10s for Actix graceful
 /// shutdown = 110s, leaving 10s safety margin before SIGKILL.
 async fn setup_sigterm_handler(
     server_handle: actix_web::dev::ServerHandle,
-    coordinator: Arc<OperationCoordinator>,
+    scheduler: Arc<Scheduler>,
 ) {
     use std::time::{Duration, Instant};
     use tokio::signal::unix::{signal, SignalKind};
@@ -996,14 +976,18 @@ async fn setup_sigterm_handler(
     // Notify systemd that we're stopping
     notify_systemd_stopping();
 
-    // Check if a package mutation is in progress via the coordinator
-    if coordinator.is_operation_in_progress() {
+    // Freeze scheduler admission so no new mutations or jobs start while
+    // we drain in-flight operations.
+    scheduler.freeze_admission().await;
+
+    // Check if a package mutation is in progress via the scheduler
+    if scheduler.is_mutation_in_progress().await {
         info!("Package mutation in progress — waiting up to 100s for it to complete before shutting down");
 
         let deadline = Instant::now() + Duration::from_secs(100);
         let mut waited = 0u64;
 
-        while coordinator.is_operation_in_progress() {
+        while scheduler.is_mutation_in_progress().await {
             let now = Instant::now();
             if now >= deadline {
                 warn!(
@@ -1018,7 +1002,7 @@ async fn setup_sigterm_handler(
             tokio::time::sleep(sleep_dur).await;
             waited += sleep_dur.as_secs();
 
-            if coordinator.is_operation_in_progress() {
+            if scheduler.is_mutation_in_progress().await {
                 info!(
                     waited_seconds = waited,
                     "Still waiting for package mutation to complete..."
@@ -1026,7 +1010,7 @@ async fn setup_sigterm_handler(
             }
         }
 
-        if !coordinator.is_operation_in_progress() {
+        if !scheduler.is_mutation_in_progress().await {
             info!(
                 waited_seconds = waited,
                 "Package mutation completed — proceeding with shutdown"

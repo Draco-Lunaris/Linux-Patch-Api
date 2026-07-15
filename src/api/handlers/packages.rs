@@ -15,8 +15,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::enroll::{check_and_provision_repo_config, RepoHealResult};
-use crate::jobs::manager::{JobManager, JobOperation, JobStatus};
-use crate::packages::coordinator::OperationCoordinator;
+use crate::jobs::manager::{JobOperation, JobStatus};
+use crate::jobs::scheduler::Scheduler;
 use crate::packages::{
     validate_package_name, validate_version_string, InstallOptions, Package, PackageManagerBackend,
     PackageSpec, SELF_PACKAGE_NAME,
@@ -88,9 +88,9 @@ pub struct ApiError {
 ///
 /// Used by all handlers that call `admit_job` — provides consistent error
 /// responses across install, update, remove, patch-apply, reboot, and rollback.
-pub fn admission_error_response(err: &crate::jobs::manager::JobAdmissionError) -> HttpResponse {
+pub fn admission_error_response(err: &crate::jobs::scheduler::JobAdmissionError) -> HttpResponse {
     match err {
-        crate::jobs::manager::JobAdmissionError::SelfUpdateInProgress => HttpResponse::Conflict()
+        crate::jobs::scheduler::JobAdmissionError::SelfUpdateInProgress => HttpResponse::Conflict()
             .insert_header(("Retry-After", "60"))
             .json(ApiResponse::<()>::error(
                 "SELF_UPDATE_IN_PROGRESS",
@@ -98,11 +98,19 @@ pub fn admission_error_response(err: &crate::jobs::manager::JobAdmissionError) -
                 None,
                 true,
             )),
-        crate::jobs::manager::JobAdmissionError::QueueFull => HttpResponse::TooManyRequests()
+        crate::jobs::scheduler::JobAdmissionError::QueueFull => HttpResponse::TooManyRequests()
             .insert_header(("Retry-After", "60"))
             .json(ApiResponse::<()>::error(
                 "QUEUE_FULL",
                 "Job queue is at capacity. Please retry later.",
+                None,
+                true,
+            )),
+        crate::jobs::scheduler::JobAdmissionError::AdmissionFrozen => HttpResponse::Conflict()
+            .insert_header(("Retry-After", "60"))
+            .json(ApiResponse::<()>::error(
+                "ADMISSION_FROZEN",
+                "Admission frozen — shutdown in progress.",
                 None,
                 true,
             )),
@@ -265,8 +273,7 @@ pub async fn get_package(
 pub async fn install_packages(
     body: web::Json<InstallRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
-    job_manager: web::Data<JobManager>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -283,15 +290,14 @@ pub async fn install_packages(
 
     // Atomically admit the job — checks self-update flag and queue capacity
     // under a single lock to prevent race with self-update reservation.
-    match job_manager
+    match scheduler
         .admit_job(JobOperation::Install, package_names.clone())
         .await
     {
         Ok(job_id) => {
             // Spawn background task to execute the installation
             let backend_clone = backend.clone();
-            let job_manager_clone = job_manager.clone();
-            let coordinator_clone = coordinator.clone();
+            let scheduler_clone = scheduler.clone();
             let options = body.options.clone();
             let packages = body.packages.clone();
 
@@ -299,7 +305,7 @@ pub async fn install_packages(
                 let job_id_clone = job_id;
 
                 // Update job to running
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .update_job(
                         &job_id_clone,
                         JobStatus::Running,
@@ -307,24 +313,27 @@ pub async fn install_packages(
                         Some("Starting installation...".to_string()),
                     )
                     .await;
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute installation through the coordinator's mutation
-                // semaphore — this serializes all package-DB mutations across
-                // ALL backends (APT, DNF, YUM, APK, Pacman).
-                let install_result = coordinator_clone
-                    .run_mutation(|| backend_clone.install_packages(&packages, &options))
+                // Execute installation through the scheduler's mutation slot.
+                // The closure runs in spawn_blocking, so it must be Send + 'static
+                // — we move the backend clone into the closure (no borrows).
+                let backend_for_mutation = backend_clone.clone();
+                let install_result = scheduler_clone
+                    .run_mutation(job_id_clone, move || {
+                        backend_for_mutation.install_packages(&packages, &options)
+                    })
                     .await;
 
                 match install_result {
                     Ok(_) => {
-                        let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                        let _ = scheduler_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, "Package installation completed");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
                         error!(job_id = %job_id_clone, error = ?e, "Package installation failed");
@@ -353,8 +362,7 @@ pub async fn install_packages(
 pub async fn update_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
-    job_manager: web::Data<JobManager>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
+    scheduler: web::Data<Arc<Scheduler>>,
     manager_url: web::Data<Option<String>>,
     _req: HttpRequest,
 ) -> impl Responder {
@@ -417,14 +425,34 @@ pub async fn update_package(
             }
         }
 
+        // Resolve from/target versions BEFORE the atomic reservation. These
+        // are needed by try_reserve_self_update and the persistent state write.
+        let from_version = backend
+            .get_installed_version(&package_name)
+            .unwrap_or(None)
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let target_version = backend
+            .get_candidate_version(&package_name)
+            .unwrap_or(None)
+            .unwrap_or_else(|| from_version.clone());
+        if target_version != from_version {
+            info!(
+                from_version = %from_version,
+                target_version = %target_version,
+                "Resolved target version for self-update"
+            );
+        } else {
+            warn!("Could not resolve target version — using from_version as placeholder");
+        }
+
         // Atomically reserve the self-update slot. This performs all checks
         // (no running jobs, no existing self-update, queue capacity) and
         // state changes (set flag, create job) under a single lock
         // acquisition, preventing the check-then-set race where a competing
         // patch/install/remove request interleaves between the running-count
         // check and the flag set.
-        match job_manager
-            .try_reserve_self_update(vec![package_name.clone()])
+        match scheduler
+            .try_reserve_self_update(vec![package_name.clone()], &from_version, &target_version)
             .await
         {
             Ok(reservation) => {
@@ -439,23 +467,6 @@ pub async fn update_package(
                 // The state file survives process restarts, unlike the in-memory flag.
                 // FAIL-CLOSED: If we cannot persist the Reserving state, we MUST
                 // abort the self-update before invoking the package manager.
-                let from_version = backend
-                    .get_installed_version(&package_name)
-                    .unwrap_or(None)
-                    .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-                let target_version = backend
-                    .get_candidate_version(&package_name)
-                    .unwrap_or(None)
-                    .unwrap_or_else(|| from_version.clone());
-                if target_version != from_version {
-                    info!(
-                        from_version = %from_version,
-                        target_version = %target_version,
-                        "Resolved target version for self-update"
-                    );
-                } else {
-                    warn!("Could not resolve target version — using from_version as placeholder");
-                }
                 let upgrade_state = crate::jobs::upgrade_state::UpgradeState::reserving(
                     &job_id.to_string(),
                     &from_version,
@@ -466,7 +477,7 @@ pub async fn update_package(
                     // The reservation will be dropped here, rolling back
                     // the owner and job automatically.
                     error!(error = %e, "Failed to write persistent Reserving state — aborting self-update before invoking package manager");
-                    job_manager.release_self_update(&job_id).await;
+                    scheduler.release_self_update(&job_id).await;
                     let response = ApiResponse::<()>::error(
                         "PERSISTENCE_FAILED",
                         "Failed to persist upgrade state — self-update aborted for safety. Retry after resolving the disk issue.",
@@ -483,15 +494,14 @@ pub async fn update_package(
 
                 // Spawn background task to execute the update
                 let backend_clone = backend.clone();
-                let job_manager_clone = job_manager.clone();
-                let coordinator_clone = coordinator.clone();
+                let scheduler_clone = scheduler.clone();
                 let pkg_name = package_name.clone();
 
                 tokio::spawn(async move {
                     let job_id_clone = job_id;
 
                     // Update job to running
-                    let _ = job_manager_clone
+                    let _ = scheduler_clone
                         .update_job(
                             &job_id_clone,
                             JobStatus::Running,
@@ -499,7 +509,7 @@ pub async fn update_package(
                             Some("Starting self-update...".to_string()),
                         )
                         .await;
-                    let _ = job_manager_clone
+                    let _ = scheduler_clone
                         .add_job_log(&job_id_clone, "Job started".to_string())
                         .await;
 
@@ -514,7 +524,7 @@ pub async fn update_package(
                     if let Err(e) = crate::jobs::upgrade_state::write_state(&installing_state) {
                         error!(error = %e, "Failed to write Installing state — aborting self-update before invoking package manager");
                         crate::jobs::upgrade_state::write_recovering_state();
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .fail_job(
                                 &job_id_clone,
                                 format!("Failed to persist Installing state: {}", e),
@@ -523,9 +533,14 @@ pub async fn update_package(
                         return;
                     }
 
-                    // Execute update through the coordinator's mutation semaphore
-                    let update_result = coordinator_clone
-                        .run_mutation(|| backend_clone.update_package(&pkg_name))
+                    // Execute update through the scheduler's mutation slot.
+                    // The closure runs in spawn_blocking — move backend clone in.
+                    let backend_for_mutation = backend_clone.clone();
+                    let pkg_name_for_mutation = pkg_name.clone();
+                    let update_result = scheduler_clone
+                        .run_mutation(job_id_clone, move || {
+                            backend_for_mutation.update_package(&pkg_name_for_mutation)
+                        })
                         .await;
 
                     match update_result {
@@ -549,7 +564,7 @@ pub async fn update_package(
                                     "Failed to write Verifying upgrade state — entering recovery mode, NOT restarting"
                                 );
                                 crate::jobs::upgrade_state::write_recovering_state();
-                                let _ = job_manager_clone
+                                let _ = scheduler_clone
                                     .fail_job(&job_id_clone, format!(
                                         "Failed to persist Verifying state: {}. Entered recovery mode — manual intervention required.", e
                                     ))
@@ -571,7 +586,7 @@ pub async fn update_package(
                                         target_version = %target_version,
                                         "Self-update verified — installed version changed"
                                     );
-                                    let _ = job_manager_clone
+                                    let _ = scheduler_clone
                                         .add_job_log(
                                             &job_id_clone,
                                             format!("Updated from {} to {}", from_version, v),
@@ -584,16 +599,16 @@ pub async fn update_package(
                                         installed_version = %v,
                                         "Self-update was a no-op — installed version unchanged. Not restarting."
                                     );
-                                    let _ = job_manager_clone
+                                    let _ = scheduler_clone
                                         .add_job_log(
                                             &job_id_clone,
                                             "No update available — installed version unchanged"
                                                 .to_string(),
                                         )
                                         .await;
-                                    let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                                    let _ = scheduler_clone.complete_job(&job_id_clone).await;
                                     // Release the self-update lock, clear state and marker
-                                    job_manager_clone.release_self_update(&job_id_clone).await;
+                                    scheduler_clone.release_self_update(&job_id_clone).await;
                                     crate::jobs::upgrade_state::clear_state();
                                     crate::jobs::upgrade_state::clear_marker();
                                     return;
@@ -606,7 +621,7 @@ pub async fn update_package(
                                 }
                             }
 
-                            let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                            let _ = scheduler_clone.complete_job(&job_id_clone).await;
 
                             // Transition to RestartPending
                             // FAIL-CLOSED: If we cannot persist the RestartPending
@@ -628,7 +643,7 @@ pub async fn update_package(
                             }
                         }
                         Err(e) => {
-                            let _ = job_manager_clone
+                            let _ = scheduler_clone
                                 .fail_job_with_diagnostics(&job_id_clone, &e)
                                 .await;
                             error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Self-update failed");
@@ -648,7 +663,7 @@ pub async fn update_package(
                     // 1. The self_update_in_progress flag is already set,
                     //    so no new mutable operations can start.
                     // 2. Wait for running_count() == 0 (no active jobs).
-                    // 3. Wait for is_operation_in_progress() == false (no
+                    // 3. Wait for is_mutation_in_progress() == false (no
                     //    apt/dpkg child process running).
                     // 4. Call restart_own_service() to restart immediately.
                     //
@@ -658,7 +673,7 @@ pub async fn update_package(
                     //
                     // On FAILURE: Clear the flag and persistent state so the
                     // system can recover.
-                    let job = job_manager_clone.get_job(&job_id_clone).await;
+                    let job = scheduler_clone.get_job(&job_id_clone).await;
                     let is_failed = job
                         .as_ref()
                         .map(|j| j.status == JobStatus::Failed)
@@ -668,7 +683,7 @@ pub async fn update_package(
                         // the ownership permit. This only clears the lock if
                         // this job still owns it — if a second self-update
                         // somehow took over, this is a no-op.
-                        job_manager_clone.release_self_update(&job_id_clone).await;
+                        scheduler_clone.release_self_update(&job_id_clone).await;
                         crate::jobs::upgrade_state::clear_state();
                         // Also clear the marker in case the postinst already
                         // created it (e.g. package was already at target version).
@@ -692,8 +707,8 @@ pub async fn update_package(
                         drain_log_interval.tick().await; // skip first immediate tick
 
                         loop {
-                            let active = job_manager_clone.active_count().await;
-                            let mutation_busy = coordinator_clone.is_operation_in_progress();
+                            let active = scheduler_clone.active_count().await;
+                            let mutation_busy = scheduler_clone.is_mutation_in_progress().await;
 
                             if active == 0 && !mutation_busy {
                                 info!(
@@ -784,19 +799,19 @@ pub async fn update_package(
             Err(admission_err) => {
                 warn!(request_id = %request_id, error = %admission_err, "Self-update reservation rejected");
                 let (code, message, data, retry) = match admission_err {
-                    crate::jobs::manager::SelfUpdateAdmissionError::AlreadyInProgress => (
+                    crate::jobs::scheduler::SelfUpdateAdmissionError::AlreadyInProgress => (
                         "SELF_UPDATE_IN_PROGRESS",
                         "A self-update is already in progress. Retry after it completes.".to_string(),
                         None,
                         true,
                     ),
-                    crate::jobs::manager::SelfUpdateAdmissionError::JobsInProgress { count } => (
+                    crate::jobs::scheduler::SelfUpdateAdmissionError::JobsInProgress { count } => (
                         "SELF_UPDATE_BLOCKED",
                         format!("Cannot self-update while {} jobs are in progress. Retry after jobs complete.", count),
                         Some(serde_json::json!({"running_jobs": count})),
                         true,
                     ),
-                    crate::jobs::manager::SelfUpdateAdmissionError::QueueFull => (
+                    crate::jobs::scheduler::SelfUpdateAdmissionError::QueueFull => (
                         "QUEUE_FULL",
                         "Job queue is at capacity. Please retry later.".to_string(),
                         None,
@@ -812,20 +827,19 @@ pub async fn update_package(
     }
 
     // Non-self-update path: atomically admit the job
-    match job_manager
+    match scheduler
         .admit_job(JobOperation::Update, vec![package_name.clone()])
         .await
     {
         Ok(job_id) => {
             let backend_clone = backend.clone();
-            let job_manager_clone = job_manager.clone();
-            let coordinator_clone = coordinator.clone();
+            let scheduler_clone = scheduler.clone();
             let pkg_name = package_name.clone();
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .update_job(
                         &job_id_clone,
                         JobStatus::Running,
@@ -833,22 +847,26 @@ pub async fn update_package(
                         Some("Starting update...".to_string()),
                     )
                     .await;
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute update through the coordinator's mutation semaphore
-                let update_result = coordinator_clone
-                    .run_mutation(|| backend_clone.update_package(&pkg_name))
+                // Execute update through the scheduler's mutation slot
+                let backend_for_mutation = backend_clone.clone();
+                let pkg_name_for_mutation = pkg_name.clone();
+                let update_result = scheduler_clone
+                    .run_mutation(job_id_clone, move || {
+                        backend_for_mutation.update_package(&pkg_name_for_mutation)
+                    })
                     .await;
 
                 match update_result {
                     Ok(_) => {
-                        let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                        let _ = scheduler_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package update completed");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
                         error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Package update failed");
@@ -877,8 +895,7 @@ pub async fn update_package(
 pub async fn remove_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
-    job_manager: web::Data<JobManager>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -895,22 +912,21 @@ pub async fn remove_package(
 
     // Atomically admit the job — checks self-update flag and queue capacity
     // under a single lock to prevent race with self-update reservation.
-    match job_manager
+    match scheduler
         .admit_job(JobOperation::Remove, vec![package_name.clone()])
         .await
     {
         Ok(job_id) => {
             // Spawn background task to execute the removal
             let backend_clone = backend.clone();
-            let job_manager_clone = job_manager.clone();
-            let coordinator_clone = coordinator.clone();
+            let scheduler_clone = scheduler.clone();
             let pkg_name = package_name.clone();
 
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
                 // Update job to running
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .update_job(
                         &job_id_clone,
                         JobStatus::Running,
@@ -918,22 +934,26 @@ pub async fn remove_package(
                         Some("Starting removal...".to_string()),
                     )
                     .await;
-                let _ = job_manager_clone
+                let _ = scheduler_clone
                     .add_job_log(&job_id_clone, "Job started".to_string())
                     .await;
 
-                // Execute removal through the coordinator's mutation semaphore
-                let remove_result = coordinator_clone
-                    .run_mutation(|| backend_clone.remove_package(&pkg_name, false))
+                // Execute removal through the scheduler's mutation slot
+                let backend_for_mutation = backend_clone.clone();
+                let pkg_name_for_mutation = pkg_name.clone();
+                let remove_result = scheduler_clone
+                    .run_mutation(job_id_clone, move || {
+                        backend_for_mutation.remove_package(&pkg_name_for_mutation, false)
+                    })
                     .await;
 
                 match remove_result {
                     Ok(_) => {
-                        let _ = job_manager_clone.complete_job(&job_id_clone).await;
+                        let _ = scheduler_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, package = %pkg_name, "Package removal completed");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone
+                        let _ = scheduler_clone
                             .fail_job_with_diagnostics(&job_id_clone, &e)
                             .await;
                         error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Package removal failed");

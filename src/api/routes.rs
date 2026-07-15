@@ -11,9 +11,8 @@ use actix_web::{web, HttpResponse};
 use std::sync::Arc;
 use tracing::info;
 
-use crate::jobs::manager::JobManager;
+use crate::jobs::scheduler::Scheduler;
 use crate::packages::cache::PackageCacheState;
-use crate::packages::coordinator::OperationCoordinator;
 
 use super::handlers::{jobs, packages, patches, system, websocket};
 
@@ -28,9 +27,8 @@ async fn method_not_allowed() -> HttpResponse {
 /// Configure all API routes for the application
 pub fn configure_api_routes(
     cfg: &mut web::ServiceConfig,
-    job_manager: web::Data<JobManager>,
+    scheduler: web::Data<Arc<Scheduler>>,
     backend: web::Data<Box<dyn crate::packages::PackageManagerBackend>>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
     cache_state: web::Data<PackageCacheState>,
 ) {
     info!("Configuring API v1 routes");
@@ -39,9 +37,8 @@ pub fn configure_api_routes(
     // so it can bypass rate limiting applied at the App level
     cfg.service(web::resource("/api/v1/system/info").route(web::get().to(system::get_system_info)));
 
-    cfg.app_data(job_manager)
+    cfg.app_data(scheduler)
         .app_data(backend)
-        .app_data(coordinator)
         .app_data(cache_state)
         .service(
             web::scope("/api/v1")

@@ -24,4 +24,5 @@ pub mod systemd;
 // Re-export commonly used types from submodules
 pub use config::loader::AppConfig;
 pub use jobs::manager::JobManager;
+pub use jobs::scheduler::Scheduler;
 pub use logging::init::init_logging;
