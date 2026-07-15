@@ -623,6 +623,15 @@ impl JobManager {
         *self.self_update_owner.write().await = None;
     }
 
+    /// Get a clone of the self_update_owner Arc for external manipulation.
+    ///
+    /// This allows the startup path to clear the self-update flag after
+    /// the JobManager has been moved into web::Data, without needing
+    /// a reference to the JobManager itself.
+    pub fn self_update_owner_handle(&self) -> Arc<RwLock<Option<Uuid>>> {
+        self.self_update_owner.clone()
+    }
+
     /// Atomically reserve a self-update slot.
     ///
     /// This is the single admission point for self-update requests. It

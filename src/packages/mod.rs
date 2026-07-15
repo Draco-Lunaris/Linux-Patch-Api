@@ -237,6 +237,20 @@ pub trait PackageManagerBackend: Send + Sync {
         Ok(None)
     }
 
+    /// Repair the package database after an interrupted operation.
+    ///
+    /// For APT: runs `dpkg --configure -a` and `dpkg --audit`.
+    /// For DNF/YUM: runs `rpm --rebuilddb` (safe, non-destructive).
+    /// For APK: runs `apk fix` (repares dependencies).
+    /// For Pacman: no standard repair — returns Ok(()).
+    ///
+    /// Called by the startup recovery path when an interrupted install is
+    /// detected. Runs under the coordinator's mutation semaphore.
+    fn repair_package_database(&self) -> Result<()> {
+        // Default: no repair available
+        Ok(())
+    }
+
     /// Restart the agent's own service (not the whole system).
     ///
     /// On systemd: `systemctl restart linux-patch-api.service`
@@ -1081,6 +1095,14 @@ impl PackageManagerBackend for AptBackend {
         Self::get_apt_in_progress().load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running APT package database repair (dpkg --configure -a + audit)");
+        self.ensure_dpkg_clean()?;
+        self.verify_dpkg_clean()?;
+        info!("APT package database repair completed successfully");
+        Ok(())
+    }
+
     fn get_installed_version(&self, name: &str) -> Result<Option<String>> {
         match self.run_dpkg(&["-s", name]) {
             Ok(output) => {
@@ -1580,6 +1602,13 @@ impl PackageManagerBackend for ApkBackend {
             }
             Err(_) => Ok(None),
         }
+    }
+
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running APK package database repair (apk fix)");
+        self.run_apk(&["fix"])?;
+        info!("APK package database repair completed successfully");
+        Ok(())
     }
 }
 
@@ -2085,6 +2114,13 @@ impl PackageManagerBackend for DnfBackend {
             _ => Ok(None),
         }
     }
+
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running DNF package database repair (rpm --rebuilddb)");
+        self.run_rpm(&["--rebuilddb"])?;
+        info!("DNF package database repair completed successfully");
+        Ok(())
+    }
 }
 
 impl Default for DnfBackend {
@@ -2552,6 +2588,13 @@ impl PackageManagerBackend for YumBackend {
             }
             _ => Ok(None),
         }
+    }
+
+    fn repair_package_database(&self) -> Result<()> {
+        info!("Running YUM package database repair (rpm --rebuilddb)");
+        self.run_rpm(&["--rebuilddb"])?;
+        info!("YUM package database repair completed successfully");
+        Ok(())
     }
 }
 

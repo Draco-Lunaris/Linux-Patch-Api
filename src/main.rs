@@ -374,21 +374,60 @@ async fn main() -> Result<()> {
 
     // If this process started after a self-update restart, we do NOT clear
     // the self-update flag yet. The state and marker are only cleared AFTER
-    // the listener is bound and READY=1 is sent to systemd (see below).
+    // the listener is bound, the server is started, and READY=1 is sent to
+    // systemd (see below).
     //
-    // However, we need to clear the flag BEFORE job_manager is moved into
-    // web::Data. So we use an Arc<AtomicBool> flag to track whether we
-    // should finalize after listener bind, and do the state/marker cleanup
-    // separately.
+    // The self_update_owner flag remains set, blocking all mutating API
+    // requests (admit_job and try_reserve_self_update both check it) until
+    // we explicitly clear it after successful initialization. This is the
+    // fail-closed behavior: if the process crashes before clearing, the
+    // next startup will see the persistent state file and re-block.
     //
-    // Actually, the flag clearing must happen before the move. But the
-    // state file and marker can be cleared after listener bind. So:
-    // 1. Clear the in-memory flag now (before move into web::Data).
-    // 2. Clear the state file and marker after listener bind.
+    // We get a handle to the self_update_owner Arc BEFORE moving the
+    // JobManager into web::Data, so we can clear it later without needing
+    // a reference to the JobManager.
     let needs_state_finalize = should_block_for_upgrade;
-    if should_block_for_upgrade {
-        info!("Clearing self-update flag before moving job_manager into web::Data");
-        job_manager.force_clear_self_update().await;
+    let self_update_owner_handle = job_manager.self_update_owner_handle();
+    // DO NOT call force_clear_self_update() here — the flag stays set
+    // until the server is fully initialized (see finalization below).
+
+    // Run startup repair for interrupted installs or recovery mode.
+    // This runs under the coordinator's mutation semaphore to serialize
+    // with any other operations (there shouldn't be any since the admission
+    // block is set, but the semaphore ensures correctness).
+    if startup_reconciliation
+        == linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall
+        || startup_reconciliation
+            == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode
+    {
+        info!("Running startup package database repair under coordinator");
+        let repair_backend = &package_backend;
+        let repair_result = coordinator
+            .run_mutation(|| repair_backend.repair_package_database())
+            .await;
+
+        match repair_result {
+            Ok(_) => {
+                info!("Startup package database repair succeeded");
+                // For InterruptedInstall: repair succeeded, we can proceed
+                // to normal initialization. The admission block will be
+                // cleared after READY=1.
+                // For RecoveryMode: repair succeeded, but we still keep the
+                // admission block until the full initialization completes.
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Startup package database repair FAILED — retaining recovery state. \
+                     All package operations will remain blocked. Manual intervention required."
+                );
+                // Write recovering state so the next startup also enters recovery
+                linux_patch_api::jobs::upgrade_state::write_recovering_state();
+                // The admission block stays set — mutations are blocked.
+                // The server will start in recovery mode (health reports degraded).
+                // Only health and read-only diagnostic endpoints are available.
+            }
+        }
     }
 
     // Store job manager and backend in Arc for sharing
@@ -623,21 +662,6 @@ async fn main() -> Result<()> {
         // Log listening AFTER successful bind
         info!("Listening on {} (mTLS enabled)", bind_address);
 
-        // Listener is bound — finalize the self-update restart if applicable.
-        // The in-memory flag was already cleared before the move into web::Data.
-        // Now clear the persistent state file and marker.
-        if needs_state_finalize {
-            info!("Listener bound — clearing upgrade state file and marker");
-            linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-        }
-
-        // Notify systemd that we're ready (Type=notify)
-        notify_systemd_ready();
-        if in_recovery_mode {
-            warn!("Notifying systemd of degraded status (recovery mode)");
-            notify_systemd_status("Running in recovery mode — package operations blocked");
-        }
-
         // Clone the ServerConfig from Arc for listen_rustls_0_23
         let server_config = (*rustls_config).clone();
 
@@ -655,6 +679,51 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             setup_sigterm_handler(server_handle, sigterm_coordinator).await;
         });
+
+        // Finalize the self-update restart AFTER the server is constructed
+        // and the SIGTERM handler is installed, but BEFORE we start serving.
+        //
+        // Per Section 5 ordering:
+        // 1. Listener bound ✓
+        // 2. Server constructed ✓
+        // 3. SIGTERM handler installed ✓
+        // 4. Verify running version (TODO: Section 9 — for now, skip)
+        // 5. Transition persistent state to Ready
+        // 6. Send READY=1 to systemd
+        // 7. Clear upgrade state, marker, and admission block
+        if needs_state_finalize {
+            info!("Server initialized — finalizing self-update restart");
+
+            // Transition persistent state to Ready
+            let mut ready_state =
+                linux_patch_api::jobs::upgrade_state::UpgradeState::installing("startup", "", "");
+            ready_state.to_ready();
+            if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
+                error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
+                // Don't clear the flag — fail-closed
+            } else {
+                // State is Ready — send READY=1, then clear everything
+                notify_systemd_ready();
+                if in_recovery_mode {
+                    warn!("Notifying systemd of degraded status (recovery mode)");
+                    notify_systemd_status("Running in recovery mode — package operations blocked");
+                }
+
+                // Clear the persistent state file and marker
+                linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+
+                // Clear the in-memory self-update admission block
+                *self_update_owner_handle.write().await = None;
+                info!("Self-update admission block cleared — server ready for mutations");
+            }
+        } else {
+            // Normal startup — just send READY=1
+            notify_systemd_ready();
+            if in_recovery_mode {
+                warn!("Notifying systemd of degraded status (recovery mode)");
+                notify_systemd_status("Running in recovery mode — package operations blocked");
+            }
+        }
 
         server.await?;
     } else {
@@ -687,19 +756,6 @@ async fn main() -> Result<()> {
         // Log listening AFTER successful bind
         info!("Listening on {} (no TLS)", bind_address);
 
-        // Listener is bound — finalize the self-update restart if applicable.
-        if needs_state_finalize {
-            info!("Listener bound — clearing upgrade state file and marker");
-            linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-        }
-
-        // Notify systemd that we're ready (Type=notify)
-        notify_systemd_ready();
-        if in_recovery_mode {
-            warn!("Notifying systemd of degraded status (recovery mode)");
-            notify_systemd_status("Running in recovery mode — package operations blocked");
-        }
-
         warn!("TLS is disabled - running without mTLS authentication (INSECURE)");
         let server = server_builder.listen(tcp_listener)?.run();
 
@@ -708,6 +764,34 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             setup_sigterm_handler(server_handle, sigterm_coordinator).await;
         });
+
+        // Finalize the self-update restart (same ordering as TLS path)
+        if needs_state_finalize {
+            info!("Server initialized — finalizing self-update restart");
+
+            let mut ready_state =
+                linux_patch_api::jobs::upgrade_state::UpgradeState::installing("startup", "", "");
+            ready_state.to_ready();
+            if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
+                error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
+            } else {
+                notify_systemd_ready();
+                if in_recovery_mode {
+                    warn!("Notifying systemd of degraded status (recovery mode)");
+                    notify_systemd_status("Running in recovery mode — package operations blocked");
+                }
+
+                linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
+                *self_update_owner_handle.write().await = None;
+                info!("Self-update admission block cleared — server ready for mutations");
+            }
+        } else {
+            notify_systemd_ready();
+            if in_recovery_mode {
+                warn!("Notifying systemd of degraded status (recovery mode)");
+                notify_systemd_status("Running in recovery mode — package operations blocked");
+            }
+        }
 
         server.await?;
     }
