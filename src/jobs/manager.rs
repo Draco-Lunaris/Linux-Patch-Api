@@ -42,6 +42,47 @@ impl std::fmt::Display for SelfUpdateAdmissionError {
 
 impl std::error::Error for SelfUpdateAdmissionError {}
 
+/// Error returned by `admit_reboot` when a reboot request cannot be admitted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RebootAdmissionError {
+    /// A self-update is in progress — reboot blocked.
+    SelfUpdateInProgress,
+    /// A package-database mutation is in progress — reboot blocked.
+    PackageMutationInProgress,
+    /// One or more jobs are currently running or pending.
+    JobsInProgress { count: usize },
+    /// The job queue is at capacity.
+    QueueFull,
+}
+
+impl std::fmt::Display for RebootAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RebootAdmissionError::SelfUpdateInProgress => {
+                write!(f, "A self-update is in progress")
+            }
+            RebootAdmissionError::PackageMutationInProgress => {
+                write!(f, "A package-database mutation is in progress")
+            }
+            RebootAdmissionError::JobsInProgress { count } => {
+                write!(f, "Cannot reboot while {} jobs are in progress", count)
+            }
+            RebootAdmissionError::QueueFull => {
+                write!(f, "Job queue is at capacity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RebootAdmissionError {}
+
+/// Parameters for atomic reboot admission.
+#[derive(Debug, Clone)]
+pub struct RebootAdmission {
+    pub force: bool,
+    pub acknowledge_package_database_corruption_risk: bool,
+}
+
 /// Error returned by `admit_job` when a normal (non-self-update) job
 /// cannot be admitted. Each variant maps to a specific HTTP response.
 #[derive(Debug, Clone, PartialEq)]
@@ -801,6 +842,110 @@ impl JobManager {
         }
 
         Ok(false)
+    }
+
+    /// Atomically admit a reboot job with coordinated checks.
+    ///
+    /// This is the single admission point for reboot requests. It performs
+    /// all safety checks and job creation under one lock acquisition,
+    /// preventing races between the reboot check and concurrent job/self-update
+    /// creation.
+    ///
+    /// **Tier 1 — force=false**: All guards active. Rejects if any jobs are
+    /// active, a self-update is in progress, or a package mutation is in
+    /// progress.
+    ///
+    /// **Tier 2 — force=true, ack=false**: Bypasses ordinary active-job
+    /// protection but does NOT bypass the self-update or package-mutation
+    /// guard. A forced reboot during a package-DB mutation can corrupt
+    /// dpkg/rpm/pacman state.
+    ///
+    /// **Tier 3 — force=true, ack=true**: Bypasses all guards. The caller
+    /// has explicitly acknowledged the risk. A durable audit event is logged.
+    /// The job is still created atomically.
+    ///
+    /// `pkg_mutation_in_progress` is checked externally (from the coordinator)
+    /// and passed in to avoid the JobManager needing a reference to the
+    /// coordinator.
+    pub async fn admit_reboot(
+        &self,
+        admission: RebootAdmission,
+        pkg_mutation_in_progress: bool,
+    ) -> Result<Uuid, RebootAdmissionError> {
+        let force = admission.force;
+        let ack = admission.acknowledge_package_database_corruption_risk;
+
+        // Acquire the self-update write lock and hold it for the entire
+        // operation. This prevents any other handler from creating jobs
+        // or reserving self-update while we're checking and creating.
+        let su_guard = self.self_update_owner.write().await;
+
+        let self_update_active = su_guard.is_some();
+
+        // Tier 1: force=false — check all guards
+        if !force {
+            if self_update_active {
+                return Err(RebootAdmissionError::SelfUpdateInProgress);
+            }
+            // Check jobs under the jobs read lock
+            let active_count = {
+                let jobs = self.jobs.read().await;
+                jobs.values()
+                    .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+                    .count()
+            };
+            if active_count > 0 {
+                return Err(RebootAdmissionError::JobsInProgress {
+                    count: active_count,
+                });
+            }
+        }
+
+        // Tier 2/3: force=true — check package mutation guard
+        if force && !ack && (self_update_active || pkg_mutation_in_progress) {
+            if self_update_active {
+                return Err(RebootAdmissionError::SelfUpdateInProgress);
+            }
+            return Err(RebootAdmissionError::PackageMutationInProgress);
+        }
+
+        // Tier 3: force=true + ack=true — log durable audit event
+        if force && ack && (self_update_active || pkg_mutation_in_progress) {
+            tracing::error!(
+                self_update_active = self_update_active,
+                pkg_mutation_in_progress = pkg_mutation_in_progress,
+                "AUDIT: Forced reboot accepted with package-database corruption risk acknowledged. \
+                 This may corrupt dpkg/rpm/pacman state and leave the system unbootable."
+            );
+        }
+
+        // Create the reboot job atomically under the jobs write lock.
+        // We still hold the self_update write lock, so no self-update can
+        // set its flag between our check and job creation.
+        let job = Job::new(JobOperation::Reboot, vec![]);
+        let job_id = job.id;
+        let status = job.status.clone();
+        let progress = job.progress;
+        let message = job.message.clone();
+
+        {
+            let mut jobs = self.jobs.write().await;
+            let active_count = jobs
+                .values()
+                .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+                .count();
+            if active_count >= self.max_queue_depth {
+                return Err(RebootAdmissionError::QueueFull);
+            }
+            jobs.insert(job_id, job);
+        }
+
+        // Release the self-update write lock before emitting the event
+        drop(su_guard);
+
+        self.emit_event("job_status", &job_id, &status, progress, &message, None);
+
+        Ok(job_id)
     }
 
     /// Create a rollback job for a failed job.

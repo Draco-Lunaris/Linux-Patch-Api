@@ -151,7 +151,7 @@ jobs:
       - name: Build binary
         run: cargo build
       - name: Verify --enroll flag exists
-        run: cargo run -- --help | grep -q '\-\-enroll
+        run: cargo run -- --help | grep -q -- '--enroll'
 
   fuzz:
     name: Fuzz Tests

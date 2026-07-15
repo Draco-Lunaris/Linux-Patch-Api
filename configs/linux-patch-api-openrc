@@ -62,19 +62,57 @@ start_pre() {
     fi
 }
 
-# Health check after start — verify the process is alive and responding
+# Health check after start — verify the process is alive AND the API
+# is responding. This is the OpenRC equivalent of systemd's Type=notify
+# READY=1: we verify service availability, not merely that the PID exists.
 start_post() {
     # Give the process a few seconds to bind the listener
     sleep 2
+
+    # Check if the process is running via supervise-daemon
     if [ -f "$pidfile" ]; then
         pid=$(cat "$pidfile" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            einfo "linux-patch-api started successfully (PID: $pid)"
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            ewarn "linux-patch-api process (PID $pid) is not running"
+            return 1
+        fi
+    fi
+
+    # Verify the API listener is actually responding — this is the
+    # real readiness check, not just PID existence. We check the health
+    # endpoint on localhost. If TLS is enabled, use https and skip cert
+    # verification with curl -k.
+    CONFIG_FILE="/etc/linux_patch_api/config.yaml"
+    PORT=$(grep -E '^\s*port:' "$CONFIG_FILE" 2>/dev/null | head -1 | sed 's/.*port:\s*//' | tr -d ' ')
+    if [ -z "$PORT" ]; then
+        PORT=12443
+    fi
+
+    # Try HTTPS first (mTLS is the default), fall back to HTTP
+    if command -v curl >/dev/null 2>&1; then
+        if curl -sk --connect-timeout 5 "https://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+            einfo "linux-patch-api started successfully (API responding on port $PORT)"
+        elif curl -s --connect-timeout 5 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+            einfo "linux-patch-api started successfully (API responding on port $PORT)"
         else
-            ewarn "linux-patch-api may not have started correctly - process not running"
+            ewarn "linux-patch-api process is running but API is not responding on port $PORT"
+            ewarn "Check logs: cat /var/log/linux_patch_api/linux-patch-api.err"
+            return 1
         fi
     else
-        ewarn "linux-patch-api may not have started correctly - pidfile not found"
+        # No curl available — fall back to PID check only
+        if [ -f "$pidfile" ]; then
+            pid=$(cat "$pidfile" 2>/dev/null)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                einfo "linux-patch-api started (PID: $pid) — curl not available for API check"
+            else
+                ewarn "linux-patch-api may not have started correctly - process not running"
+                return 1
+            fi
+        else
+            ewarn "linux-patch-api may not have started correctly - pidfile not found"
+            return 1
+        fi
     fi
 }
 
