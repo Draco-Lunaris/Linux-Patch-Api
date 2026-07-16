@@ -11,6 +11,55 @@ use tokio::signal::unix::{signal as unix_signal, SignalKind};
 
 use crate::enroll::identity;
 
+/// Detect distro_id for repo-config fetch using the same logic as the manager.
+/// Uses NAME field from /etc/os-release (matching manager's detect_distro_id behavior).
+fn detect_distro_id_for_repo_config() -> Result<String> {
+    let content = std::fs::read_to_string("/etc/os-release").context(
+        "Failed to read /etc/os-release — cannot determine distro for repo-config fetch",
+    )?;
+
+    let mut name = None;
+    let mut id_like = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some((key, value)) = line.split_once('=') {
+            let unquoted = value.trim().trim_matches('"').trim_matches('\'');
+            match key {
+                "NAME" => name = Some(unquoted.to_string()),
+                "ID_LIKE" => id_like = Some(unquoted.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    let os = name.unwrap_or_default().to_ascii_lowercase();
+    let like = id_like.unwrap_or_default().to_ascii_lowercase();
+
+    let distro_id = if os.contains("ubuntu") || like.contains("ubuntu") {
+        "ubuntu"
+    } else if os.contains("debian") || like.contains("debian") {
+        "debian"
+    } else if os.contains("fedora") || like.contains("fedora") {
+        "fedora"
+    } else if os.contains("alma") || like.contains("alma") {
+        "almalinux"
+    } else if os.contains("alpine") || like.contains("alpine") {
+        "alpine"
+    } else if os.contains("arch") || like.contains("arch") {
+        "arch"
+    } else {
+        return Err(anyhow::anyhow!(
+            "Could not determine distro_id from /etc/os-release (NAME={}, ID_LIKE={})",
+            os,
+            like
+        ));
+    };
+
+    tracing::debug!(distro_id = %distro_id, "Detected distro_id for repo-config fetch");
+    Ok(distro_id.to_string())
+}
+
 /// Payload sent to `POST /api/v1/enroll`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentRequest {
@@ -563,17 +612,7 @@ impl EnrollmentClient {
     /// - `Ok(RepoConfig)` on HTTP 200 with a valid JSON body
     /// - `Err` on network error, non-200 status, or malformed JSON
     pub async fn fetch_repo_config(&self) -> Result<RepoConfig> {
-        let distro_id = identity::get_os_details()
-            .context("Failed to detect OS details for repo-config fetch")?
-            .get("distro")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_lowercase())
-            .ok_or_else(|| {
-                anyhow!(
-                    "OS details missing 'distro' field — \
-                     cannot determine distro_id for repo-config fetch"
-                )
-            })?;
+        let distro_id = detect_distro_id_for_repo_config()?;
 
         let url = format!(
             "{}/api/v1/pki/repo-config?distro_id={}",

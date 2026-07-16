@@ -101,11 +101,17 @@ fn expected_repo_paths(distro_id: &str) -> Result<(String, String)> {
 }
 
 /// Check whether a file exists and is non-empty.
+#[allow(dead_code)]
 fn file_present_and_nonempty(path: &str) -> bool {
     Path::new(path)
         .metadata()
         .map(|m| m.is_file() && m.len() > 0)
         .unwrap_or(false)
+}
+
+/// Read file content as string, returning None if file doesn't exist or is empty.
+fn read_file_content(path: &str) -> Option<String> {
+    std::fs::read_to_string(path).ok().filter(|s| !s.is_empty())
 }
 
 /// Check whether the manager-hosted repo is configured, and if not, fetch
@@ -137,34 +143,38 @@ pub async fn check_and_provision_repo_config(manager_url: &str) -> Result<RepoHe
         distro = %distro_id,
         sources_path = %sources_path,
         keyring_path = %keyring_path,
-        "Checking repo config presence"
+        "Checking repo config presence and content"
     );
 
-    if file_present_and_nonempty(&sources_path) && file_present_and_nonempty(&keyring_path) {
+    // Always fetch current expected config from manager to validate content
+    let client = EnrollmentClient::new(manager_url);
+    let expected_repo = client
+        .fetch_repo_config()
+        .await
+        .context("Failed to fetch repo config from manager during self-heal")?;
+
+    let sources_match = read_file_content(&sources_path).as_deref() == Some(expected_repo.sources_config.as_str());
+    let keyring_match = read_file_content(&keyring_path).as_deref() == Some(expected_repo.gpg_public_key.as_str());
+
+    if sources_match && keyring_match {
         tracing::info!(
             sources_path = %sources_path,
             keyring_path = %keyring_path,
-            "Repo config already present — self-heal not needed"
+            "Repo config content matches manager — self-heal not needed"
         );
         return Ok(RepoHealResult::AlreadyConfigured);
     }
 
     tracing::warn!(
         sources_path = %sources_path,
-        sources_exists = file_present_and_nonempty(&sources_path),
+        sources_match = sources_match,
         keyring_path = %keyring_path,
-        keyring_exists = file_present_and_nonempty(&keyring_path),
+        keyring_match = keyring_match,
         manager_url = %manager_url,
-        "Repo config missing — fetching from manager fallback endpoint"
+        "Repo config content mismatch — re-provisioning from manager"
     );
 
-    let client = EnrollmentClient::new(manager_url);
-    let repo = client
-        .fetch_repo_config()
-        .await
-        .context("Failed to fetch repo config from manager during self-heal")?;
-
-    provision::provision_repo_config(&repo)
+    provision::provision_repo_config(&expected_repo)
         .await
         .context("Failed to provision repo config during self-heal")?;
 
@@ -172,7 +182,7 @@ pub async fn check_and_provision_repo_config(manager_url: &str) -> Result<RepoHe
         distro = %distro_id,
         sources_path = %sources_path,
         keyring_path = %keyring_path,
-        "Repo config provisioned via self-heal"
+        "Repo config provisioned via self-heal (content updated)"
     );
 
     Ok(RepoHealResult::Provisioned)
@@ -270,5 +280,37 @@ mod tests {
             RepoHealResult::AlreadyConfigured,
             RepoHealResult::Provisioned
         );
+    }
+
+    #[test]
+    fn test_read_file_content_nonexistent() {
+        assert!(read_file_content("/nonexistent/path/that/does/not/exist").is_none());
+    }
+
+    #[test]
+    fn test_read_file_content_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+        let path_str = path.to_str().unwrap();
+        assert!(read_file_content(path_str).is_none());
+    }
+
+    #[test]
+    fn test_read_file_content_nonempty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.txt");
+        std::fs::write(&path, "some content").unwrap();
+        let path_str = path.to_str().unwrap();
+        assert_eq!(read_file_content(path_str), Some("some content".to_string()));
+    }
+
+    #[test]
+    fn test_read_file_content_whitespace_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("whitespace.txt");
+        std::fs::write(&path, "   \n\t  ").unwrap();
+        let path_str = path.to_str().unwrap();
+        assert_eq!(read_file_content(path_str), Some("   \n\t  ".to_string()));
     }
 }
