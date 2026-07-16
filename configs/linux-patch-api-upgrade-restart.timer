@@ -2,10 +2,14 @@
 Description=Linux Patch API - Delayed restart after package upgrade
 
 [Timer]
-# Fire every 10 seconds, checking the upgrade state before restarting.
-# The restart service's ExecStartPre checks the state file and marker —
-# it only restarts when the state is "restart_pending" and no package
-# operation is in progress.
+# Fire every 10 seconds. The restart service's ExecStartPre invokes
+# the fallback decision script, which uses:
+#   - the service ActiveState
+#   - the upgrade marker
+#   - the durable upgrade state
+#   - the durable restart deadline when the service is active
+# An inactive or failed service may be restarted to recover an
+# interrupted upgrade.
 OnActiveSec=10s
 OnUnitActiveSec=10s
 AccuracySec=1s

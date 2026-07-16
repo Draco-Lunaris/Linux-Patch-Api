@@ -14,18 +14,23 @@
 #
 # Exit codes:
 #   0  restart is authorized (caller should run `systemctl restart`)
-#   55 abort: do not restart (and do not retry this firing)
-#   1  error (corrupt state, missing prerequisites)
+#   55 do not restart (fail-closed or no-action result)
+#   1  error (neither ACTIVE_STATE nor systemctl is available)
 #
 # State machine (single source of truth for the fallback path):
 #
-#   activating                  -> 55 (replacement is initializing)
-#   active, marker cleared      ->  0 (nothing to do, success)
-#   active, marker, deadline in future -> 55 (still within grace period)
-#   active, marker, deadline past/unset -> 0 (restart to recover)
-#   inactive/failed, marker, valid state -> 0 (fallback restart)
-#   inactive/failed, no marker  ->  0 (nothing to do)
-#   missing/corrupt state       -> 55 (fail-closed)
+#   Condition                                         Exit
+#   ------------------------------------------------- ----
+#   ActiveState=activating                            55
+#   active, marker absent                              0
+#   active, marker present, deadline in future        55
+#   active, marker present, deadline expired           0
+#   active, marker present, deadline missing/unparseable  55
+#   inactive or failed, marker absent                  0
+#   inactive or failed, marker present, valid nonempty durable state  0
+#   inactive or failed, marker present, state missing/corrupt  55
+#   unknown or empty ActiveState                      55
+#   neither ACTIVE_STATE nor systemctl is available    1
 
 set -u
 

@@ -8,10 +8,14 @@ Type=oneshot
 # whether a restart is allowed. The script reads the upgrade state
 # file and the systemd ActiveState, then returns:
 #
-#   exit 0   restart is authorized — proceed to ExecStart
-#   exit 55  safely skip this timer firing (replacement initializing,
-#            grace period still active, or no-op)
-#   any other nonzero  fail closed — do not restart
+#   exit 0   restart is authorized — ExecStart runs
+#   exit 55  fail-closed or no-action — ExecStart does not run
+#   any other nonzero  error — ExecStart does not run
+#
+# Because the script runs as ExecStartPre (not ExecCondition), a
+# nonzero result prevents the restart command but may leave this
+# helper service in a failed state. Exit 55 is NOT a clean systemd
+# condition skip — it is the script's fail-closed/no-action result.
 #
 # The previous inline `systemctl is-active` / ActiveEnterTimestamp
 # logic was removed because it duplicated the script's state machine
