@@ -610,7 +610,14 @@ impl Scheduler {
                 }
                 job.updated_at = Utc::now();
                 let event_data = (job.status.clone(), job.progress, job.message.clone());
-                emit_event(&state, "job_status", &job_id, &event_data.0, event_data.1, &event_data.2);
+                emit_event(
+                    &state,
+                    "job_status",
+                    &job_id,
+                    &event_data.0,
+                    event_data.1,
+                    &event_data.2,
+                );
             }
 
             // Spawn the blocking task with a watchdog that finalizes
@@ -685,11 +692,13 @@ impl Scheduler {
                             match &result {
                                 Ok(_) => {
                                     job.error = Some(
-                                        "Caller cancelled after mutation completed — result could not be delivered"
+                                        "Caller cancelled after mutation completed \
+                                         — result could not be delivered"
                                             .to_string(),
                                     );
                                     job.add_log(
-                                        "Watchdog: caller dropped, operation succeeded but result undeliverable"
+                                        "Watchdog: caller dropped, operation succeeded \
+                                         but result undeliverable"
                                             .to_string(),
                                     );
                                 }

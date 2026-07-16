@@ -50,6 +50,7 @@ tokio-test = "0.4"
 mockall = "0.13"
 serial_test = "3"
 tempfile = "3"
+rcgen = "0.13"
 
 [[test]]
 name = "enroll_identity"

@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use linux_patch_api::jobs::manager::{JobOperation, JobStatus};
-use linux_patch_api::jobs::scheduler::{AdmissionMode, Scheduler, RebootAdmissionError, TryMutationError};
+use linux_patch_api::jobs::scheduler::{
+    AdmissionMode, RebootAdmissionError, Scheduler, TryMutationError,
+};
 
 // =============================================================================
 // 1. Multi-stage patch transaction holds the mutation slot for the
@@ -721,7 +723,9 @@ async fn patch_retry_ownership_blocks_b_during_retry() {
 
                 // Stage 2: apply fails with a retriable fetch error
                 stage_clone.store(2, std::sync::atomic::Ordering::SeqCst);
-                let apply_err = anyhow::anyhow!("Failed to fetch http://repo.example/pkg.deb: 404 Not Found");
+                let apply_err = anyhow::anyhow!(
+                    "Failed to fetch http://repo.example/pkg.deb: 404 Not Found"
+                );
 
                 if !linux_patch_api::packages::cache::is_fetch_error(&apply_err) {
                     return Err(apply_err);
