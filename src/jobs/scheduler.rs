@@ -28,7 +28,7 @@
 //!
 //! Handlers must not call `run_mutation`, `try_run_mutation`,
 //! `wait_and_start_job`, or `start_job` from production code. Those
-//! methods are only available under `#[cfg(test)]` and are otherwise
+//! methods are only available under `#[cfg(any(test, feature = "test-utils"))]` and are otherwise
 //! `unimplemented!` to make bypass structurally impossible.
 //!
 //! ## Wait/Notify
@@ -415,14 +415,11 @@ impl Scheduler {
         for id in to_fail {
             if let Some(j) = state.jobs.get_mut(&id) {
                 j.status = JobStatus::Failed;
-                j.error = Some(
-                    "Cancelled: reboot reservation in progress".to_string(),
-                );
+                j.error = Some("Cancelled: reboot reservation in progress".to_string());
                 j.completed_at = Some(Utc::now());
                 j.updated_at = j.completed_at.unwrap();
                 j.add_log("Job cancelled by reboot reservation".to_string());
-                let event_data =
-                    (j.status.clone(), j.progress, j.message.clone());
+                let event_data = (j.status.clone(), j.progress, j.message.clone());
                 emit_event(
                     &state,
                     "job_status",
@@ -467,11 +464,7 @@ impl Scheduler {
     /// Roll back a reboot reservation. Only succeeds if `job_id` is the
     /// current owner. This is the only way `reboot_pending` is cleared
     /// on failure — never unconditionally.
-    pub async fn rollback_reboot(
-        &self,
-        job_id: Uuid,
-        error: Option<String>,
-    ) -> bool {
+    pub async fn rollback_reboot(&self, job_id: Uuid, error: Option<String>) -> bool {
         let mut state = self.state.lock().await;
         if state.reboot_pending != Some(job_id) {
             return false;
@@ -487,7 +480,14 @@ impl Scheduler {
                 job.updated_at = job.completed_at.unwrap();
             }
             let event_data = (job.status.clone(), job.progress, job.message.clone());
-            emit_event(&state, "job_status", &job_id, &event_data.0, event_data.1, &event_data.2);
+            emit_event(
+                &state,
+                "job_status",
+                &job_id,
+                &event_data.0,
+                event_data.1,
+                &event_data.2,
+            );
         }
         state.notify.notify_one();
         true
@@ -656,13 +656,20 @@ impl Scheduler {
                 // Try to send the result to the caller. If the caller
                 // was cancelled (dropped), the receiver is gone and
                 // the send fails — we mark the job terminal.
+                //
+                // Capture whether the result was Ok or Err BEFORE
+                // moving it into the oneshot sender, so the watchdog
+                // can set the correct terminal-state diagnostic without
+                // accessing the moved value.
+                let result_is_ok = result.is_ok();
+                let result_err_msg: Option<String> = match &result {
+                    Ok(_) => None,
+                    Err(e) => Some(format!("{}", e)),
+                };
+
                 let caller_alive = if let Ok(mut guard) = result_tx.lock() {
                     if let Some(tx) = guard.take() {
-                        if tx.send(result).is_ok() {
-                            true
-                        } else {
-                            false
-                        }
+                        tx.send(result).is_ok()
                     } else {
                         false
                     }
@@ -683,36 +690,32 @@ impl Scheduler {
                     //   the underlying diagnostic preserved.
                     //
                     // - closure panicked: mark Failed (the JoinError
-                    //   is already captured in `result` as an Err).
+                    //   is already captured in result_err_msg).
                     //
                     // In all cases the job must NOT remain Running.
                     if let Some(job) = state.jobs.get_mut(&job_id_owned) {
                         if matches!(job.status, JobStatus::Running | JobStatus::Pending) {
                             job.status = JobStatus::Failed;
-                            match &result {
-                                Ok(_) => {
-                                    job.error = Some(
-                                        "Caller cancelled after mutation completed \
-                                         — result could not be delivered"
-                                            .to_string(),
-                                    );
-                                    job.add_log(
-                                        "Watchdog: caller dropped, operation succeeded \
-                                         but result undeliverable"
-                                            .to_string(),
-                                    );
-                                }
-                                Err(e) => {
-                                    let diag = format!(
-                                        "Caller cancelled with underlying error: {}",
-                                        e
-                                    );
-                                    job.error = Some(diag);
-                                    job.add_log(
-                                        "Watchdog: caller dropped, operation failed"
-                                            .to_string(),
-                                    );
-                                }
+                            if result_is_ok {
+                                job.error = Some(
+                                    "Caller cancelled after mutation completed \
+                                     — result could not be delivered"
+                                        .to_string(),
+                                );
+                                job.add_log(
+                                    "Watchdog: caller dropped, operation succeeded \
+                                     but result undeliverable"
+                                        .to_string(),
+                                );
+                            } else {
+                                let diag = format!(
+                                    "Caller cancelled with underlying error: {}",
+                                    result_err_msg.as_deref().unwrap_or("unknown error")
+                                );
+                                job.error = Some(diag);
+                                job.add_log(
+                                    "Watchdog: caller dropped, operation failed".to_string(),
+                                );
                             }
                             job.completed_at = Some(Utc::now());
                             job.updated_at = job.completed_at.unwrap();
@@ -800,7 +803,14 @@ impl Scheduler {
                 job.updated_at = job.completed_at.unwrap();
                 job.add_log("Job cancelled by shutdown".to_string());
                 let event_data = (job.status.clone(), job.progress, job.message.clone());
-                emit_event(&state, "job_status", &id, &event_data.0, event_data.1, &event_data.2);
+                emit_event(
+                    &state,
+                    "job_status",
+                    &id,
+                    &event_data.0,
+                    event_data.1,
+                    &event_data.2,
+                );
             }
         }
         state.notify.notify_one();
@@ -1016,7 +1026,7 @@ impl Scheduler {
     /// TEST-ONLY: snapshot the scheduler state for assertions.
     /// Returns a struct with read-only views of the fields tests
     /// need to inspect. Production code must never use this.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn state_for_test(&self) -> SchedulerStateSnapshot {
         let s = self.state.lock().await;
         SchedulerStateSnapshot {
@@ -1034,19 +1044,19 @@ impl Scheduler {
     //
     // The following methods were the original mutation entry points
     // and are now STRUCTURALLY UNAVAILABLE in production builds. They
-    // remain only under `#[cfg(test)]` for legacy test support.
+    // remain only under `#[cfg(any(test, feature = "test-utils"))]` for legacy test support.
     //
     // Production code that tries to invoke a package manager MUST go
     // through `dispatch_mutation`. This is enforced by:
     //   1. The methods are `unimplemented!` in production builds, so
     //      any call site is a panic, not a silent bypass.
-    //   2. Even under `#[cfg(test)]`, they have a different signature
+    //   2. Even under `#[cfg(any(test, feature = "test-utils"))]`, they have a different signature
     //      than `dispatch_mutation` so the compiler reminds callers
     //      that they should be using the authoritative entry point.
 
     /// Acquire the mutation slot. **TEST-ONLY**. Production code must
     /// use `dispatch_mutation`. Calling this from production panics.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn run_mutation<F, T>(self: &Arc<Self>, job_id: Uuid, f: F) -> Result<T>
     where
         F: FnOnce() -> Result<T> + Send + 'static,
@@ -1100,7 +1110,7 @@ impl Scheduler {
     }
 
     /// Try to run a mutation without blocking. **TEST-ONLY**.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn try_run_mutation<F, T>(self: &Arc<Self>, f: F) -> Result<T, TryMutationError>
     where
         F: FnOnce() -> Result<T> + Send + 'static,
@@ -1154,7 +1164,7 @@ impl Scheduler {
     /// Atomically transition a job to Running status, enforcing
     /// max_concurrent. **TEST-ONLY**. Production code must use
     /// `dispatch_mutation` which combines this with mutation admission.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn start_job(&self, job_id: &Uuid) -> Result<(), anyhow::Error> {
         let mut state = self.state.lock().await;
         if state.admission != AdmissionMode::Open {
@@ -1184,14 +1194,21 @@ impl Scheduler {
             job.updated_at = Utc::now();
             job.add_log("Job started".to_string());
             let event_data = (job.status.clone(), job.progress, job.message.clone());
-            emit_event(&state, "job_status", job_id, &event_data.0, event_data.1, &event_data.2);
+            emit_event(
+                &state,
+                "job_status",
+                job_id,
+                &event_data.0,
+                event_data.1,
+                &event_data.2,
+            );
         }
         Ok(())
     }
 
     /// Wait for a running slot to become available, then start the job.
     /// **TEST-ONLY**. Production code must use `dispatch_mutation`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn wait_and_start_job(&self, job_id: &Uuid) {
         loop {
             match self.start_job(job_id).await {
@@ -1222,6 +1239,12 @@ impl Scheduler {
 #[derive(Debug, Clone)]
 pub struct RebootJobHandle {
     pub job_id: Uuid,
+}
+
+impl std::fmt::Display for RebootJobHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RebootJobHandle({})", self.job_id)
+    }
 }
 
 /// Guard for a self-update reservation. Rolls back on drop if not committed.
@@ -1275,7 +1298,7 @@ pub struct RebootReservationGuard {
 }
 
 /// TEST-ONLY: read-only snapshot of scheduler state for assertions.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone)]
 pub struct SchedulerStateSnapshot {
     pub admission: AdmissionMode,
@@ -1305,7 +1328,12 @@ impl Drop for RebootReservationGuard {
             let scheduler = self.scheduler.clone();
             let job_id = self.job_id;
             tokio::spawn(async move {
-                scheduler.rollback_reboot(job_id, Some("Reservation dropped without commit (cancelled)".to_string())).await;
+                scheduler
+                    .rollback_reboot(
+                        job_id,
+                        Some("Reservation dropped without commit (cancelled)".to_string()),
+                    )
+                    .await;
             });
         }
     }
@@ -1361,7 +1389,9 @@ impl std::error::Error for SelfUpdateAdmissionError {}
 pub enum RebootAdmissionError {
     SelfUpdateInProgress,
     PackageMutationInProgress,
-    JobsInProgress { count: usize },
+    JobsInProgress {
+        count: usize,
+    },
     QueueFull,
     /// Admission is frozen (shutdown in progress) or recovery mode.
     AdmissionClosed,
@@ -1378,10 +1408,9 @@ impl std::fmt::Display for RebootAdmissionError {
                 write!(f, "Cannot reboot while {} jobs are in progress", count)
             }
             RebootAdmissionError::QueueFull => write!(f, "Job queue is at capacity"),
-            RebootAdmissionError::AdmissionClosed => write!(
-                f,
-                "Admission is closed (shutdown or recovery in progress)"
-            ),
+            RebootAdmissionError::AdmissionClosed => {
+                write!(f, "Admission is closed (shutdown or recovery in progress)")
+            }
         }
     }
 }

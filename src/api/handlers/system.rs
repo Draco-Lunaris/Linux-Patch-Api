@@ -12,10 +12,11 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::jobs::manager::JobOperation;
+use crate::jobs::scheduler::{AdmissionMode, Scheduler};
+
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
-
-use crate::jobs::scheduler::{AdmissionMode, Scheduler};
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
@@ -153,33 +154,44 @@ pub async fn health_check(
     // Check cache status — report stale without synchronously refreshing.
     // Health checks must NOT mutate package state. If the cache is stale,
     // we spawn an async refresh task (best-effort) and report the current
-    // status immediately. The refresh uses the scheduler's non-blocking
-    // try_run_mutation — if a mutation is already in progress, the refresh
-    // is skipped and stale cache is reported.
+    // status immediately. The refresh goes through `dispatch_mutation`
+    // — the scheduler's SOLE production mutation entry point.
     let cache_status_val = cache_state.status();
     let (mut status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
         // Spawn a best-effort background refresh using the scheduler's
-        // non-blocking mutation admission. This deduplicates refreshes
-        // (only one can hold the mutation slot at a time) and never
-        // blocks the health response.
+        // dispatch_mutation. This deduplicates refreshes (only one can
+        // hold the mutation slot at a time) and never blocks the health
+        // response.
         let backend_clone = backend.clone();
         let cache_state_clone = cache_state.clone();
         let scheduler_clone = scheduler.clone();
         actix_web::rt::spawn(async move {
-            // The scheduler's try_run_mutation runs the closure in
-            // spawn_blocking internally — move the clones in (no borrows).
-            let refresh_result = scheduler_clone
-                .try_run_mutation(move || backend_clone.refresh_package_cache(&cache_state_clone))
-                .await;
-            match refresh_result {
-                Ok(_) => info!("Background cache refresh from health check succeeded"),
-                Err(crate::jobs::scheduler::TryMutationError::Busy) => {
-                    info!(
-                        "Background cache refresh from health check skipped — mutation in progress"
-                    );
+            // Admit a tracking job and dispatch through the scheduler.
+            match scheduler_clone
+                .admit_job(
+                    JobOperation::Install,
+                    vec!["__health_refresh__".to_string()],
+                )
+                .await
+            {
+                Ok(tracking_job_id) => {
+                    let backend_for_refresh = backend_clone.clone();
+                    let cache_state_for_refresh = cache_state_clone.clone();
+                    let refresh_result = scheduler_clone
+                        .dispatch_mutation(tracking_job_id, move || {
+                            backend_for_refresh.refresh_package_cache(&cache_state_for_refresh)
+                        })
+                        .await;
+                    match refresh_result {
+                        Ok(_) => info!("Background cache refresh from health check succeeded"),
+                        Err(e) => {
+                            warn!(error = ?e, "Background cache refresh from health check failed");
+                            let _ = scheduler_clone.delete_job(&tracking_job_id).await;
+                        }
+                    }
                 }
-                Err(crate::jobs::scheduler::TryMutationError::Failed(e)) => {
-                    warn!(error = ?e, "Background cache refresh from health check failed");
+                Err(e) => {
+                    info!(error = ?e, "Background cache refresh from health check skipped — could not admit tracking job");
                 }
             }
         });
@@ -276,31 +288,33 @@ pub async fn reboot_system(
     // creation happen under one lock, preventing races between the
     // reboot check and concurrent job/self-update/mutation creation.
     match scheduler.admit_reboot(force, ack_corruption_risk).await {
-        Ok(job_id) => {
+        Ok(handle) => {
+            let reboot_job_id = handle.job_id;
             // Spawn background task to execute the reboot
             let backend_clone = backend.clone();
             let scheduler_clone = scheduler.clone();
             let delay_clone = delay;
 
             tokio::spawn(async move {
-                let job_id_clone = job_id;
-
-                scheduler_clone.wait_and_start_job(&job_id_clone).await;
-
-                // Execute reboot
+                // Execute reboot — the reboot job is already admitted
+                // and committed by admit_reboot. We do not need
+                // wait_and_start_job; the job is already in the
+                // scheduler's job map.
                 match backend_clone.reboot_system(delay_clone) {
                     Ok(_) => {
                         let _ = scheduler_clone
-                            .add_job_log(&job_id_clone, "Reboot command executed".to_string())
+                            .add_job_log(&reboot_job_id, "Reboot command executed".to_string())
                             .await;
                         // Note: Job won't complete normally since system reboots
-                        info!(job_id = %job_id_clone, "System reboot initiated");
+                        info!(job_id = %reboot_job_id, "System reboot initiated");
                     }
                     Err(e) => {
+                        // Reboot command failed — roll back the reservation
+                        // so the scheduler reopens admission.
                         let _ = scheduler_clone
-                            .fail_job_with_diagnostics(&job_id_clone, &e)
+                            .rollback_reboot(reboot_job_id, Some(format!("{}", e)))
                             .await;
-                        error!(job_id = %job_id_clone, error = ?e, "System reboot failed");
+                        error!(job_id = %reboot_job_id, error = %e, "System reboot failed");
                     }
                 }
             });
@@ -312,7 +326,7 @@ pub async fn reboot_system(
             };
 
             let response = ApiResponse::success(serde_json::json!({
-                "job_id": job_id.to_string(),
+                "job_id": reboot_job_id.to_string(),
                 "status": "pending",
                 "operation": "reboot",
                 "scheduled_at": scheduled_at.to_rfc3339(),
@@ -348,6 +362,12 @@ pub async fn reboot_system(
                     "Job queue is at capacity. Please retry later.".to_string(),
                     None,
                     true,
+                ),
+                crate::jobs::scheduler::RebootAdmissionError::AdmissionClosed => (
+                    "ADMISSION_CLOSED",
+                    "Admission is closed (shutdown or recovery in progress).".to_string(),
+                    None,
+                    false,
                 ),
             };
             let response = ApiResponse::<()>::error(code, &message, data, retry);

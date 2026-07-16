@@ -322,7 +322,7 @@ async fn test_enrollment_denied_flow() {
     let wl_config: serde_yaml::Value = serde_yaml::from_str(&wl_content).unwrap();
     let entries = wl_config.get("entries").and_then(|e| e.as_sequence());
     assert!(
-        entries.map_or(true, |e| e.is_empty()),
+        entries.is_none_or(|e| e.is_empty()),
         "Whitelist should remain empty after denied enrollment"
     );
 }

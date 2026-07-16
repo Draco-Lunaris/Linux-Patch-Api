@@ -26,10 +26,7 @@ fn run_script(
     marker: bool,
     active_state: &str,
 ) -> std::process::Output {
-    let tmp = std::env::temp_dir().join(format!(
-        "fallback_test_{}",
-        uuid::Uuid::new_v4()
-    ));
+    let tmp = std::env::temp_dir().join(format!("fallback_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).unwrap();
 
     let mut cmd = Command::new("sh");
@@ -51,10 +48,7 @@ fn run_script(
         std::fs::write(&marker_path, "").unwrap();
         cmd.env("MARKER", marker_path.to_str().unwrap());
     } else {
-        cmd.env(
-            "MARKER",
-            tmp.join("no-marker").to_str().unwrap(),
-        );
+        cmd.env("MARKER", tmp.join("no-marker").to_str().unwrap());
     }
 
     cmd.arg(script_path());
@@ -196,16 +190,11 @@ fn fallback_systemctl_show_failure_fails_closed() {
 
     // Write a fake systemctl that produces no output
     let fake_systemctl = fake_bin.join("systemctl");
-    std::fs::write(
-        &fake_systemctl,
-        "#!/bin/sh\nexit 0\n",
-    )
-    .unwrap();
+    std::fs::write(&fake_systemctl, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake_systemctl, std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(&fake_systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     let marker_path = tmp.join("upgrade-pending");
@@ -215,7 +204,10 @@ fn fallback_systemctl_show_failure_fails_closed() {
     cmd.env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()));
     // Do NOT set ACTIVE_STATE — let the script fall through to systemctl.
     cmd.env_remove("ACTIVE_STATE");
-    cmd.env("STATE_FILE", tmp.join("missing-state.json").to_str().unwrap());
+    cmd.env(
+        "STATE_FILE",
+        tmp.join("missing-state.json").to_str().unwrap(),
+    );
     cmd.env("MARKER", marker_path.to_str().unwrap());
     cmd.env("SERVICE_NAME", "linux-patch-api.service");
     cmd.arg(script_path());

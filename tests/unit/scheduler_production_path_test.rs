@@ -70,9 +70,8 @@ async fn multi_stage_patch_holds_slot_through_stages() {
     // while the patch transaction holds the slot. We use a
     // timeout-bound task to detect that it does not start.
     let sched_compete = scheduler.clone();
-    let compete_handle = tokio::spawn(async move {
-        sched_compete.dispatch_mutation(pkg_job_id, || Ok(())).await
-    });
+    let compete_handle =
+        tokio::spawn(async move { sched_compete.dispatch_mutation(pkg_job_id, || Ok(())).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !compete_handle.is_finished(),
@@ -107,8 +106,6 @@ async fn multi_stage_patch_holds_slot_through_stages() {
 /// apply succeeds. The slot is never released between stages.
 #[tokio::test]
 async fn multi_stage_retry_keeps_ownership() {
-    use std::cell::Cell;
-
     let scheduler = Scheduler::new(5, 10);
 
     let patch_job_id = scheduler
@@ -116,25 +113,29 @@ async fn multi_stage_retry_keeps_ownership() {
         .await
         .unwrap();
 
-    let stage = Arc::new(Cell::new(0u32));
+    let stage = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     let stage_for_closure = stage.clone();
     let result = scheduler
         .dispatch_mutation(patch_job_id, move || -> anyhow::Result<()> {
             // Stage 1: initial cache refresh
-            stage_for_closure.set(1);
+            stage_for_closure.store(1, std::sync::atomic::Ordering::SeqCst);
             // Stage 2: apply fails with fetch error
-            stage_for_closure.set(2);
+            stage_for_closure.store(2, std::sync::atomic::Ordering::SeqCst);
             // Stage 3: refresh retry
-            stage_for_closure.set(3);
+            stage_for_closure.store(3, std::sync::atomic::Ordering::SeqCst);
             // Stage 4: apply retry — succeeds
-            stage_for_closure.set(4);
+            stage_for_closure.store(4, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })
         .await;
 
     assert!(result.is_ok(), "multi-stage patch should succeed");
-    assert_eq!(stage.get(), 4, "all four stages must execute inside the closure");
+    assert_eq!(
+        stage.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "all four stages must execute inside the closure"
+    );
 
     // After completion, the slot must be released
     assert!(
@@ -160,7 +161,8 @@ async fn reboot_rollback_clears_state_and_accepts_new_jobs() {
         .admit_job(JobOperation::Install, vec!["p1".to_string()])
         .await
         .unwrap();
-    let _ = scheduler.dispatch_mutation(j1, || Ok(())).await.unwrap();
+    scheduler.dispatch_mutation(j1, || Ok(())).await.unwrap();
+    let _ = scheduler.complete_job(&j1).await;
 
     // Reserve a reboot
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
@@ -223,7 +225,8 @@ async fn reboot_blocks_all_mutation_paths() {
         .admit_job(JobOperation::Install, vec!["p1".to_string()])
         .await
         .unwrap();
-    let _ = scheduler.dispatch_mutation(j1, || Ok(())).await.unwrap();
+    scheduler.dispatch_mutation(j1, || Ok(())).await.unwrap();
+    let _ = scheduler.complete_job(&j1).await;
 
     // Reserve reboot
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
@@ -311,14 +314,18 @@ async fn dispatch_cancellation_finalizes_job() {
         "slot must stay set after caller cancellation"
     );
 
-    // A second mutation must NOT be able to start
+    // A second mutation must NOT be able to start — it should wait
+    // for the slot, not enter while the first is running. We verify
+    // by checking it hasn't finished after a short delay.
     let j2 = scheduler
         .admit_job(JobOperation::Install, vec!["p2".to_string()])
         .await
         .unwrap();
-    let second = scheduler.dispatch_mutation(j2, || Ok(())).await;
+    let sched2 = scheduler.clone();
+    let second_handle = tokio::spawn(async move { sched2.dispatch_mutation(j2, || Ok(())).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        second.is_err(),
+        !second_handle.is_finished(),
         "second mutation must not start while first blocking command is running"
     );
 
@@ -330,6 +337,13 @@ async fn dispatch_cancellation_finalizes_job() {
     assert!(
         !scheduler.is_mutation_in_progress().await,
         "slot must be cleared after blocking command completes"
+    );
+
+    // The second mutation can now proceed
+    let second_result = second_handle.await.unwrap();
+    assert!(
+        second_result.is_ok(),
+        "second mutation should succeed after first completes"
     );
 
     // Job must be in a terminal state
@@ -491,7 +505,8 @@ async fn reboot_blocks_self_update_reservation() {
         .admit_job(JobOperation::Install, vec!["p1".to_string()])
         .await
         .unwrap();
-    let _ = scheduler.dispatch_mutation(j1, || Ok(())).await.unwrap();
+    scheduler.dispatch_mutation(j1, || Ok(())).await.unwrap();
+    let _ = scheduler.complete_job(&j1).await;
 
     // Reserve reboot
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
@@ -530,18 +545,14 @@ async fn dispatch_mutation_uses_notify_not_polling() {
 
     // First job runs and completes quickly
     let s1 = scheduler.clone();
-    let h1 = tokio::spawn(async move {
-        s1.dispatch_mutation(j1, || Ok(())).await
-    });
+    let h1 = tokio::spawn(async move { s1.dispatch_mutation(j1, || Ok(())).await });
 
     // Second job waits for the first to finish. If the wait used
     // a 100ms poll, this test would be flaky. We verify the wake
     // is fast (< 1s) by measuring how long j2 takes to start.
     let start = std::time::Instant::now();
     let s2 = scheduler.clone();
-    let h2 = tokio::spawn(async move {
-        s2.dispatch_mutation(j2, || Ok(())).await
-    });
+    let h2 = tokio::spawn(async move { s2.dispatch_mutation(j2, || Ok(())).await });
 
     let _ = h1.await;
     let _ = h2.await;
@@ -723,9 +734,8 @@ async fn patch_retry_ownership_blocks_b_during_retry() {
 
                 // Stage 2: apply fails with a retriable fetch error
                 stage_clone.store(2, std::sync::atomic::Ordering::SeqCst);
-                let apply_err = anyhow::anyhow!(
-                    "Failed to fetch http://repo.example/pkg.deb: 404 Not Found"
-                );
+                let apply_err =
+                    anyhow::anyhow!("Failed to fetch http://repo.example/pkg.deb: 404 Not Found");
 
                 if !linux_patch_api::packages::cache::is_fetch_error(&apply_err) {
                     return Err(apply_err);
@@ -847,7 +857,10 @@ async fn patch_reboot_interleaving_rejected_while_paused() {
     // Attempt a non-forced reboot — must be rejected (jobs in progress)
     let reboot_result = scheduler.reserve_reboot(false, false).await;
     assert!(
-        matches!(reboot_result, Err(RebootAdmissionError::JobsInProgress { .. })),
+        matches!(
+            reboot_result,
+            Err(RebootAdmissionError::JobsInProgress { .. })
+        ),
         "non-forced reboot must be rejected while patch job is active"
     );
 
@@ -855,7 +868,10 @@ async fn patch_reboot_interleaving_rejected_while_paused() {
     // must be rejected (package mutation in progress)
     let forced_result = scheduler.reserve_reboot(true, false).await;
     assert!(
-        matches!(forced_result, Err(RebootAdmissionError::PackageMutationInProgress)),
+        matches!(
+            forced_result,
+            Err(RebootAdmissionError::PackageMutationInProgress)
+        ),
         "forced reboot without ack must be rejected while mutation is in progress"
     );
 
@@ -1206,11 +1222,7 @@ async fn reboot_barrier_blocks_self_update() {
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
 
     let result = scheduler
-        .try_reserve_self_update(
-            vec!["linux-patch-api".to_string()],
-            "1.0",
-            "2.0",
-        )
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0", "2.0")
         .await;
     assert!(
         result.is_err(),
