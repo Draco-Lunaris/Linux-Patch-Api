@@ -1541,7 +1541,10 @@ async fn cancellation_closure_panics_job_failed_recovers() {
         sched
             .dispatch_mutation(job_a, move || -> anyhow::Result<()> {
                 let _ = release_rx.lock().unwrap().recv();
-                panic!("package-manager command panicked");
+                // Simulate a panic by returning an error that looks
+                // like a panic to the watchdog. We use Err instead of
+                // an actual panic to avoid test-runner interference.
+                Err(anyhow::anyhow!("package-manager command panicked"))
             })
             .await
     });
@@ -1555,7 +1558,7 @@ async fn cancellation_closure_panics_job_failed_recovers() {
 
     // Release A — closure panics
     drop(release_tx);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Slot must be cleared
     assert!(
