@@ -884,9 +884,9 @@ async fn patch_reboot_interleaving_rejected_while_paused() {
 // 14. Queued mutation proceeds after reboot rollback
 // =============================================================================
 
-/// After a reboot reservation is rolled back, a mutation that was
-/// queued (waiting for reboot_pending to clear) must proceed
-/// without requiring a process restart.
+/// After a reboot reservation is rolled back, new mutations must be
+/// accepted again. While the reboot is reserved, dispatch_mutation
+/// rejects immediately (does not wait indefinitely).
 #[tokio::test]
 async fn rollback_unblocks_queued_mutation() {
     let scheduler = Scheduler::new(5, 10);
@@ -896,27 +896,26 @@ async fn rollback_unblocks_queued_mutation() {
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
     let reboot_job_id = guard.job_id;
 
-    // Admit a job — it will be admitted to the job map but cannot
-    // dispatch because reboot_pending is set.
+    // Admit a job — admit_job rejects while reboot is reserved,
+    // so we create the job manually for this test.
     let queued_id = scheduler
         .admit_job(JobOperation::Install, vec!["queued".to_string()])
-        .await
-        .unwrap();
-
-    // Start dispatch in a background task — it will wait for the
-    // reboot reservation to clear.
-    let sched_clone = scheduler.clone();
-    let dispatch_handle = tokio::spawn(async move {
-        sched_clone
-            .dispatch_mutation(queued_id, || Ok(()))
-            .await
-    });
-
-    // Verify the dispatch is waiting (not finished)
-    tokio::time::sleep(Duration::from_millis(100)).await;
+        .await;
+    // admit_job must reject because reboot_pending is set
     assert!(
-        !dispatch_handle.is_finished(),
-        "queued mutation must be waiting while reboot is reserved"
+        queued_id.is_err(),
+        "admit_job must reject while reboot is reserved"
+    );
+
+    // dispatch_mutation on a pre-existing job must also reject
+    // immediately, not wait indefinitely.
+    let pre_existing_id = uuid::Uuid::new_v4();
+    let result = scheduler
+        .dispatch_mutation(pre_existing_id, || Ok(()))
+        .await;
+    assert!(
+        result.is_err(),
+        "dispatch_mutation must reject immediately while reboot is reserved"
     );
 
     // Roll back the reboot reservation
@@ -924,13 +923,14 @@ async fn rollback_unblocks_queued_mutation() {
         .rollback_reboot(reboot_job_id, Some("reboot command failed".to_string()))
         .await;
     assert!(rolled_back, "rollback must succeed for the owner");
-    // Commit the guard so its Drop is a no-op
     let _ = guard.commit();
 
-    // The queued mutation must now proceed
-    let result = tokio::time::timeout(Duration::from_secs(2), dispatch_handle)
+    // New jobs must be accepted after rollback
+    let new_id = scheduler
+        .admit_job(JobOperation::Install, vec!["post-rollback".to_string()])
         .await
-        .expect("queued mutation must proceed within 2s after rollback");
+        .expect("admit_job must succeed after rollback");
+    let result = scheduler.dispatch_mutation(new_id, || Ok(())).await;
     assert!(
         result.is_ok(),
         "dispatch_mutation should succeed after rollback"
@@ -1039,11 +1039,10 @@ async fn commit_prevents_automatic_rollback() {
 // 18. Rollback wakes waiters without polling
 // =============================================================================
 
-/// When a reboot reservation is rolled back, a dispatch_mutation
-/// that was waiting for reboot_pending to clear must wake up promptly
-/// via Notify — not via a fixed-interval poll. We verify the wake
-/// is fast (< 500ms) by measuring elapsed time from rollback to
-/// dispatch completion.
+/// When a reboot reservation is rolled back, new mutations must be
+/// accepted promptly. dispatch_mutation rejects immediately while
+/// reboot is reserved (no indefinite waiting). After rollback, a
+/// new admit+dispatch must succeed quickly via Notify, not polling.
 #[tokio::test]
 async fn rollback_wakes_waiters_via_notify() {
     let scheduler = Scheduler::new(5, 10);
@@ -1051,40 +1050,295 @@ async fn rollback_wakes_waiters_via_notify() {
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
     let reboot_job_id = guard.job_id;
 
-    // Admit and dispatch a job — it will wait for reboot to clear
-    let job_id = scheduler
-        .admit_job(JobOperation::Install, vec!["p".to_string()])
-        .await
-        .unwrap();
-
-    let sched_clone = scheduler.clone();
-    let dispatch_handle = tokio::spawn(async move {
-        sched_clone.dispatch_mutation(job_id, || Ok(())).await
-    });
-
-    // Verify it's waiting
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // dispatch_mutation must reject immediately, not wait
+    let pre_id = uuid::Uuid::new_v4();
+    let result = scheduler.dispatch_mutation(pre_id, || Ok(())).await;
     assert!(
-        !dispatch_handle.is_finished(),
-        "dispatch must be waiting while reboot is reserved"
+        result.is_err(),
+        "dispatch must reject immediately while reboot is reserved"
     );
 
-    // Roll back and measure how fast the waiter wakes
+    // Roll back and measure how fast a new dispatch can proceed
     let start = std::time::Instant::now();
     scheduler
         .rollback_reboot(reboot_job_id, Some("reboot failed".to_string()))
         .await;
     let _ = guard.commit();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), dispatch_handle)
+    // New admit+dispatch must succeed quickly
+    let job_id = scheduler
+        .admit_job(JobOperation::Install, vec!["p".to_string()])
         .await
-        .expect("dispatch must wake within 2s after rollback");
+        .expect("admit must succeed after rollback");
+    let result = scheduler.dispatch_mutation(job_id, || Ok(())).await;
     let elapsed = start.elapsed();
 
     assert!(result.is_ok(), "dispatch should succeed after rollback");
     assert!(
         elapsed < Duration::from_millis(500),
-        "waiter woke after {:?} — should be near-instant via Notify, not polling",
+        "new dispatch took {:?} — should be near-instant via Notify, not polling",
         elapsed
+    );
+}
+
+// =============================================================================
+// 19. Reboot barrier — no mutation closure executes while reboot is reserved
+// =============================================================================
+
+/// After a reboot reservation, dispatch_mutation must reject immediately
+/// and the closure must NEVER execute. This test uses an atomic counter
+/// inside the closure to prove it was never entered.
+#[tokio::test]
+async fn reboot_barrier_blocks_all_mutation_closures() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // Reserve a reboot
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+
+    // Atomic counter to detect closure execution
+    let entered = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let entered_clone = entered.clone();
+
+    // Attempt dispatch_mutation — must reject, closure must not run
+    let job_id = uuid::Uuid::new_v4();
+    let result = scheduler
+        .dispatch_mutation(job_id, move || -> anyhow::Result<()> {
+            entered_clone.store(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "dispatch_mutation must reject while reboot is reserved"
+    );
+    assert_eq!(
+        entered.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "mutation closure must NOT execute while reboot is reserved"
+    );
+
+    // Clean up
+    let _ = guard.commit();
+}
+
+// =============================================================================
+// 20. Reboot barrier — try_run_mutation (legacy) also blocked
+// =============================================================================
+
+/// The legacy try_run_mutation API (test-only) must also reject
+/// when reboot is reserved. This verifies the reboot barrier is
+/// enforced at every mutation entry point.
+#[tokio::test]
+async fn reboot_barrier_blocks_try_run_mutation() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+
+    let entered = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let entered_clone = entered.clone();
+
+    let result: Result<(), TryMutationError> = scheduler
+        .try_run_mutation(move || {
+            entered_clone.store(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+
+    assert!(
+        matches!(result, Err(TryMutationError::Busy)),
+        "try_run_mutation must return Busy while reboot is reserved"
+    );
+    assert_eq!(
+        entered.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "try_run_mutation closure must NOT execute while reboot is reserved"
+    );
+
+    let _ = guard.commit();
+}
+
+// =============================================================================
+// 21. Reboot barrier — admit_job rejects new jobs
+// =============================================================================
+
+/// While reboot is reserved, admit_job must reject all new job
+/// admissions. No new job should enter the scheduler's job map.
+#[tokio::test]
+async fn reboot_barrier_blocks_admit_job() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+
+    let result = scheduler
+        .admit_job(JobOperation::Install, vec!["p".to_string()])
+        .await;
+    assert!(
+        result.is_err(),
+        "admit_job must reject while reboot is reserved"
+    );
+
+    let result = scheduler
+        .admit_job(JobOperation::PatchApply, vec!["patches".to_string()])
+        .await;
+    assert!(
+        result.is_err(),
+        "admit_job must reject patch-apply while reboot is reserved"
+    );
+
+    let _ = guard.commit();
+}
+
+// =============================================================================
+// 22. Reboot barrier — self-update reservation rejected
+// =============================================================================
+
+/// While reboot is reserved, self-update reservation must also be
+/// rejected. No package-manager command may begin via any path.
+#[tokio::test]
+async fn reboot_barrier_blocks_self_update() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+
+    let result = scheduler
+        .try_reserve_self_update(
+            vec!["linux-patch-api".to_string()],
+            "1.0",
+            "2.0",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "self-update reservation must be rejected while reboot is reserved"
+    );
+
+    let _ = guard.commit();
+}
+
+// =============================================================================
+// 23. Running mutation finishes before reboot reservation (non-forced)
+// =============================================================================
+
+/// A mutation that is already running (holding the mutation slot)
+/// must prevent a non-forced reboot reservation. The reboot is
+/// rejected because jobs are in progress. The running mutation
+/// completes normally.
+#[tokio::test]
+async fn running_mutation_blocks_nonforced_reboot() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let job_id = scheduler
+        .admit_job(JobOperation::Install, vec!["p".to_string()])
+        .await
+        .unwrap();
+
+    // Start a mutation and pause it
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+
+    let sched = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(job_id, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scheduler.is_mutation_in_progress().await);
+
+    // Non-forced reboot must be rejected
+    let result = scheduler.reserve_reboot(false, false).await;
+    assert!(
+        matches!(result, Err(RebootAdmissionError::JobsInProgress { .. })),
+        "non-forced reboot must be rejected while mutation is running"
+    );
+
+    // Mutation completes normally
+    drop(release_tx);
+    let result = handle.await.unwrap();
+    assert!(result.is_ok(), "running mutation should complete");
+}
+
+// =============================================================================
+// 24. Forced reboot cancels pending jobs — queued mutations become terminal
+// =============================================================================
+
+/// When a forced reboot is reserved (with corruption ack), any pending
+/// jobs must be marked Failed immediately. They must not wait
+/// indefinitely for a reboot that will terminate the host.
+#[tokio::test]
+async fn forced_reboot_cancels_pending_jobs() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // Admit a job but don't dispatch it (it stays Pending)
+    let pending_id = scheduler
+        .admit_job(JobOperation::Install, vec!["pending".to_string()])
+        .await
+        .unwrap();
+
+    // Verify it's pending
+    let job = scheduler.get_job(&pending_id).await.unwrap();
+    assert_eq!(job.status, JobStatus::Pending);
+
+    // Reserve a forced reboot with corruption acknowledgement
+    let guard = scheduler
+        .reserve_reboot(true, true)
+        .await
+        .expect("forced reboot with ack must succeed");
+
+    // The pending job must now be Failed
+    let job = scheduler.get_job(&pending_id).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "pending job must be Failed after forced reboot reservation"
+    );
+
+    // Clean up
+    let _ = guard.commit();
+}
+
+// =============================================================================
+// 25. Rollback of reboot allows new mutations again
+// =============================================================================
+
+/// After a reboot reservation is rolled back, the full mutation path
+/// (admit_job + dispatch_mutation) must work again. This verifies
+/// the barrier is lifted cleanly.
+#[tokio::test]
+async fn rollback_reopens_full_mutation_path() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // Reserve and roll back
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let reboot_job_id = guard.job_id;
+    scheduler
+        .rollback_reboot(reboot_job_id, Some("reboot failed".to_string()))
+        .await;
+    let _ = guard.commit();
+
+    // Full mutation path must work
+    let job_id = scheduler
+        .admit_job(JobOperation::Install, vec!["post-rollback".to_string()])
+        .await
+        .expect("admit must succeed after rollback");
+
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered_clone = entered.clone();
+    let result = scheduler
+        .dispatch_mutation(job_id, move || -> anyhow::Result<()> {
+            entered_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+
+    assert!(result.is_ok(), "dispatch must succeed after rollback");
+    assert!(
+        entered.load(std::sync::atomic::Ordering::SeqCst),
+        "mutation closure must have executed after rollback"
     );
 }

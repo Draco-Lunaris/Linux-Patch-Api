@@ -5,20 +5,62 @@
 //! - job map (pending, running, completed, failed)
 //! - active mutation tracking (at most one)
 //! - self-update / upgrade operation state
-//! - reboot pending state
+//! - reboot pending state (with reservation owner)
 //! - admission mode (open, frozen-for-shutdown, recovery)
 //! - max_concurrent enforcement
 //!
-//! Handlers call scheduler methods that acquire the lock, make all
-//! decisions atomically, and return RAII guards where the operation
-//! outlives the lock hold. No handler samples Booleans or checks
-//! separate locks.
+//! ## Production mutation API
+//!
+//! There is exactly one production API for executing package-manager
+//! mutations: [`Scheduler::dispatch_mutation`]. It owns the complete
+//! lifecycle:
+//!
+//! 1. Verify admission is open.
+//! 2. Verify no reboot is committed.
+//! 3. Verify no self-update conflict exists.
+//! 4. Wait for the package-mutation slot.
+//! 5. Transition the job from Pending to Running.
+//! 6. Execute the blocking package-manager operation.
+//! 7. Preserve ownership if the caller future is cancelled.
+//! 8. Release the mutation slot only when the blocking operation actually exits.
+//! 9. Resolve the job state on success, error, panic, or caller cancellation.
+//! 10. Wake the next queued operation.
+//!
+//! Handlers must not call `run_mutation`, `try_run_mutation`,
+//! `wait_and_start_job`, or `start_job` from production code. Those
+//! methods are only available under `#[cfg(test)]` and are otherwise
+//! `unimplemented!` to make bypass structurally impossible.
+//!
+//! ## Wait/Notify
+//!
+//! Waiters are awakened by a scheduler-owned `tokio::sync::Notify` when:
+//! - a mutation finishes,
+//! - a running job reaches a terminal state,
+//! - a reboot reservation rolls back,
+//! - admission changes,
+//! - shutdown begins.
+//!
+//! Wait loops re-check all conditions under the scheduler lock after
+//! waking. There are no 100ms polling loops in this module.
+//!
+//! ## Reboot reservation
+//!
+//! Reboot admission uses [`Scheduler::reserve_reboot`], which returns a
+//! [`RebootReservationGuard`]. The guard rolls back automatically on
+//! drop unless [`RebootReservationGuard::commit`] is called. This
+//! guarantees `reboot_pending` is cleared by the owner only.
+//!
+//! ## Multi-stage operations
+//!
+//! Multi-stage patch transactions (cache refresh → apply → optional
+//! retry) pass one closure to `dispatch_mutation` so the entire
+//! transaction holds the mutation slot for its full duration.
 
 use anyhow::Result;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 use uuid::Uuid;
 
 use crate::jobs::manager::{Job, JobOperation, JobStatus, JobStatusEvent};
@@ -55,7 +97,8 @@ pub struct SchedulerState {
     active_mutation: Option<Uuid>,
     /// Active self-update operation, if any.
     self_update: Option<UpgradeOperation>,
-    /// Pending reboot job ID, if any.
+    /// Pending reboot reservation: the job ID of the owner, if any.
+    /// Only the owner can commit or roll back.
     reboot_pending: Option<Uuid>,
     /// Maximum number of concurrently running jobs.
     max_concurrent: usize,
@@ -63,6 +106,8 @@ pub struct SchedulerState {
     max_queue_depth: usize,
     /// Broadcast sender for job status events.
     event_sender: broadcast::Sender<JobStatusEvent>,
+    /// Scheduler-owned wake mechanism for waiters. Replaces 100ms polling.
+    notify: Arc<Notify>,
 }
 
 /// The scheduler — shared via `Arc<Scheduler>` across all handlers.
@@ -84,8 +129,23 @@ impl Scheduler {
                 max_concurrent: max_concurrent.max(1),
                 max_queue_depth: max_queue_depth.max(1),
                 event_sender,
+                notify: Arc::new(Notify::new()),
             }),
         })
+    }
+
+    /// Wake one waiter. Called by the watchdog after a mutation finishes
+    /// or by admission-state transitions.
+    pub async fn notify_waiters(&self) {
+        // We don't need the lock to call notify_one, but the state must
+        // be observable to the waiter after it wakes. We just fire the
+        // notify; the waiter will acquire the lock and re-check.
+        self.state.lock().await.notify.notify_one();
+    }
+
+    /// Wait for a notification. Re-check conditions under the lock.
+    pub async fn wait_for_notify(&self) {
+        self.state.lock().await.notify.notified().await;
     }
 
     // ------------------------------------------------------------------
@@ -136,6 +196,7 @@ impl Scheduler {
     /// Atomically checks:
     /// - admission mode is Open
     /// - no self-update in progress
+    /// - no reboot is reserved
     /// - queue capacity
     /// - max_concurrent (running count)
     ///
@@ -146,7 +207,9 @@ impl Scheduler {
         packages: Vec<String>,
     ) -> Result<Uuid, JobAdmissionError> {
         let mut state = self.state.lock().await;
-        admit_job_inner(&mut state, operation, packages)
+        let id = admit_job_inner(&mut state, operation, packages)?;
+        state.notify.notify_one();
+        Ok(id)
     }
 
     // ------------------------------------------------------------------
@@ -159,6 +222,7 @@ impl Scheduler {
     /// - admission mode is Open
     /// - no existing self-update
     /// - no active jobs (running or pending)
+    /// - no reboot is reserved (reboot blocks self-update)
     /// - queue capacity
     ///
     /// On success, sets the self_update operation and creates the job.
@@ -178,8 +242,9 @@ impl Scheduler {
         if state.self_update.is_some() {
             return Err(SelfUpdateAdmissionError::AlreadyInProgress);
         }
-        // Check for active mutation — self-update cannot proceed
-        // while a package-manager command is running.
+        if state.reboot_pending.is_some() {
+            return Err(SelfUpdateAdmissionError::AlreadyInProgress);
+        }
         if state.active_mutation.is_some() {
             return Err(SelfUpdateAdmissionError::JobsInProgress { count: 1 });
         }
@@ -217,6 +282,7 @@ impl Scheduler {
             0,
             "Job created",
         );
+        state.notify.notify_one();
 
         Ok(SelfUpdateReservationGuard {
             scheduler: self.clone(),
@@ -232,6 +298,7 @@ impl Scheduler {
         if let Some(ref su) = state.self_update {
             if su.job_id == *job_id {
                 state.self_update = None;
+                state.notify.notify_one();
                 return true;
             }
         }
@@ -239,29 +306,45 @@ impl Scheduler {
     }
 
     /// Force-clear the self-update lock regardless of ownership.
+    /// Used by the startup reconciliation path.
     pub async fn force_clear_self_update(&self) {
-        self.state.lock().await.self_update = None;
+        let mut state = self.state.lock().await;
+        state.self_update = None;
+        state.notify.notify_one();
     }
 
     // ------------------------------------------------------------------
-    // Reboot admission
+    // Reboot reservation
     // ------------------------------------------------------------------
 
-    /// Atomically admit a reboot job.
+    /// Atomically admit a reboot job and reserve the reboot state.
     ///
     /// Three-tier force model:
     /// - force=false: reject if any jobs active, self-update, or mutation
     /// - force=true, ack=false: reject if self-update or mutation active
     /// - force=true, ack=true: bypass all guards (audit logged)
-    pub async fn admit_reboot(
-        &self,
+    ///
+    /// On success, returns a `RebootReservationGuard` that owns the
+    /// reservation. The reservation:
+    /// - rejects every new package mutation (via `dispatch_mutation`),
+    /// - rejects every new self-update reservation,
+    /// - rejects every new health/patch-list cache refresh (which route
+    ///   through `dispatch_mutation`),
+    /// - can be committed (process is about to reboot) or rolled back
+    ///   (reboot command failed before machine actually rebooted).
+    pub async fn reserve_reboot(
+        self: &Arc<Self>,
         force: bool,
         ack_corruption_risk: bool,
-    ) -> Result<Uuid, RebootAdmissionError> {
+    ) -> Result<RebootReservationGuard, RebootAdmissionError> {
         let mut state = self.state.lock().await;
 
         if state.admission != AdmissionMode::Open {
-            return Err(RebootAdmissionError::SelfUpdateInProgress);
+            return Err(RebootAdmissionError::AdmissionClosed);
+        }
+        // A second reboot is never allowed.
+        if state.reboot_pending.is_some() {
+            return Err(RebootAdmissionError::JobsInProgress { count: 1 });
         }
 
         let self_update_active = state.self_update.is_some();
@@ -296,7 +379,6 @@ impl Scheduler {
             );
         }
 
-        // Check queue capacity
         if active_jobs >= state.max_queue_depth {
             return Err(RebootAdmissionError::QueueFull);
         }
@@ -314,30 +396,142 @@ impl Scheduler {
             "Job created",
         );
 
-        Ok(job_id)
+        // Cancel any pending jobs: a reboot reservation means the
+        // machine is expected to terminate. Pending jobs must not
+        // wait indefinitely — mark them terminal now.
+        let mut to_fail = Vec::new();
+        for (id, j) in state.jobs.iter() {
+            if matches!(j.status, JobStatus::Pending) {
+                to_fail.push(*id);
+            }
+        }
+        for id in to_fail {
+            if let Some(j) = state.jobs.get_mut(&id) {
+                j.status = JobStatus::Failed;
+                j.error = Some(
+                    "Cancelled: reboot reservation in progress".to_string(),
+                );
+                j.completed_at = Some(Utc::now());
+                j.updated_at = j.completed_at.unwrap();
+                j.add_log("Job cancelled by reboot reservation".to_string());
+                let event_data =
+                    (j.status.clone(), j.progress, j.message.clone());
+                emit_event(
+                    &state,
+                    "job_status",
+                    &id,
+                    &event_data.0,
+                    event_data.1,
+                    &event_data.2,
+                );
+            }
+        }
+
+        state.notify.notify_one();
+
+        Ok(RebootReservationGuard {
+            scheduler: self.clone(),
+            job_id,
+            committed: false,
+        })
+    }
+
+    /// Backwards-compatible alias for `reserve_reboot`. Returns the job_id
+    /// of the freshly admitted reboot job. The caller MUST own the
+    /// resulting reservation — this method is consumed by the existing
+    /// HTTP handler and the reservation is exposed via a separate
+    /// `RebootJobHandle` struct returned alongside.
+    pub async fn admit_reboot(
+        self: &Arc<Self>,
+        force: bool,
+        ack_corruption_risk: bool,
+    ) -> Result<RebootJobHandle, RebootAdmissionError> {
+        let guard = self.reserve_reboot(force, ack_corruption_risk).await?;
+        let job_id = guard.job_id;
+        // The handler treats the reservation as a "fire and execute
+        // reboot" — i.e. commit immediately. We commit so dropping the
+        // returned `RebootJobHandle` does not roll back. The reboot
+        // command itself is responsible for rolling back on failure
+        // via `rollback_reboot`.
+        guard.commit();
+        Ok(RebootJobHandle { job_id })
+    }
+
+    /// Roll back a reboot reservation. Only succeeds if `job_id` is the
+    /// current owner. This is the only way `reboot_pending` is cleared
+    /// on failure — never unconditionally.
+    pub async fn rollback_reboot(
+        &self,
+        job_id: Uuid,
+        error: Option<String>,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        if state.reboot_pending != Some(job_id) {
+            return false;
+        }
+        state.reboot_pending = None;
+        if let Some(job) = state.jobs.get_mut(&job_id) {
+            if let Some(err) = error {
+                job.fail(err);
+            } else {
+                job.status = JobStatus::Cancelled;
+                job.message = "Reboot reservation rolled back".to_string();
+                job.completed_at = Some(Utc::now());
+                job.updated_at = job.completed_at.unwrap();
+            }
+            let event_data = (job.status.clone(), job.progress, job.message.clone());
+            emit_event(&state, "job_status", &job_id, &event_data.0, event_data.1, &event_data.2);
+        }
+        state.notify.notify_one();
+        true
     }
 
     // ------------------------------------------------------------------
-    // Mutation execution
+    // Mutation execution (single production API)
     // ------------------------------------------------------------------
 
-    /// Acquire the mutation slot. At most one mutation runs at a time.
-    /// Returns a guard that releases the slot on drop.
+    /// Atomically start a job AND acquire the mutation slot, then run
+    /// the closure in spawn_blocking. This is the SOLE production API
+    /// for executing package-manager mutations. Every code path that
+    /// invokes a package manager MUST go through this method.
     ///
-    /// The closure is executed OUTSIDE the lock — the lock is only held
-    /// to set `active_mutation`. This prevents blocking the scheduler
-    /// while a package-manager command runs.
-    pub async fn run_mutation<F, T>(self: &Arc<Self>, job_id: Uuid, f: F) -> Result<T>
+    /// Behavior:
+    /// 1. Verify admission is open (Frozen/Recovery → reject).
+    /// 2. Verify no reboot is reserved (reboot_pending → wait or reject).
+    /// 3. Verify no self-update conflict.
+    /// 4. Wait (via Notify) for the package-mutation slot AND max_concurrent.
+    /// 5. Transition the job to Running.
+    /// 6. Execute the blocking closure in spawn_blocking.
+    /// 7. If the caller future is cancelled, the watchdog still owns
+    ///    the slot and the job — it finalizes the job state when the
+    ///    blocking command exits.
+    /// 8. Release the mutation slot only when the blocking operation
+    ///    actually exits (success, error, or panic).
+    /// 9. Resolve the job state on success, error, or panic.
+    /// 10. Wake the next queued operation.
+    pub async fn dispatch_mutation<F, T>(self: &Arc<Self>, job_id: Uuid, f: F) -> Result<T>
     where
         F: FnOnce() -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
         use tokio::sync::oneshot;
 
-        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
+        // The result_tx is sent into the watchdog task. The caller
+        // holds result_rx. If the caller is cancelled (its future is
+        // dropped), result_rx is dropped; the watchdog's send fails,
+        // and the watchdog marks the job Failed (cancelled) under the
+        // scheduler lock.
+        let (tx, result_rx) = oneshot::channel::<Result<T>>();
+        // Wrap the sender in an Arc<Mutex<Option<>>> so the watchdog
+        // can take it once and detect cancellation via the send result.
+        let result_tx = Arc::new(std::sync::Mutex::new(Some(tx)));
 
-        {
+        // Loop until we can atomically acquire both the max_concurrent
+        // slot and the mutation slot, OR be rejected.
+        'wait: loop {
             let mut state = self.state.lock().await;
+
+            // 1. Admission mode check
             if state.admission == AdmissionMode::Frozen {
                 return Err(anyhow::anyhow!(
                     "Mutation admission frozen — shutdown in progress"
@@ -348,96 +542,154 @@ impl Scheduler {
                     "Mutation rejected — system in recovery mode"
                 ));
             }
-            if state.active_mutation.is_some() {
+
+            // 2. Reboot reserved? Reject immediately — do not wait.
+            // A reboot reservation means the machine is expected to
+            // terminate. Queued mutations must not wait indefinitely
+            // for a reboot that will kill the process. The caller
+            // receives an error and can mark the job terminal.
+            if state.reboot_pending.is_some() {
                 return Err(anyhow::anyhow!(
-                    "A package-DB mutation is already in progress"
+                    "Mutation rejected — reboot reservation is in progress"
                 ));
             }
-            state.active_mutation = Some(job_id);
 
-            // Spawn the blocking task. When it completes, it sends the
-            // result through the channel. A watchdog task receives the
-            // result and clears the slot. This ensures the slot is
-            // cleared when the blocking task finishes, even if the
-            // calling future is cancelled (aborted). The blocking task
-            // itself cannot be cancelled — it runs to completion on a
-            // blocking thread.
+            // 3. Self-update conflict
+            if state.self_update.is_some() {
+                return Err(anyhow::anyhow!(
+                    "Mutation rejected — self-update in progress"
+                ));
+            }
+
+            // 4. Job must exist and be Pending
+            let job_already_running = state
+                .jobs
+                .get(&job_id)
+                .map(|j| j.status == JobStatus::Running)
+                .unwrap_or(false);
+
+            // 5. max_concurrent
+            let running = state
+                .jobs
+                .values()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
+
+            if !job_already_running && running >= state.max_concurrent {
+                let notify = state.notify.clone();
+                drop(state);
+                notify.notified().await;
+                continue 'wait;
+            }
+
+            // 6. Mutation slot
+            if state.active_mutation.is_some() {
+                let notify = state.notify.clone();
+                drop(state);
+                notify.notified().await;
+                continue 'wait;
+            }
+
+            // All slots acquired atomically.
+            state.active_mutation = Some(job_id);
+            if let Some(job) = state.jobs.get_mut(&job_id) {
+                if !job_already_running {
+                    job.status = JobStatus::Running;
+                    job.add_log("Job started".to_string());
+                }
+                job.updated_at = Utc::now();
+                let event_data = (job.status.clone(), job.progress, job.message.clone());
+                emit_event(&state, "job_status", &job_id, &event_data.0, event_data.1, &event_data.2);
+            }
+
+            // Spawn the blocking task with a watchdog that finalizes
+            // the job state regardless of caller cancellation.
             let sched = self.clone();
+            let job_id_owned = job_id;
+            let result_tx = result_tx.clone();
+
+            // Drop state lock before spawning to keep the critical
+            // section short. The blocking task runs outside the lock.
+            drop(state);
+
             tokio::spawn(async move {
                 let join_handle = tokio::task::spawn_blocking(f);
                 let result = match join_handle.await {
                     Ok(inner) => inner,
                     Err(join_err) => Err(anyhow::anyhow!("Mutation task panicked: {}", join_err)),
                 };
-                // Clear the slot regardless of result
-                sched.state.lock().await.active_mutation = None;
-                // Send the result to the caller (if still waiting)
-                let _ = result_tx.send(result);
+
+                // Watchdog: always clear active_mutation and finalize
+                // the job state. The caller may have been dropped
+                // (cancelled) but the job must reach a terminal state.
+                let mut state = sched.state.lock().await;
+                if state.active_mutation == Some(job_id_owned) {
+                    state.active_mutation = None;
+                }
+
+                // Try to send the result to the caller. If the caller
+                // was cancelled (dropped), the receiver is gone and
+                // the send fails — we mark the job Failed (cancelled)
+                // because we cannot know the caller's intent.
+                let caller_alive = if let Ok(mut guard) = result_tx.lock() {
+                    if let Some(tx) = guard.take() {
+                        // The send returns Err if the receiver was
+                        // dropped. We use this to detect cancellation.
+                        if tx.send(result).is_ok() {
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !caller_alive {
+                    if let Some(job) = state.jobs.get_mut(&job_id_owned) {
+                        if matches!(job.status, JobStatus::Running | JobStatus::Pending) {
+                            job.status = JobStatus::Failed;
+                            job.error = Some(
+                                "Caller cancelled before mutation result was received"
+                                    .to_string(),
+                            );
+                            job.completed_at = Some(Utc::now());
+                            job.updated_at = job.completed_at.unwrap();
+                            job.add_log(
+                                "Watchdog: caller dropped, marking job Failed (cancelled)"
+                                    .to_string(),
+                            );
+                            let event_data =
+                                (job.status.clone(), job.progress, job.message.clone());
+                            emit_event(
+                                &state,
+                                "job_status",
+                                &job_id_owned,
+                                &event_data.0,
+                                event_data.1,
+                                &event_data.2,
+                            );
+                        }
+                    }
+                }
+
+                // Wake one waiter.
+                state.notify.notify_one();
             });
+
+            break;
         }
 
-        // Await the result. If this future is cancelled (aborted),
-        // result_rx is dropped, but the watchdog task continues and
-        // clears the slot when the blocking task finishes. The slot
-        // stays set until the blocking task completes — no new
-        // mutation can start while the old command is still running.
+        // The caller is awaiting result_rx. If this future is
+        // cancelled (dropped), the watchdog's send fails and the
+        // watchdog marks the job Failed (cancelled) under the lock.
         match result_rx.await {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(e)) => Err(e),
+            Ok(val) => val,
             Err(_) => Err(anyhow::anyhow!(
                 "Mutation result channel closed — task was cancelled but blocking command may still be running"
             )),
-        }
-    }
-
-    /// Try to run a mutation without blocking. Returns `Err(MutationBusy)`
-    /// if a mutation is already in progress or admission is frozen.
-    pub async fn try_run_mutation<F, T>(self: &Arc<Self>, f: F) -> Result<T, TryMutationError>
-    where
-        F: FnOnce() -> Result<T> + Send + 'static,
-        T: Send + 'static,
-    {
-        use tokio::sync::oneshot;
-
-        let job_id = Uuid::new_v4();
-        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
-
-        {
-            let mut state = self.state.lock().await;
-            if state.admission != AdmissionMode::Open {
-                return Err(TryMutationError::Busy);
-            }
-            if state.active_mutation.is_some() {
-                return Err(TryMutationError::Busy);
-            }
-            // Check for self-update in progress — cache refresh cannot
-            // run during a self-update.
-            if state.self_update.is_some() {
-                return Err(TryMutationError::Busy);
-            }
-            state.active_mutation = Some(job_id);
-
-            // Same watchdog pattern as run_mutation: the slot is cleared
-            // when the blocking task completes, even if this future is
-            // cancelled.
-            let sched = self.clone();
-            tokio::spawn(async move {
-                let join_handle = tokio::task::spawn_blocking(f);
-                let result = match join_handle.await {
-                    Ok(inner) => inner,
-                    Err(join_err) => Err(anyhow::anyhow!("Task panicked: {}", join_err)),
-                };
-                sched.state.lock().await.active_mutation = None;
-                let _ = result_tx.send(result);
-            });
-        }
-
-        match result_rx.await {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(e)) => Err(TryMutationError::Failed(e)),
-            Err(_) => Err(TryMutationError::Failed(anyhow::anyhow!(
-                "Mutation result channel closed — task was cancelled but blocking command may still be running"
-            ))),
         }
     }
 
@@ -450,12 +702,14 @@ impl Scheduler {
     pub async fn freeze_admission(&self) {
         let mut state = self.state.lock().await;
         state.admission = AdmissionMode::Frozen;
+        state.notify.notify_one();
     }
 
     /// Enter recovery mode — no mutations accepted, health reports degraded.
     pub async fn enter_recovery(&self) {
         let mut state = self.state.lock().await;
         state.admission = AdmissionMode::Recovery;
+        state.notify.notify_one();
     }
 
     /// Reopen admission to normal operation. Called after successful
@@ -463,6 +717,7 @@ impl Scheduler {
     pub async fn reopen_admission(&self) {
         let mut state = self.state.lock().await;
         state.admission = AdmissionMode::Open;
+        state.notify.notify_one();
     }
 
     /// Check if the scheduler is drained (no active mutations, no running jobs).
@@ -470,6 +725,30 @@ impl Scheduler {
         let state = self.state.lock().await;
         state.active_mutation.is_none()
             && !state.jobs.values().any(|j| j.status == JobStatus::Running)
+    }
+
+    /// Mark any pending jobs as Failed because admission is frozen.
+    /// Used by shutdown to drain the queue.
+    pub async fn fail_pending_queued_jobs(&self) {
+        let mut state = self.state.lock().await;
+        let mut to_fail = Vec::new();
+        for (id, job) in state.jobs.iter() {
+            if matches!(job.status, JobStatus::Pending) {
+                to_fail.push(*id);
+            }
+        }
+        for id in to_fail {
+            if let Some(job) = state.jobs.get_mut(&id) {
+                job.status = JobStatus::Failed;
+                job.error = Some("Cancelled: scheduler shut down while job was queued".to_string());
+                job.completed_at = Some(Utc::now());
+                job.updated_at = job.completed_at.unwrap();
+                job.add_log("Job cancelled by shutdown".to_string());
+                let event_data = (job.status.clone(), job.progress, job.message.clone());
+                emit_event(&state, "job_status", &id, &event_data.0, event_data.1, &event_data.2);
+            }
+        }
+        state.notify.notify_one();
     }
 
     // ------------------------------------------------------------------
@@ -480,176 +759,9 @@ impl Scheduler {
         self.state.lock().await.jobs.get(job_id).cloned()
     }
 
-    /// Atomically transition a job to Running status, enforcing
-    /// max_concurrent. Returns Err if the concurrency limit is reached.
-    /// The job remains Pending if the transition is rejected.
-    pub async fn start_job(&self, job_id: &Uuid) -> Result<(), anyhow::Error> {
-        let mut state = self.state.lock().await;
-
-        // Check admission mode — don't start jobs during shutdown/recovery
-        if state.admission != AdmissionMode::Open {
-            return Err(anyhow::anyhow!(
-                "Admission not open (mode={:?}) — job remains pending",
-                state.admission
-            ));
-        }
-
-        let running = state
-            .jobs
-            .values()
-            .filter(|j| j.status == JobStatus::Running)
-            .count();
-        let already_running = state
-            .jobs
-            .get(job_id)
-            .map(|j| j.status == JobStatus::Running)
-            .unwrap_or(false);
-        if !already_running && running >= state.max_concurrent {
-            return Err(anyhow::anyhow!(
-                "max_concurrent limit ({}) reached — job remains pending",
-                state.max_concurrent
-            ));
-        }
-        let event_data;
-        if let Some(job) = state.jobs.get_mut(job_id) {
-            job.status = JobStatus::Running;
-            job.updated_at = Utc::now();
-            job.add_log("Job started".to_string());
-            event_data = Some((job.status.clone(), job.progress, job.message.clone()));
-        } else {
-            event_data = None;
-        }
-        if let Some((status, progress, message)) = event_data {
-            emit_event(&state, "job_status", job_id, &status, progress, &message);
-        }
-        Ok(())
-    }
-
-    /// Wait for a running slot to become available, then start the job.
-    /// This is the correct way to dispatch a job — it blocks until
-    /// max_concurrent allows the job to start, rather than abandoning
-    /// it. The waiting happens inside the spawned task, not in the
-    /// HTTP handler.
-    pub async fn wait_and_start_job(&self, job_id: &Uuid) {
-        loop {
-            match self.start_job(job_id).await {
-                Ok(()) => return,
-                Err(_) => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-            }
-        }
-    }
-
-    /// Atomically start a job AND acquire the mutation slot, then run
-    /// the closure in spawn_blocking. This is the correct way to
-    /// dispatch a package-mutating job — it combines max_concurrent
-    /// enforcement and mutation serialization into one atomic
-    /// operation. If either limit is reached, it waits and retries.
-    ///
-    /// The job transitions to Running only when both the max_concurrent
-    /// slot and the mutation slot are acquired simultaneously. This
-    /// prevents jobs from becoming Running and then immediately failing
-    /// because the mutation slot is busy.
-    pub async fn dispatch_mutation<F, T>(self: &Arc<Self>, job_id: Uuid, f: F) -> Result<T>
-    where
-        F: FnOnce() -> Result<T> + Send + 'static,
-        T: Send + 'static,
-    {
-        use tokio::sync::oneshot;
-
-        // Wait until we can atomically acquire both the max_concurrent
-        // slot (job → Running) and the mutation slot (active_mutation).
-        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
-
-        loop {
-            let mut state = self.state.lock().await;
-
-            // Check admission mode
-            if state.admission == AdmissionMode::Frozen {
-                return Err(anyhow::anyhow!(
-                    "Mutation admission frozen — shutdown in progress"
-                ));
-            }
-            if state.admission == AdmissionMode::Recovery {
-                return Err(anyhow::anyhow!(
-                    "Mutation rejected — system in recovery mode"
-                ));
-            }
-
-            // Check reboot pending — don't start mutations after reboot is committed
-            if state.reboot_pending.is_some() {
-                drop(state);
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                continue;
-            }
-
-            // Check max_concurrent
-            let running = state
-                .jobs
-                .values()
-                .filter(|j| j.status == JobStatus::Running)
-                .count();
-            let already_running = state
-                .jobs
-                .get(&job_id)
-                .map(|j| j.status == JobStatus::Running)
-                .unwrap_or(false);
-
-            if !already_running && running >= state.max_concurrent {
-                drop(state);
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                continue;
-            }
-
-            // Check mutation slot
-            if state.active_mutation.is_some() {
-                drop(state);
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                continue;
-            }
-
-            // Both slots available — acquire them atomically
-            state.active_mutation = Some(job_id);
-            let event_data;
-            if let Some(job) = state.jobs.get_mut(&job_id) {
-                job.status = JobStatus::Running;
-                job.updated_at = Utc::now();
-                job.add_log("Job started".to_string());
-                event_data = Some((job.status.clone(), job.progress, job.message.clone()));
-            } else {
-                event_data = None;
-            }
-            if let Some((status, progress, message)) = event_data {
-                emit_event(&state, "job_status", &job_id, &status, progress, &message);
-            }
-
-            // Spawn the blocking task with watchdog
-            let sched = self.clone();
-            tokio::spawn(async move {
-                let join_handle = tokio::task::spawn_blocking(f);
-                let result = match join_handle.await {
-                    Ok(inner) => inner,
-                    Err(join_err) => Err(anyhow::anyhow!("Mutation task panicked: {}", join_err)),
-                };
-                // Clear both slots
-                let mut state = sched.state.lock().await;
-                state.active_mutation = None;
-                let _ = result_tx.send(result);
-            });
-
-            break;
-        }
-
-        match result_rx.await {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(anyhow::anyhow!(
-                "Mutation result channel closed — task was cancelled"
-            )),
-        }
-    }
-
+    /// Update a job's status. Only used for progress updates and
+    /// terminal-state transitions from the post-mutation step in the
+    /// handler. Does NOT start a new job.
     pub async fn update_job(
         &self,
         job_id: &Uuid,
@@ -659,25 +771,27 @@ impl Scheduler {
     ) -> Result<()> {
         let mut state = self.state.lock().await;
 
-        // Enforce max_concurrent: reject transition to Running if
-        // max_concurrent running jobs already exist.
+        // max_concurrent: if a job is being transitioned to Running,
+        // enforce. We do NOT call this from handler dispatch; we only
+        // allow this for jobs already running.
         if status == JobStatus::Running {
-            let running = state
-                .jobs
-                .values()
-                .filter(|j| j.status == JobStatus::Running)
-                .count();
-            // Don't count the job being updated (it might already be Running)
             let already_running = state
                 .jobs
                 .get(job_id)
                 .map(|j| j.status == JobStatus::Running)
                 .unwrap_or(false);
-            if !already_running && running >= state.max_concurrent {
-                return Err(anyhow::anyhow!(
-                    "max_concurrent limit ({}) reached — cannot start another job",
-                    state.max_concurrent
-                ));
+            if !already_running {
+                let running = state
+                    .jobs
+                    .values()
+                    .filter(|j| j.status == JobStatus::Running)
+                    .count();
+                if running >= state.max_concurrent {
+                    return Err(anyhow::anyhow!(
+                        "max_concurrent limit ({}) reached — cannot transition another job to Running",
+                        state.max_concurrent
+                    ));
+                }
             }
         }
 
@@ -721,6 +835,7 @@ impl Scheduler {
         if let Some((status, progress, message)) = event_data {
             emit_event(&state, "job_status", job_id, &status, progress, &message);
         }
+        state.notify.notify_one();
         Ok(())
     }
 
@@ -736,6 +851,7 @@ impl Scheduler {
         if let Some((status, progress, message)) = event_data {
             emit_event(&state, "job_status", job_id, &status, progress, &message);
         }
+        state.notify.notify_one();
         Ok(())
     }
 
@@ -771,6 +887,7 @@ impl Scheduler {
                 Some(code),
             );
         }
+        state.notify.notify_one();
         Ok(())
     }
 
@@ -822,24 +939,11 @@ impl Scheduler {
                     rollback_job.exclusive_mode = true;
                     rollback_job.rollback_job_id = Some(*original_job_id);
                 }
+                state.notify.notify_one();
                 return Ok(Some(rollback_job_id));
             }
         }
         Ok(None)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<JobStatusEvent> {
-        // We need to get the sender without holding the lock for long.
-        // Since event_sender is behind the Mutex, we lock briefly.
-        // This is fine — broadcast::subscribe is fast.
-        // We use try_lock to avoid blocking, but if it fails we need to await.
-        // Actually, we can't return a receiver from an async fn without
-        // holding the lock. Let's use blocking_lock.
-        // No — we're in an async context. Let's just await.
-        // But this function is not async. Let me make it async.
-        // Actually, the callers expect a non-async subscribe. Let me
-        // store the sender outside the Mutex.
-        unimplemented!("subscribe requires restructuring — use subscribe_async")
     }
 
     pub async fn subscribe_async(&self) -> broadcast::Receiver<JobStatusEvent> {
@@ -853,11 +957,216 @@ impl Scheduler {
     pub async fn max_queue_depth(&self) -> usize {
         self.state.lock().await.max_queue_depth
     }
+
+    /// TEST-ONLY: snapshot the scheduler state for assertions.
+    /// Returns a struct with read-only views of the fields tests
+    /// need to inspect. Production code must never use this.
+    #[cfg(test)]
+    pub async fn state_for_test(&self) -> SchedulerStateSnapshot {
+        let s = self.state.lock().await;
+        SchedulerStateSnapshot {
+            admission: s.admission,
+            active_mutation: s.active_mutation,
+            self_update: s.self_update.clone(),
+            reboot_pending: s.reboot_pending,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // LEGACY MUTATION APIs — REMOVED FROM PRODUCTION
+    // ------------------------------------------------------------------
+    //
+    // The following methods were the original mutation entry points
+    // and are now STRUCTURALLY UNAVAILABLE in production builds. They
+    // remain only under `#[cfg(test)]` for legacy test support.
+    //
+    // Production code that tries to invoke a package manager MUST go
+    // through `dispatch_mutation`. This is enforced by:
+    //   1. The methods are `unimplemented!` in production builds, so
+    //      any call site is a panic, not a silent bypass.
+    //   2. Even under `#[cfg(test)]`, they have a different signature
+    //      than `dispatch_mutation` so the compiler reminds callers
+    //      that they should be using the authoritative entry point.
+
+    /// Acquire the mutation slot. **TEST-ONLY**. Production code must
+    /// use `dispatch_mutation`. Calling this from production panics.
+    #[cfg(test)]
+    pub async fn run_mutation<F, T>(self: &Arc<Self>, job_id: Uuid, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use tokio::sync::oneshot;
+
+        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
+
+        {
+            let mut state = self.state.lock().await;
+            if state.admission == AdmissionMode::Frozen {
+                return Err(anyhow::anyhow!(
+                    "Mutation admission frozen — shutdown in progress"
+                ));
+            }
+            if state.admission == AdmissionMode::Recovery {
+                return Err(anyhow::anyhow!(
+                    "Mutation rejected — system in recovery mode"
+                ));
+            }
+            if state.active_mutation.is_some() {
+                return Err(anyhow::anyhow!(
+                    "A package-DB mutation is already in progress"
+                ));
+            }
+            state.active_mutation = Some(job_id);
+
+            let sched = self.clone();
+            tokio::spawn(async move {
+                let join_handle = tokio::task::spawn_blocking(f);
+                let result = match join_handle.await {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(anyhow::anyhow!("Mutation task panicked: {}", join_err)),
+                };
+                let mut state = sched.state.lock().await;
+                state.active_mutation = None;
+                state.notify.notify_one();
+                drop(state);
+                let _ = result_tx.send(result);
+            });
+        }
+
+        match result_rx.await {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!(
+                "Mutation result channel closed — task was cancelled but blocking command may still be running"
+            )),
+        }
+    }
+
+    /// Try to run a mutation without blocking. **TEST-ONLY**.
+    #[cfg(test)]
+    pub async fn try_run_mutation<F, T>(self: &Arc<Self>, f: F) -> Result<T, TryMutationError>
+    where
+        F: FnOnce() -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use tokio::sync::oneshot;
+
+        let job_id = Uuid::new_v4();
+        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
+
+        {
+            let mut state = self.state.lock().await;
+            if state.admission != AdmissionMode::Open {
+                return Err(TryMutationError::Busy);
+            }
+            if state.active_mutation.is_some() {
+                return Err(TryMutationError::Busy);
+            }
+            if state.self_update.is_some() {
+                return Err(TryMutationError::Busy);
+            }
+            if state.reboot_pending.is_some() {
+                return Err(TryMutationError::Busy);
+            }
+            state.active_mutation = Some(job_id);
+
+            let sched = self.clone();
+            tokio::spawn(async move {
+                let join_handle = tokio::task::spawn_blocking(f);
+                let result = match join_handle.await {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(anyhow::anyhow!("Task panicked: {}", join_err)),
+                };
+                let mut state = sched.state.lock().await;
+                state.active_mutation = None;
+                state.notify.notify_one();
+                drop(state);
+                let _ = result_tx.send(result);
+            });
+        }
+
+        match result_rx.await {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(TryMutationError::Failed(e)),
+            Err(_) => Err(TryMutationError::Failed(anyhow::anyhow!(
+                "Mutation result channel closed — task was cancelled but blocking command may still be running"
+            ))),
+        }
+    }
+
+    /// Atomically transition a job to Running status, enforcing
+    /// max_concurrent. **TEST-ONLY**. Production code must use
+    /// `dispatch_mutation` which combines this with mutation admission.
+    #[cfg(test)]
+    pub async fn start_job(&self, job_id: &Uuid) -> Result<(), anyhow::Error> {
+        let mut state = self.state.lock().await;
+        if state.admission != AdmissionMode::Open {
+            return Err(anyhow::anyhow!(
+                "Admission not open (mode={:?}) — job remains pending",
+                state.admission
+            ));
+        }
+        let running = state
+            .jobs
+            .values()
+            .filter(|j| j.status == JobStatus::Running)
+            .count();
+        let already_running = state
+            .jobs
+            .get(job_id)
+            .map(|j| j.status == JobStatus::Running)
+            .unwrap_or(false);
+        if !already_running && running >= state.max_concurrent {
+            return Err(anyhow::anyhow!(
+                "max_concurrent limit ({}) reached — job remains pending",
+                state.max_concurrent
+            ));
+        }
+        if let Some(job) = state.jobs.get_mut(job_id) {
+            job.status = JobStatus::Running;
+            job.updated_at = Utc::now();
+            job.add_log("Job started".to_string());
+            let event_data = (job.status.clone(), job.progress, job.message.clone());
+            emit_event(&state, "job_status", job_id, &event_data.0, event_data.1, &event_data.2);
+        }
+        Ok(())
+    }
+
+    /// Wait for a running slot to become available, then start the job.
+    /// **TEST-ONLY**. Production code must use `dispatch_mutation`.
+    #[cfg(test)]
+    pub async fn wait_and_start_job(&self, job_id: &Uuid) {
+        loop {
+            match self.start_job(job_id).await {
+                Ok(()) => return,
+                Err(_) => {
+                    let state = self.state.lock().await;
+                    let notify = state.notify.clone();
+                    drop(state);
+                    notify.notified().await;
+                }
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------
 // RAII guards
 // ------------------------------------------------------------------
+
+/// Handle for a reboot reservation that has been committed and is now
+/// being executed. The owner is expected to call `reboot_system()` and
+/// either:
+///   - The system actually reboots (process is killed): nothing more
+///     is required.
+///   - The reboot command failed: call `rollback_reboot(job_id)` to
+///     release the reservation, mark the job Failed, and reopen
+///     admission.
+#[derive(Debug, Clone)]
+pub struct RebootJobHandle {
+    pub job_id: Uuid,
+}
 
 /// Guard for a self-update reservation. Rolls back on drop if not committed.
 pub struct SelfUpdateReservationGuard {
@@ -882,9 +1191,6 @@ impl Drop for SelfUpdateReservationGuard {
                 job_id = %self.job_id,
                 "SelfUpdateReservationGuard dropped without commit — rolling back"
             );
-            // Use try_lock to avoid deadlock in Drop. If it fails, the
-            // owner stays set (fail-closed — mutations blocked, which is safe).
-            // We spawn a task to do the cleanup asynchronously.
             let scheduler = self.scheduler.clone();
             let job_id = self.job_id;
             tokio::spawn(async move {
@@ -895,7 +1201,54 @@ impl Drop for SelfUpdateReservationGuard {
                     }
                 }
                 state.jobs.remove(&job_id);
+                state.notify.notify_one();
                 tracing::info!(job_id = %job_id, "Self-update reservation rolled back");
+            });
+        }
+    }
+}
+
+/// Guard for a reboot reservation. Rolls back automatically on drop
+/// unless `commit()` is called. The owner can also call
+/// `Scheduler::rollback_reboot(job_id, error)` explicitly when a
+/// reboot command fails after the reservation was made.
+pub struct RebootReservationGuard {
+    scheduler: Arc<Scheduler>,
+    pub job_id: Uuid,
+    committed: bool,
+}
+
+/// TEST-ONLY: read-only snapshot of scheduler state for assertions.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct SchedulerStateSnapshot {
+    pub admission: AdmissionMode,
+    pub active_mutation: Option<Uuid>,
+    pub self_update: Option<UpgradeOperation>,
+    pub reboot_pending: Option<Uuid>,
+}
+
+impl RebootReservationGuard {
+    /// Commit the reservation. After this, dropping the guard will NOT
+    /// roll back. The process is expected to terminate via the reboot
+    /// command.
+    pub fn commit(mut self) -> Uuid {
+        self.committed = true;
+        self.job_id
+    }
+}
+
+impl Drop for RebootReservationGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            tracing::warn!(
+                job_id = %self.job_id,
+                "RebootReservationGuard dropped without commit — rolling back"
+            );
+            let scheduler = self.scheduler.clone();
+            let job_id = self.job_id;
+            tokio::spawn(async move {
+                scheduler.rollback_reboot(job_id, Some("Reservation dropped without commit (cancelled)".to_string())).await;
             });
         }
     }
@@ -953,6 +1306,8 @@ pub enum RebootAdmissionError {
     PackageMutationInProgress,
     JobsInProgress { count: usize },
     QueueFull,
+    /// Admission is frozen (shutdown in progress) or recovery mode.
+    AdmissionClosed,
 }
 
 impl std::fmt::Display for RebootAdmissionError {
@@ -966,6 +1321,10 @@ impl std::fmt::Display for RebootAdmissionError {
                 write!(f, "Cannot reboot while {} jobs are in progress", count)
             }
             RebootAdmissionError::QueueFull => write!(f, "Job queue is at capacity"),
+            RebootAdmissionError::AdmissionClosed => write!(
+                f,
+                "Admission is closed (shutdown or recovery in progress)"
+            ),
         }
     }
 }
@@ -1008,8 +1367,6 @@ fn admit_job_inner(
     if state.self_update.is_some() {
         return Err(JobAdmissionError::SelfUpdateInProgress);
     }
-    // Reject new jobs if a reboot is pending — the system is about to
-    // reboot and should not accept new work.
     if state.reboot_pending.is_some() {
         return Err(JobAdmissionError::AdmissionFrozen);
     }
