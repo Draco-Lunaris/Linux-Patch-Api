@@ -182,8 +182,9 @@ log "Step 6: Kernel/initramfs regression test..."
 sudo apt-get install -y initramfs-tools 2>&1 | tee -a "$ARTIFACT_DIR/install.log" || true
 
 # Determine the currently installed kernel package version
-INSTALLED_KERNEL_PKG=$(dpkg -l "linux-image-*" 2>/dev/null | grep '^ii' | awk '{print $2}' | head -1)
-INSTALLED_KERNEL_VER=$(dpkg -l "$INSTALLED_KERNEL_PKG" 2>/dev/null | grep '^ii' | awk '{print $3}' | cut -d. -f1-3)
+# Use || true because dpkg -l returns non-zero when no package matches
+INSTALLED_KERNEL_PKG=$(dpkg -l "linux-image-*" 2>/dev/null | grep '^ii' | awk '{print $2}' | head -1 || true)
+INSTALLED_KERNEL_VER=$(dpkg -l "$INSTALLED_KERNEL_PKG" 2>/dev/null | grep '^ii' | awk '{print $3}' | cut -d. -f1-3 || true)
 log "Installed kernel package: $INSTALLED_KERNEL_PKG ($INSTALLED_KERNEL_VER)"
 
 if [[ -z "$INSTALLED_KERNEL_PKG" || -z "$INSTALLED_KERNEL_VER" ]]; then
