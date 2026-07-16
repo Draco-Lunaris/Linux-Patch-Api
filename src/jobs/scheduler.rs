@@ -403,12 +403,18 @@ impl Scheduler {
             "Job created",
         );
 
-        // Cancel any pending jobs: a reboot reservation means the
-        // machine is expected to terminate. Pending jobs must not
+        // Cancel pre-existing pending jobs: a reboot reservation means
+        // the machine is expected to terminate. Pending jobs must not
         // wait indefinitely — mark them terminal now.
+        //
+        // CRITICAL: exclude the reboot owner's own job_id from
+        // cancellation. The reboot job was just inserted as Pending
+        // above. It must stay Pending until the reboot command begins,
+        // at which point `begin_reboot_execution` transitions it to
+        // Running.
         let mut to_fail = Vec::new();
         for (id, j) in state.jobs.iter() {
-            if matches!(j.status, JobStatus::Pending) {
+            if *id != job_id && matches!(j.status, JobStatus::Pending) {
                 to_fail.push(*id);
             }
         }
@@ -491,6 +497,50 @@ impl Scheduler {
         }
         state.notify.notify_one();
         true
+    }
+
+    /// Transition the owning reboot job from Pending to Running
+    /// immediately before invoking the backend reboot command.
+    ///
+    /// This is the production method for starting the reboot job's
+    /// execution phase. It is ownership-safe: only the current
+    /// `reboot_pending` owner may transition the job. A stale owner
+    /// (whose job_id no longer matches `reboot_pending`) is rejected.
+    ///
+    /// Returns `true` if the transition succeeded, `false` if the
+    /// caller is not the current reboot owner or the job was not in
+    /// Pending state.
+    ///
+    /// After this method returns `true`, the caller should invoke the
+    /// backend reboot command:
+    ///   - On failure: call `rollback_reboot(job_id, Some(error))` to
+    ///     mark the job Failed and reopen admission.
+    ///   - On success: retain the committed reservation (the process
+    ///     is expected to terminate).
+    pub async fn begin_reboot_execution(&self, job_id: Uuid) -> bool {
+        let mut state = self.state.lock().await;
+        if state.reboot_pending != Some(job_id) {
+            return false;
+        }
+        if let Some(job) = state.jobs.get_mut(&job_id) {
+            if job.status != JobStatus::Pending {
+                return false;
+            }
+            job.status = JobStatus::Running;
+            job.updated_at = Utc::now();
+            job.add_log("Reboot command starting".to_string());
+            let event_data = (job.status.clone(), job.progress, job.message.clone());
+            emit_event(
+                &state,
+                "job_status",
+                &job_id,
+                &event_data.0,
+                event_data.1,
+                &event_data.2,
+            );
+            return true;
+        }
+        false
     }
 
     // ------------------------------------------------------------------

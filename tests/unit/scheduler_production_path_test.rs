@@ -2088,3 +2088,329 @@ async fn caller_cancellation_finalizes_self_update_job() {
         "self-update ownership must be cleared after force_clear"
     );
 }
+
+// =============================================================================
+// 37. Reboot job is not cancelled by its own reservation
+// =============================================================================
+
+/// `reserve_reboot` creates the reboot job as Pending and then
+/// cancels all pre-existing Pending jobs. The reboot job itself
+/// must NOT be cancelled — it must remain Pending until
+/// `begin_reboot_execution` transitions it to Running.
+#[tokio::test]
+async fn reboot_job_not_cancelled_by_own_reservation() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let reboot_job_id = guard.job_id;
+
+    // The reboot job must still be Pending (not Failed).
+    let job = scheduler.get_job(&reboot_job_id).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Pending,
+        "reboot job must remain Pending after reservation, got {:?}",
+        job.status
+    );
+
+    // The reboot reservation must be set.
+    let snap = scheduler.state_for_test().await;
+    assert_eq!(
+        snap.reboot_pending,
+        Some(reboot_job_id),
+        "reboot_pending must point to the reboot job"
+    );
+
+    // Clean up.
+    assert!(
+        scheduler
+            .rollback_reboot(reboot_job_id, Some("test".to_string()))
+            .await,
+        "rollback should succeed for the owner"
+    );
+}
+
+// =============================================================================
+// 38. Older queued jobs are cancelled by reboot reservation
+// =============================================================================
+
+/// Pre-existing Pending jobs must be cancelled (marked Failed) when
+/// a reboot reservation is made. Only the reboot owner is spared.
+#[tokio::test]
+async fn older_queued_jobs_cancelled_by_reboot_reservation() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // Admit two jobs before the reboot reservation.
+    let j1 = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg1".to_string()])
+        .await
+        .unwrap();
+    let j2 = scheduler
+        .admit_job(JobOperation::Update, vec!["pkg2".to_string()])
+        .await
+        .unwrap();
+
+    // Use force=true to override the active-jobs check.
+    let guard = scheduler.reserve_reboot(true, true).await.unwrap();
+    let reboot_job_id = guard.job_id;
+
+    // The two pre-existing jobs must be Failed.
+    let job1 = scheduler.get_job(&j1).await.unwrap();
+    assert_eq!(
+        job1.status,
+        JobStatus::Failed,
+        "pre-existing job 1 must be Failed after reboot reservation"
+    );
+    let job2 = scheduler.get_job(&j2).await.unwrap();
+    assert_eq!(
+        job2.status,
+        JobStatus::Failed,
+        "pre-existing job 2 must be Failed after reboot reservation"
+    );
+
+    // The reboot job must still be Pending.
+    let reboot_job = scheduler.get_job(&reboot_job_id).await.unwrap();
+    assert_eq!(
+        reboot_job.status,
+        JobStatus::Pending,
+        "reboot job must remain Pending"
+    );
+
+    // Clean up.
+    assert!(
+        scheduler
+            .rollback_reboot(reboot_job_id, Some("test".to_string()))
+            .await,
+        "rollback should succeed for the owner"
+    );
+}
+
+// =============================================================================
+// 39. Reboot owner reaches Running before the backend command
+// =============================================================================
+
+/// `begin_reboot_execution` must transition the reboot job from
+/// Pending to Running. This must happen before the backend reboot
+/// command is invoked.
+#[tokio::test]
+async fn reboot_owner_reaches_running_before_backend_command() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let reboot_job_id = guard.commit();
+
+    // Before begin_reboot_execution: Pending.
+    let job = scheduler.get_job(&reboot_job_id).await.unwrap();
+    assert_eq!(job.status, JobStatus::Pending);
+
+    // Transition to Running.
+    let result = scheduler.begin_reboot_execution(reboot_job_id).await;
+    assert!(
+        result,
+        "begin_reboot_execution should succeed for the owner"
+    );
+
+    // After: Running.
+    let job = scheduler.get_job(&reboot_job_id).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Running,
+        "reboot job must be Running after begin_reboot_execution"
+    );
+
+    // The reservation must still be held (not cleared by the transition).
+    let snap = scheduler.state_for_test().await;
+    assert_eq!(
+        snap.reboot_pending,
+        Some(reboot_job_id),
+        "reboot_pending must still be set after begin_reboot_execution"
+    );
+
+    // Clean up.
+    assert!(
+        scheduler
+            .rollback_reboot(reboot_job_id, Some("test".to_string()))
+            .await,
+        "rollback should succeed for the owner"
+    );
+}
+
+// =============================================================================
+// 40. Backend failure marks reboot job Failed and reopens admission
+// =============================================================================
+
+/// When the reboot command fails after `begin_reboot_execution`,
+/// `rollback_reboot` must mark the reboot job Failed and clear
+/// `reboot_pending`, reopening admission for new jobs.
+#[tokio::test]
+async fn backend_failure_marks_reboot_failed_and_reopens_admission() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let reboot_job_id = guard.commit();
+
+    // Transition to Running (simulating the handler calling
+    // begin_reboot_execution before the backend command).
+    assert!(
+        scheduler.begin_reboot_execution(reboot_job_id).await,
+        "begin_reboot_execution should succeed"
+    );
+
+    // Simulate backend failure: rollback.
+    let rolled_back = scheduler
+        .rollback_reboot(reboot_job_id, Some("reboot command failed".to_string()))
+        .await;
+    assert!(rolled_back, "rollback should succeed for the owner");
+
+    // The reboot job must be Failed.
+    let job = scheduler.get_job(&reboot_job_id).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "reboot job must be Failed after backend failure"
+    );
+
+    // Admission must be reopened — no reboot pending.
+    let snap = scheduler.state_for_test().await;
+    assert!(
+        snap.reboot_pending.is_none(),
+        "reboot_pending must be cleared after rollback"
+    );
+
+    // A new job should be admissible now.
+    let new_job = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
+        .await;
+    assert!(
+        new_job.is_ok(),
+        "new job should be admissible after rollback"
+    );
+}
+
+// =============================================================================
+// 41. Successful command acceptance retains the reservation
+// =============================================================================
+
+/// When the reboot command is accepted (returns Ok), the
+/// reservation must be retained because the process is expected
+/// to terminate. The reboot job stays Running, and `reboot_pending`
+/// remains set.
+#[tokio::test]
+async fn successful_command_retains_reservation() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let reboot_job_id = guard.commit();
+
+    // Transition to Running.
+    assert!(
+        scheduler.begin_reboot_execution(reboot_job_id).await,
+        "begin_reboot_execution should succeed"
+    );
+
+    // Simulate successful reboot command acceptance: do NOT roll
+    // back. The reservation is retained.
+    // (In production, the process terminates here.)
+
+    // The reboot job must still be Running.
+    let job = scheduler.get_job(&reboot_job_id).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Running,
+        "reboot job must remain Running after successful command"
+    );
+
+    // The reservation must still be held.
+    let snap = scheduler.state_for_test().await;
+    assert_eq!(
+        snap.reboot_pending,
+        Some(reboot_job_id),
+        "reboot_pending must be retained after successful command"
+    );
+
+    // dispatch_mutation must still be rejected (reboot is reserved).
+    let other_id = uuid::Uuid::new_v4();
+    let result: Result<(), anyhow::Error> = scheduler.dispatch_mutation(other_id, || Ok(())).await;
+    assert!(
+        result.is_err(),
+        "dispatch_mutation must be rejected while reboot is reserved"
+    );
+
+    // Clean up (in a real scenario the process would be gone).
+    assert!(
+        scheduler
+            .rollback_reboot(reboot_job_id, Some("test cleanup".to_string()))
+            .await,
+        "rollback should succeed for the owner"
+    );
+}
+
+// =============================================================================
+// 42. Stale reboot owner cannot transition or roll back
+// =============================================================================
+
+/// A stale reboot owner (whose job_id no longer matches
+/// `reboot_pending`) must not be able to call `begin_reboot_execution`
+/// or `rollback_reboot` on the current reservation. Both must return
+/// false.
+#[tokio::test]
+async fn stale_owner_cannot_transition_or_rollback() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // First reboot reservation.
+    let guard1 = scheduler.reserve_reboot(false, false).await.unwrap();
+    let stale_job_id = guard1.commit();
+
+    // Roll back the first reservation — this clears reboot_pending.
+    assert!(
+        scheduler
+            .rollback_reboot(stale_job_id, Some("first reboot failed".to_string()))
+            .await,
+        "first rollback should succeed"
+    );
+
+    // The stale job is now Failed.
+    let job = scheduler.get_job(&stale_job_id).await.unwrap();
+    assert_eq!(job.status, JobStatus::Failed);
+
+    // Second reboot reservation by a different owner.
+    let guard2 = scheduler.reserve_reboot(false, false).await.unwrap();
+    let current_job_id = guard2.commit();
+
+    // The stale owner tries to transition the current reboot job.
+    let result = scheduler.begin_reboot_execution(stale_job_id).await;
+    assert!(
+        !result,
+        "stale owner must not be able to call begin_reboot_execution"
+    );
+
+    // The stale owner tries to roll back the current reservation.
+    let result = scheduler
+        .rollback_reboot(stale_job_id, Some("stale owner attempt".to_string()))
+        .await;
+    assert!(
+        !result,
+        "stale owner must not be able to roll back the current reservation"
+    );
+
+    // The current reboot job must still be Pending (unaffected by
+    // the stale owner's attempts).
+    let current_job = scheduler.get_job(&current_job_id).await.unwrap();
+    assert_eq!(
+        current_job.status,
+        JobStatus::Pending,
+        "current reboot job must be unaffected by stale owner"
+    );
+
+    // The current owner CAN transition and roll back.
+    assert!(
+        scheduler.begin_reboot_execution(current_job_id).await,
+        "current owner must be able to call begin_reboot_execution"
+    );
+    assert!(
+        scheduler
+            .rollback_reboot(current_job_id, Some("test cleanup".to_string()))
+            .await,
+        "current owner must be able to roll back"
+    );
+}

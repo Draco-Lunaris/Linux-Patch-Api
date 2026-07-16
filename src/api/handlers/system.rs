@@ -296,10 +296,21 @@ pub async fn reboot_system(
             let delay_clone = delay;
 
             tokio::spawn(async move {
-                // Execute reboot — the reboot job is already admitted
-                // and committed by admit_reboot. We do not need
-                // wait_and_start_job; the job is already in the
-                // scheduler's job map.
+                // Transition the reboot job to Running immediately
+                // before invoking the backend reboot command. This
+                // is ownership-safe: only the current reboot owner
+                // can perform the transition.
+                if !scheduler_clone.begin_reboot_execution(reboot_job_id).await {
+                    // The reservation was rolled back by a stale
+                    // owner or the job is no longer Pending. Either
+                    // way, we cannot proceed.
+                    error!(
+                        job_id = %reboot_job_id,
+                        "Could not transition reboot job to Running — reservation no longer owned"
+                    );
+                    return;
+                }
+                // Execute reboot — the reboot job is now Running.
                 match backend_clone.reboot_system(delay_clone) {
                     Ok(_) => {
                         let _ = scheduler_clone

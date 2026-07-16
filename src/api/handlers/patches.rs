@@ -275,36 +275,52 @@ pub async fn apply_patches(
                                             "Reboot reservation acquired by scheduler".to_string(),
                                         )
                                         .await;
-                                    match backend_clone.reboot_system(request.reboot_delay_seconds)
+                                    // Transition the reboot job to
+                                    // Running before invoking the
+                                    // backend reboot command.
+                                    if !scheduler_clone.begin_reboot_execution(reboot_job_id).await
                                     {
-                                        Ok(_) => {
-                                            let _ = scheduler_clone
-                                                .add_job_log(
-                                                    &job_id_clone,
-                                                    "Reboot command executed".to_string(),
-                                                )
-                                                .await;
-                                            // Commit: process is about to terminate.
-                                            let _ = guard.commit();
-                                        }
-                                        Err(e) => {
-                                            // Reboot command failed —
-                                            // roll back the reservation
-                                            // (which also marks the
-                                            // reboot job Failed and
-                                            // reopens admission).
-                                            let _ = scheduler_clone
-                                                .rollback_reboot(
-                                                    reboot_job_id,
-                                                    Some(format!("Reboot failed: {}", e)),
-                                                )
-                                                .await;
-                                            let _ = scheduler_clone
-                                                .add_job_log(
-                                                    &job_id_clone,
-                                                    format!("Reboot failed: {}", e),
-                                                )
-                                                .await;
+                                        let _ = scheduler_clone
+                                            .add_job_log(
+                                                &job_id_clone,
+                                                "Reboot reservation lost before command"
+                                                    .to_string(),
+                                            )
+                                            .await;
+                                        // Guard drop will roll back.
+                                    } else {
+                                        match backend_clone
+                                            .reboot_system(request.reboot_delay_seconds)
+                                        {
+                                            Ok(_) => {
+                                                let _ = scheduler_clone
+                                                    .add_job_log(
+                                                        &job_id_clone,
+                                                        "Reboot command executed".to_string(),
+                                                    )
+                                                    .await;
+                                                // Commit: process is about to terminate.
+                                                let _ = guard.commit();
+                                            }
+                                            Err(e) => {
+                                                // Reboot command failed —
+                                                // roll back the reservation
+                                                // (which also marks the
+                                                // reboot job Failed and
+                                                // reopens admission).
+                                                let _ = scheduler_clone
+                                                    .rollback_reboot(
+                                                        reboot_job_id,
+                                                        Some(format!("Reboot failed: {}", e)),
+                                                    )
+                                                    .await;
+                                                let _ = scheduler_clone
+                                                    .add_job_log(
+                                                        &job_id_clone,
+                                                        format!("Reboot failed: {}", e),
+                                                    )
+                                                    .await;
+                                            }
                                         }
                                     }
                                 }
