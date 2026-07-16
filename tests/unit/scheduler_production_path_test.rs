@@ -879,3 +879,212 @@ async fn patch_reboot_interleaving_rejected_while_paused() {
         "mutation slot must be released after patch completes"
     );
 }
+
+// =============================================================================
+// 14. Queued mutation proceeds after reboot rollback
+// =============================================================================
+
+/// After a reboot reservation is rolled back, a mutation that was
+/// queued (waiting for reboot_pending to clear) must proceed
+/// without requiring a process restart.
+#[tokio::test]
+async fn rollback_unblocks_queued_mutation() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // Reserve a reboot (no active jobs needed for force=false when
+    // there are zero active jobs)
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let reboot_job_id = guard.job_id;
+
+    // Admit a job — it will be admitted to the job map but cannot
+    // dispatch because reboot_pending is set.
+    let queued_id = scheduler
+        .admit_job(JobOperation::Install, vec!["queued".to_string()])
+        .await
+        .unwrap();
+
+    // Start dispatch in a background task — it will wait for the
+    // reboot reservation to clear.
+    let sched_clone = scheduler.clone();
+    let dispatch_handle = tokio::spawn(async move {
+        sched_clone
+            .dispatch_mutation(queued_id, || Ok(()))
+            .await
+    });
+
+    // Verify the dispatch is waiting (not finished)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !dispatch_handle.is_finished(),
+        "queued mutation must be waiting while reboot is reserved"
+    );
+
+    // Roll back the reboot reservation
+    let rolled_back = scheduler
+        .rollback_reboot(reboot_job_id, Some("reboot command failed".to_string()))
+        .await;
+    assert!(rolled_back, "rollback must succeed for the owner");
+    // Commit the guard so its Drop is a no-op
+    let _ = guard.commit();
+
+    // The queued mutation must now proceed
+    let result = tokio::time::timeout(Duration::from_secs(2), dispatch_handle)
+        .await
+        .expect("queued mutation must proceed within 2s after rollback");
+    assert!(
+        result.is_ok(),
+        "dispatch_mutation should succeed after rollback"
+    );
+}
+
+// =============================================================================
+// 15. Duplicate reboot reservation is rejected
+// =============================================================================
+
+/// A second reboot reservation must be rejected while the first is
+/// still active. The second reservation must not overwrite the
+/// original owner.
+#[tokio::test]
+async fn duplicate_reboot_reservation_rejected() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard1 = scheduler.reserve_reboot(false, false).await.unwrap();
+    let owner1 = guard1.job_id;
+
+    // Second reservation must be rejected
+    let result = scheduler.reserve_reboot(false, false).await;
+    assert!(
+        result.is_err(),
+        "second reboot reservation must be rejected"
+    );
+
+    // The original owner must still be the reservation owner
+    let state = scheduler.state_for_test().await;
+    assert_eq!(
+        state.reboot_pending,
+        Some(owner1),
+        "original reboot owner must not be overwritten"
+    );
+
+    // Clean up
+    let _ = guard1.commit();
+}
+
+// =============================================================================
+// 16. Stale owner cannot clear the current reservation
+// =============================================================================
+
+/// A rollback with a stale (non-owning) job_id must be a no-op. It
+/// must not clear a reservation owned by a different reboot job.
+#[tokio::test]
+async fn stale_owner_cannot_clear_reservation() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // First reboot reservation
+    let guard1 = scheduler.reserve_reboot(false, false).await.unwrap();
+    let owner1 = guard1.job_id;
+
+    // Roll back with a random (stale) UUID — must fail and not clear
+    let stale_id = uuid::Uuid::new_v4();
+    let rolled_back = scheduler
+        .rollback_reboot(stale_id, Some("stale owner".to_string()))
+        .await;
+    assert!(
+        !rolled_back,
+        "stale owner rollback must return false (no-op)"
+    );
+
+    // The original reservation must still be active
+    let state = scheduler.state_for_test().await;
+    assert_eq!(
+        state.reboot_pending,
+        Some(owner1),
+        "stale rollback must not clear the current reservation"
+    );
+
+    // Clean up
+    let _ = guard1.commit();
+}
+
+// =============================================================================
+// 17. Committing the guard prevents automatic rollback on drop
+// =============================================================================
+
+/// After `commit()`, dropping the guard must NOT roll back the
+/// reservation. The reboot_pending must remain set because the
+/// process is expected to terminate via the reboot command.
+#[tokio::test]
+async fn commit_prevents_automatic_rollback() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let job_id = guard.job_id;
+
+    // Commit — the process is about to reboot
+    let _ = guard.commit();
+
+    // The reservation must still be active after commit+drop
+    let state = scheduler.state_for_test().await;
+    assert_eq!(
+        state.reboot_pending,
+        Some(job_id),
+        "reboot_pending must remain after commit"
+    );
+
+    // Clean up: roll back manually
+    scheduler.rollback_reboot(job_id, None).await;
+}
+
+// =============================================================================
+// 18. Rollback wakes waiters without polling
+// =============================================================================
+
+/// When a reboot reservation is rolled back, a dispatch_mutation
+/// that was waiting for reboot_pending to clear must wake up promptly
+/// via Notify — not via a fixed-interval poll. We verify the wake
+/// is fast (< 500ms) by measuring elapsed time from rollback to
+/// dispatch completion.
+#[tokio::test]
+async fn rollback_wakes_waiters_via_notify() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler.reserve_reboot(false, false).await.unwrap();
+    let reboot_job_id = guard.job_id;
+
+    // Admit and dispatch a job — it will wait for reboot to clear
+    let job_id = scheduler
+        .admit_job(JobOperation::Install, vec!["p".to_string()])
+        .await
+        .unwrap();
+
+    let sched_clone = scheduler.clone();
+    let dispatch_handle = tokio::spawn(async move {
+        sched_clone.dispatch_mutation(job_id, || Ok(())).await
+    });
+
+    // Verify it's waiting
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !dispatch_handle.is_finished(),
+        "dispatch must be waiting while reboot is reserved"
+    );
+
+    // Roll back and measure how fast the waiter wakes
+    let start = std::time::Instant::now();
+    scheduler
+        .rollback_reboot(reboot_job_id, Some("reboot failed".to_string()))
+        .await;
+    let _ = guard.commit();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), dispatch_handle)
+        .await
+        .expect("dispatch must wake within 2s after rollback");
+    let elapsed = start.elapsed();
+
+    assert!(result.is_ok(), "dispatch should succeed after rollback");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "waiter woke after {:?} — should be near-instant via Notify, not polling",
+        elapsed
+    );
+}
