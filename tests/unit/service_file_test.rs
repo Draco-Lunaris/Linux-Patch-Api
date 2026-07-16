@@ -109,8 +109,8 @@ fn service_file_exists_and_is_readable() {
 
 #[test]
 fn debian_rules_installs_same_service_file() {
-    let rules = fs::read_to_string("debian/rules")
-        .expect("debian/rules must exist and be readable");
+    let rules =
+        fs::read_to_string("debian/rules").expect("debian/rules must exist and be readable");
     assert!(
         rules.contains("configs/linux-patch-api.service"),
         "debian/rules does not reference configs/linux-patch-api.service — \

@@ -1396,9 +1396,7 @@ async fn cancellation_closure_succeeds_job_terminal_slot_clears() {
         .await
         .unwrap();
     let sched_b = scheduler.clone();
-    let b_handle = tokio::spawn(async move {
-        sched_b.dispatch_mutation(job_b, || Ok(())).await
-    });
+    let b_handle = tokio::spawn(async move { sched_b.dispatch_mutation(job_b, || Ok(())).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         !b_handle.is_finished(),
@@ -1467,7 +1465,9 @@ async fn cancellation_closure_fails_diagnostic_retained() {
         sched
             .dispatch_mutation(job_a, move || -> anyhow::Result<()> {
                 let _ = release_rx.lock().unwrap().recv();
-                Err(anyhow::anyhow!("apt-get failed (exit 100): dependency error"))
+                Err(anyhow::anyhow!(
+                    "apt-get failed (exit 100): dependency error"
+                ))
             })
             .await
     });
@@ -1491,11 +1491,7 @@ async fn cancellation_closure_fails_diagnostic_retained() {
 
     // A must be Failed with the underlying diagnostic
     let job = scheduler.get_job(&job_a).await.unwrap();
-    assert_eq!(
-        job.status,
-        JobStatus::Failed,
-        "A must be Failed"
-    );
+    assert_eq!(job.status, JobStatus::Failed, "A must be Failed");
     let error = job.error.expect("A must have an error");
     assert!(
         error.contains("dependency error"),
@@ -1569,10 +1565,7 @@ async fn cancellation_closure_panics_job_failed_recovers() {
         .await
         .unwrap();
     let result = scheduler.dispatch_mutation(job_b, || Ok(())).await;
-    assert!(
-        result.is_ok(),
-        "B must execute after A's panic cleanup"
-    );
+    assert!(result.is_ok(), "B must execute after A's panic cleanup");
 }
 
 // =============================================================================
@@ -1718,7 +1711,10 @@ async fn drain_completes_after_cancellation_cleanup() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(scheduler.is_mutation_in_progress().await);
-    assert!(!scheduler.is_drained().await, "must not be drained while A runs");
+    assert!(
+        !scheduler.is_drained().await,
+        "must not be drained while A runs"
+    );
 
     // Abort the caller
     handle.abort();
