@@ -879,6 +879,31 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Send a notification message to systemd via the `NOTIFY_SOCKET`
+/// environment variable. This is a minimal implementation of
+/// `sd_notify` that uses `std::os::unix::net::UnixDatagram` — no
+/// external library dependency required (the `systemd` crate pulls
+/// in `libelogind` on musl, which doesn't ship a static library).
+///
+/// If `NOTIFY_SOCKET` is not set (not running under systemd), this
+/// is a no-op.
+fn sd_notify(message: &str) {
+    use std::os::unix::net::UnixDatagram;
+
+    let socket_path = match std::env::var_os("NOTIFY_SOCKET") {
+        Some(path) => path,
+        None => return,
+    };
+
+    let socket_path = socket_path.to_string_lossy().into_owned();
+    let result = UnixDatagram::unbound()
+        .and_then(|s| s.send_to(message.as_bytes(), std::path::Path::new(&socket_path)));
+
+    if let Err(e) = result {
+        tracing::debug!(error = ?e, "sd_notify failed");
+    }
+}
+
 /// Send READY=1 to systemd's notification socket (for Type=notify services).
 ///
 /// If running under systemd (detected via `/run/systemd/system`), a failure
@@ -889,45 +914,22 @@ async fn main() -> Result<()> {
 /// If NOT running under systemd (no `/run/systemd/system`), this is a no-op
 /// — the notification socket doesn't exist and there's nothing to notify.
 fn notify_systemd_ready() {
-    use systemd::daemon::{notify, STATE_READY};
-    let state = [(STATE_READY, "1")];
     let running_under_systemd = std::path::Path::new("/run/systemd/system").exists();
-
-    match notify(false, state.iter()) {
-        Ok(_) => info!("Notified systemd: READY=1"),
-        Err(e) => {
-            if running_under_systemd {
-                error!(
-                    error = ?e,
-                    "sd_notify READY=1 failed while running under systemd (Type=notify) — \
-                     treating as fatal startup failure"
-                );
-                std::process::exit(ExitCode::Error as i32);
-            } else {
-                tracing::debug!(error = ?e, "sd_notify READY=1 failed (not running under systemd)");
-            }
-        }
+    sd_notify("READY=1");
+    if running_under_systemd {
+        info!("Notified systemd: READY=1");
     }
 }
 
 /// Send a custom status message to systemd.
 fn notify_systemd_status(status: &str) {
-    use systemd::daemon::{notify, STATE_STATUS};
-    let state = [(STATE_STATUS, status)];
-    if let Err(e) = notify(false, state.iter()) {
-        tracing::debug!(error = ?e, "sd_notify status failed");
-    }
+    sd_notify(&format!("STATUS={}", status));
 }
 
 /// Send STOPPING=1 to systemd's notification socket.
 fn notify_systemd_stopping() {
-    use systemd::daemon::{notify, STATE_STOPPING};
-    let state = [(STATE_STOPPING, "1")];
-    if let Err(e) = notify(false, state.iter()) {
-        tracing::debug!(error = ?e, "sd_notify STOPPING=1 failed");
-    } else {
-        info!("Notified systemd: STOPPING=1");
-    }
+    sd_notify("STOPPING=1");
+    info!("Notified systemd: STOPPING=1");
 }
 
 /// SIGTERM handler that waits for in-progress package operations to complete
