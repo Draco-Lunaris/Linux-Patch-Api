@@ -13,9 +13,8 @@ use linux_patch_api::auth::crl;
 use linux_patch_api::config::loader::RateLimitConfig;
 use linux_patch_api::jobs::manager::{JobManager, JobOperation};
 use linux_patch_api::packages::cache::PackageCacheState;
-use linux_patch_api::packages::coordinator::OperationCoordinator;
+use linux_patch_api::Scheduler;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 /// Helper to build a test request with a peer IP address (required for rate limiting)
 fn test_request(method: actix_web::http::Method, uri: &str) -> test::TestRequest {
@@ -29,7 +28,7 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
     let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
-    let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     let rl_cfg = RateLimitConfig::default();
 
@@ -38,17 +37,11 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
             .wrap(RateLimitMiddleware::new(rl_cfg))
             .app_data(job_manager.clone())
             .app_data(backend.clone())
-            .app_data(coordinator.clone())
+            .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
-                configure_api_routes(
-                    cfg,
-                    job_manager.clone(),
-                    backend.clone(),
-                    coordinator.clone(),
-                    cache_state.clone(),
-                );
+                configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
             .configure(configure_health_route),
     )
@@ -71,7 +64,7 @@ async fn test_system_info_exempt_from_rate_limiting() {
     let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
-    let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     let rl_cfg = RateLimitConfig::default();
 
@@ -80,17 +73,11 @@ async fn test_system_info_exempt_from_rate_limiting() {
             .wrap(RateLimitMiddleware::new(rl_cfg))
             .app_data(job_manager.clone())
             .app_data(backend.clone())
-            .app_data(coordinator.clone())
+            .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
-                configure_api_routes(
-                    cfg,
-                    job_manager.clone(),
-                    backend.clone(),
-                    coordinator.clone(),
-                    cache_state.clone(),
-                );
+                configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
             .configure(configure_health_route),
     )
@@ -114,7 +101,7 @@ async fn test_read_rate_limiting_returns_429() {
     let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
-    let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     // Use very low limits so sequential test requests can reliably trigger 429
     let rl_cfg = RateLimitConfig {
@@ -130,17 +117,11 @@ async fn test_read_rate_limiting_returns_429() {
             .wrap(RateLimitMiddleware::new(rl_cfg))
             .app_data(job_manager.clone())
             .app_data(backend.clone())
-            .app_data(coordinator.clone())
+            .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
-                configure_api_routes(
-                    cfg,
-                    job_manager.clone(),
-                    backend.clone(),
-                    coordinator.clone(),
-                    cache_state.clone(),
-                );
+                configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
             .configure(configure_health_route),
     )
@@ -168,7 +149,7 @@ async fn test_destructive_rate_limiting_returns_429() {
     let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
-    let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     // Use very low limits so sequential test requests can reliably trigger 429
     let rl_cfg = RateLimitConfig {
@@ -184,17 +165,11 @@ async fn test_destructive_rate_limiting_returns_429() {
             .wrap(RateLimitMiddleware::new(rl_cfg))
             .app_data(job_manager.clone())
             .app_data(backend.clone())
-            .app_data(coordinator.clone())
+            .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
-                configure_api_routes(
-                    cfg,
-                    job_manager.clone(),
-                    backend.clone(),
-                    coordinator.clone(),
-                    cache_state.clone(),
-                );
+                configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
             .configure(configure_health_route),
     )
@@ -227,7 +202,7 @@ async fn test_rate_limiting_disabled() {
     let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
-    let coordinator = web::Data::new(Arc::new(OperationCoordinator::new(5)));
+    let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
     let rl_cfg = RateLimitConfig {
         enabled: false,
@@ -239,17 +214,11 @@ async fn test_rate_limiting_disabled() {
             .wrap(RateLimitMiddleware::new(rl_cfg))
             .app_data(job_manager.clone())
             .app_data(backend.clone())
-            .app_data(coordinator.clone())
+            .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
             .configure(|cfg| {
-                configure_api_routes(
-                    cfg,
-                    job_manager.clone(),
-                    backend.clone(),
-                    coordinator.clone(),
-                    cache_state.clone(),
-                );
+                configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
             .configure(configure_health_route),
     )

@@ -9,5 +9,6 @@
 
 pub mod manager;
 pub mod queue;
+pub mod scheduler;
 pub mod upgrade_state;
 pub mod websocket;

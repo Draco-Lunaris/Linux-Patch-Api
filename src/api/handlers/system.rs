@@ -12,10 +12,11 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::jobs::manager::JobOperation;
+use crate::jobs::scheduler::{AdmissionMode, Scheduler};
+
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
-use crate::jobs::manager::{JobManager, JobStatus, RebootAdmission};
-use crate::packages::coordinator::OperationCoordinator;
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
@@ -130,7 +131,7 @@ pub async fn health_check(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     crl_state: web::Data<SharedCrlState>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let _request_id = Uuid::new_v4().to_string();
@@ -153,38 +154,44 @@ pub async fn health_check(
     // Check cache status — report stale without synchronously refreshing.
     // Health checks must NOT mutate package state. If the cache is stale,
     // we spawn an async refresh task (best-effort) and report the current
-    // status immediately. The refresh uses the coordinator's non-blocking
-    // try_run_mutation — if a mutation is already in progress, the refresh
-    // is skipped and stale cache is reported.
+    // status immediately. The refresh goes through `dispatch_mutation`
+    // — the scheduler's SOLE production mutation entry point.
     let cache_status_val = cache_state.status();
     let (mut status, cache_status_str, last_cache_update) = if cache_state.is_stale() {
-        // Spawn a best-effort background refresh using the coordinator's
-        // non-blocking mutation admission. This deduplicates refreshes
-        // (only one can hold the mutation semaphore at a time) and never
-        // blocks the health response.
+        // Spawn a best-effort background refresh using the scheduler's
+        // dispatch_mutation. This deduplicates refreshes (only one can
+        // hold the mutation slot at a time) and never blocks the health
+        // response.
         let backend_clone = backend.clone();
         let cache_state_clone = cache_state.clone();
-        let coordinator_clone = coordinator.clone();
+        let scheduler_clone = scheduler.clone();
         actix_web::rt::spawn(async move {
-            // Run in spawn_blocking because refresh_package_cache is a
-            // blocking command execution.
-            let refresh_result = tokio::task::spawn_blocking(move || {
-                coordinator_clone
-                    .try_run_mutation(|| backend_clone.refresh_package_cache(&cache_state_clone))
-            })
-            .await;
-            match refresh_result {
-                Ok(Ok(_)) => info!("Background cache refresh from health check succeeded"),
-                Ok(Err(crate::packages::coordinator::TryMutationError::Busy)) => {
-                    info!(
-                        "Background cache refresh from health check skipped — mutation in progress"
-                    );
-                }
-                Ok(Err(crate::packages::coordinator::TryMutationError::Failed(e))) => {
-                    warn!(error = ?e, "Background cache refresh from health check failed");
+            // Admit a tracking job and dispatch through the scheduler.
+            match scheduler_clone
+                .admit_job(
+                    JobOperation::Install,
+                    vec!["__health_refresh__".to_string()],
+                )
+                .await
+            {
+                Ok(tracking_job_id) => {
+                    let backend_for_refresh = backend_clone.clone();
+                    let cache_state_for_refresh = cache_state_clone.clone();
+                    let refresh_result = scheduler_clone
+                        .dispatch_mutation(tracking_job_id, move || {
+                            backend_for_refresh.refresh_package_cache(&cache_state_for_refresh)
+                        })
+                        .await;
+                    match refresh_result {
+                        Ok(_) => info!("Background cache refresh from health check succeeded"),
+                        Err(e) => {
+                            warn!(error = ?e, "Background cache refresh from health check failed");
+                            let _ = scheduler_clone.delete_job(&tracking_job_id).await;
+                        }
+                    }
                 }
                 Err(e) => {
-                    warn!(error = ?e, "Background cache refresh task panicked");
+                    info!(error = ?e, "Background cache refresh from health check skipped — could not admit tracking job");
                 }
             }
         });
@@ -200,6 +207,16 @@ pub async fn health_check(
             cache_status_val.last_update.map(|dt| dt.to_rfc3339()),
         )
     };
+
+    // Check if the scheduler is in recovery mode. If so, report degraded.
+    let admission_mode = scheduler.admission_mode().await;
+    if admission_mode == AdmissionMode::Recovery {
+        status = "degraded".to_string();
+    }
+    let self_update_active = scheduler.is_self_update_in_progress().await;
+    if self_update_active {
+        status = "degraded".to_string();
+    }
 
     // CRL status from shared state — re-evaluate expiry at query time
     let crl = crl_state.load();
@@ -250,8 +267,7 @@ pub async fn health_check(
 pub async fn reboot_system(
     body: web::Json<RebootRequest>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
-    job_manager: web::Data<JobManager>,
-    coordinator: web::Data<Arc<OperationCoordinator>>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -268,52 +284,48 @@ pub async fn reboot_system(
         "Initiating system reboot"
     );
 
-    // Use the atomic admit_reboot method — all checks and job creation
-    // happen under one coordinated lock, preventing races between the
+    // Use the scheduler's atomic admit_reboot — all checks and job
+    // creation happen under one lock, preventing races between the
     // reboot check and concurrent job/self-update/mutation creation.
-    let pkg_op_active = coordinator.is_operation_in_progress();
-    let admission = RebootAdmission {
-        force,
-        acknowledge_package_database_corruption_risk: ack_corruption_risk,
-    };
-
-    match job_manager.admit_reboot(admission, pkg_op_active).await {
-        Ok(job_id) => {
+    match scheduler.admit_reboot(force, ack_corruption_risk).await {
+        Ok(handle) => {
+            let reboot_job_id = handle.job_id;
             // Spawn background task to execute the reboot
             let backend_clone = backend.clone();
-            let job_manager_clone = job_manager.clone();
+            let scheduler_clone = scheduler.clone();
             let delay_clone = delay;
 
             tokio::spawn(async move {
-                let job_id_clone = job_id;
-
-                // Update job to running
-                let _ = job_manager_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Preparing system reboot...".to_string()),
-                    )
-                    .await;
-                let _ = job_manager_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
-
-                // Execute reboot
+                // Transition the reboot job to Running immediately
+                // before invoking the backend reboot command. This
+                // is ownership-safe: only the current reboot owner
+                // can perform the transition.
+                if !scheduler_clone.begin_reboot_execution(reboot_job_id).await {
+                    // The reservation was rolled back by a stale
+                    // owner or the job is no longer Pending. Either
+                    // way, we cannot proceed.
+                    error!(
+                        job_id = %reboot_job_id,
+                        "Could not transition reboot job to Running — reservation no longer owned"
+                    );
+                    return;
+                }
+                // Execute reboot — the reboot job is now Running.
                 match backend_clone.reboot_system(delay_clone) {
                     Ok(_) => {
-                        let _ = job_manager_clone
-                            .add_job_log(&job_id_clone, "Reboot command executed".to_string())
+                        let _ = scheduler_clone
+                            .add_job_log(&reboot_job_id, "Reboot command executed".to_string())
                             .await;
                         // Note: Job won't complete normally since system reboots
-                        info!(job_id = %job_id_clone, "System reboot initiated");
+                        info!(job_id = %reboot_job_id, "System reboot initiated");
                     }
                     Err(e) => {
-                        let _ = job_manager_clone
-                            .fail_job_with_diagnostics(&job_id_clone, &e)
+                        // Reboot command failed — roll back the reservation
+                        // so the scheduler reopens admission.
+                        let _ = scheduler_clone
+                            .rollback_reboot(reboot_job_id, Some(format!("{}", e)))
                             .await;
-                        error!(job_id = %job_id_clone, error = ?e, "System reboot failed");
+                        error!(job_id = %reboot_job_id, error = %e, "System reboot failed");
                     }
                 }
             });
@@ -325,7 +337,7 @@ pub async fn reboot_system(
             };
 
             let response = ApiResponse::success(serde_json::json!({
-                "job_id": job_id.to_string(),
+                "job_id": reboot_job_id.to_string(),
                 "status": "pending",
                 "operation": "reboot",
                 "scheduled_at": scheduled_at.to_rfc3339(),
@@ -338,29 +350,35 @@ pub async fn reboot_system(
         Err(ref admission_err) => {
             warn!(request_id = %request_id, error = %admission_err, "Reboot admission rejected");
             let (code, message, data, retry) = match admission_err {
-                crate::jobs::manager::RebootAdmissionError::SelfUpdateInProgress => (
+                crate::jobs::scheduler::RebootAdmissionError::SelfUpdateInProgress => (
                     "SELF_UPDATE_IN_PROGRESS",
                     "Cannot reboot while a self-update is in progress. Use force=true with acknowledge_package_database_corruption_risk=true to override.".to_string(),
                     None,
                     false,
                 ),
-                crate::jobs::manager::RebootAdmissionError::PackageMutationInProgress => (
+                crate::jobs::scheduler::RebootAdmissionError::PackageMutationInProgress => (
                     "PACKAGE_DB_MUTATION_IN_PROGRESS",
                     "A package-manager operation is in progress. A forced reboot now may corrupt the package database. Set acknowledge_package_database_corruption_risk=true to override.".to_string(),
                     Some(serde_json::json!({"package_operation_in_progress": true})),
                     false,
                 ),
-                crate::jobs::manager::RebootAdmissionError::JobsInProgress { count } => (
+                crate::jobs::scheduler::RebootAdmissionError::JobsInProgress { count } => (
                     "REBOOT_BLOCKED",
                     format!("Cannot reboot while {} jobs are running or pending. Use force=true to override.", count),
                     Some(serde_json::json!({"active_jobs": count})),
                     false,
                 ),
-                crate::jobs::manager::RebootAdmissionError::QueueFull => (
+                crate::jobs::scheduler::RebootAdmissionError::QueueFull => (
                     "QUEUE_FULL",
                     "Job queue is at capacity. Please retry later.".to_string(),
                     None,
                     true,
+                ),
+                crate::jobs::scheduler::RebootAdmissionError::AdmissionClosed => (
+                    "ADMISSION_CLOSED",
+                    "Admission is closed (shutdown or recovery in progress).".to_string(),
+                    None,
+                    false,
                 ),
             };
             let response = ApiResponse::<()>::error(code, &message, data, retry);

@@ -22,6 +22,12 @@ override_dh_auto_install:
 	install -D -m 755 target/x86_64-unknown-linux-gnu/release/linux-patch-api debian/tmp/usr/bin/linux-patch-api
 	# Install systemd service
 	install -D -m 644 configs/linux-patch-api.service debian/tmp/lib/systemd/system/linux-patch-api.service
+	install -D -m 644 configs/linux-patch-api-upgrade-restart.service debian/tmp/lib/systemd/system/linux-patch-api-upgrade-restart.service
+	install -D -m 644 configs/linux-patch-api-upgrade-restart.timer debian/tmp/lib/systemd/system/linux-patch-api-upgrade-restart.timer
+	# Install fallback restart decision script (sole authority for the
+	# upgrade-restart service's restart decision). Must be executable so
+	# ExecStartPre can invoke it directly.
+	install -D -m 755 configs/linux-patch-api-fallback-decision.sh debian/tmp/usr/lib/linux-patch-api/linux-patch-api-fallback-decision.sh
 	# Install default configs
 	install -D -m 644 configs/config.yaml.example debian/tmp/etc/linux_patch_api/config.yaml
 	install -D -m 644 configs/whitelist.yaml.example debian/tmp/etc/linux_patch_api/whitelist.yaml

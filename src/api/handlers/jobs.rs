@@ -9,10 +9,12 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::jobs::manager::{Job, JobManager, JobStatus};
+use crate::jobs::manager::{Job, JobStatus};
+use crate::jobs::scheduler::Scheduler;
 
 use super::packages::ApiResponse;
 
@@ -126,7 +128,7 @@ fn parse_job_status(status_str: &str) -> Option<JobStatus> {
 /// List all jobs with optional filtering
 pub async fn list_jobs(
     query: web::Query<JobListQuery>,
-    job_manager: web::Data<JobManager>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -142,7 +144,7 @@ pub async fn list_jobs(
         "Listing jobs"
     );
 
-    let jobs = job_manager.list_jobs(status_filter, limit).await;
+    let jobs = scheduler.list_jobs(status_filter, limit).await;
     let total = jobs.len();
     let job_summaries: Vec<JobSummary> = jobs.iter().map(JobSummary::from_job).collect();
 
@@ -157,7 +159,7 @@ pub async fn list_jobs(
 /// Get specific job status and details
 pub async fn get_job(
     path: web::Path<String>,
-    job_manager: web::Data<JobManager>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -180,7 +182,7 @@ pub async fn get_job(
         }
     };
 
-    match job_manager.get_job(&job_id).await {
+    match scheduler.get_job(&job_id).await {
         Some(job) => {
             let response = ApiResponse::success(JobDetailData::from_job(&job));
             HttpResponse::Ok().json(response)
@@ -201,7 +203,7 @@ pub async fn get_job(
 /// Rollback a failed/completed job (async operation)
 pub async fn rollback_job(
     path: web::Path<String>,
-    job_manager: web::Data<JobManager>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -226,7 +228,7 @@ pub async fn rollback_job(
 
     // create_rollback_job uses admit_job internally, which atomically checks
     // the self-update flag and queue capacity under a single lock.
-    match job_manager.create_rollback_job(&job_id).await {
+    match scheduler.create_rollback_job(&job_id).await {
         Ok(Some(rollback_job_id)) => {
             info!(
                 request_id = %request_id,
@@ -265,7 +267,7 @@ pub async fn rollback_job(
 /// Delete a completed/failed job from history
 pub async fn delete_job(
     path: web::Path<String>,
-    job_manager: web::Data<JobManager>,
+    scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -288,7 +290,7 @@ pub async fn delete_job(
         }
     };
 
-    match job_manager.delete_job(&job_id).await {
+    match scheduler.delete_job(&job_id).await {
         Ok(true) => {
             info!(request_id = %request_id, job_id = %job_id_str, "Job deleted successfully");
             let response = ApiResponse::success(serde_json::json!({
@@ -299,7 +301,7 @@ pub async fn delete_job(
         }
         Ok(false) => {
             // Check if job exists but is not deletable
-            if let Some(job) = job_manager.get_job(&job_id).await {
+            if let Some(job) = scheduler.get_job(&job_id).await {
                 warn!(
                     request_id = %request_id,
                     job_id = %job_id_str,

@@ -7,9 +7,10 @@
 //! The actual actor logic lives in crate::jobs::websocket::WsJobActor.
 
 use actix_web::{web, Error, HttpRequest, HttpResponse};
+use std::sync::Arc;
 use tracing::info;
 
-use crate::jobs::manager::JobManager;
+use crate::jobs::scheduler::Scheduler;
 use crate::jobs::websocket::WsJobActor;
 
 /// Handle WebSocket connection request
@@ -18,12 +19,12 @@ use crate::jobs::websocket::WsJobActor;
 pub async fn websocket_handler(
     req: HttpRequest,
     stream: web::Payload,
-    job_manager: web::Data<JobManager>,
+    scheduler: web::Data<Arc<Scheduler>>,
 ) -> Result<HttpResponse, Error> {
     info!("WebSocket connection request received");
 
-    // Subscribe to job status events from the JobManager broadcast channel
-    let event_rx = job_manager.subscribe();
+    // Subscribe to job status events from the scheduler's broadcast channel
+    let event_rx = scheduler.subscribe_async().await;
 
     // Create the WebSocket actor with the broadcast receiver
     let actor = WsJobActor::new(event_rx);
