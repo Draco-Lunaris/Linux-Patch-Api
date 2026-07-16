@@ -27,13 +27,25 @@ ExecStartPre=/bin/chown -R root:root /var/log/linux_patch_api /var/lib/linux_pat
 ExecStartPre=/bin/mkdir -p /var/log/linux_patch_api /var/lib/linux_patch_api/state
 
 # Security hardening
-# NOTE: Package management requires extensive system access. The following
-# restrictions have been removed because they block core functionality:
-#   - ProtectSystem=strict: Blocks writes to /usr, /etc, /lib where packages install
-#   - NoNewPrivileges: Blocks sudo/setuid which apt needs for _apt sandbox
-#   - RestrictSUIDSGID: Blocks setuid/setgid which apt needs for _apt sandbox
-#   - CapabilityBoundingSet: Drops capabilities that apt needs (SETUID, SETGID, CHOWN, etc.)
-#   - AmbientCapabilities: Same issue as CapabilityBoundingSet
+#
+# Package-manager commands and package maintainer scripts must execute
+# against the real host filesystem, mount namespace, hostname namespace,
+# clock namespace, kernel-module tree, and syscall environment.  Any
+# systemd sandboxing directive that creates a private namespace or
+# restricts kernel/filesystem access will cause maintainer scripts to
+# silently fail or produce corrupted host state (e.g. an initramfs
+# generated without kernel modules, which makes the next boot fail).
+#
+# The following directives have been removed because they alter the
+# environment required by package-manager commands and maintainer scripts:
+#
+#   - ProtectSystem=strict: Blocks writes to /usr, /etc, /lib where
+#     packages install.
+#   - NoNewPrivileges: Blocks sudo/setuid which apt needs for _apt sandbox.
+#   - RestrictSUIDSGID: Blocks setuid/setgid which apt needs for _apt sandbox.
+#   - CapabilityBoundingSet: Drops capabilities that apt needs (SETUID,
+#     SETGID, CHOWN, etc.).
+#   - AmbientCapabilities: Same issue as CapabilityBoundingSet.
 #   - ProtectKernelModules=true: Makes /usr/lib/modules inaccessible, which
 #     breaks update-initramfs (run as a dpkg trigger during patch-apply).
 #     This caused boot failures on Ubuntu 24.04 and 26.04 — the initramfs
@@ -51,17 +63,23 @@ ExecStartPre=/bin/mkdir -p /var/log/linux_patch_api /var/lib/linux_patch_api/sta
 #     and reboot syscalls. These are needed by package postinst/preinst
 #     scripts (docker.io, fuse3, nfs-common, snapd, systemd, libc6,
 #     nvidia-dkms, procps, dbus, coreutils-from-uutils, etc.).
-#     The agent's own reboot_system() calls `systemctl reboot` (D-Bus),
-#     not the reboot() syscall, so that path is unaffected — but package
-#     scripts that call reboot() directly would fail.
-# Network security is provided by mTLS + IP whitelist. The service runs as root
-# and MUST be able to install/remove/update packages system-wide, including
-# running dpkg trigger scripts (update-initramfs, depmod, sysctl, mount, etc.)
-# that require full filesystem and syscall access.
-ProtectHome=true
-PrivateTmp=true
-ProtectHostname=true
-ProtectClock=true
+#   - ProtectHome=true: Masks /home, /root, /run/user from the service
+#     namespace. Package scripts that reference user home directories
+#     (apparmor, kubuntu-settings-desktop) would fail.
+#   - PrivateTmp=true: Creates a private /tmp and /var/tmp. Package scripts
+#     that share temp files with other processes (hplip, openvpn, rsyslog,
+#     screen) would fail.
+#   - ProtectHostname=true: Creates a private UTS namespace. Package scripts
+#     that call sethostname/setdomainname would fail.
+#   - ProtectClock=true: Blocks clock_settime/adjtimex/settimeofday syscalls
+#     and makes /dev/rtc* read-only. Package scripts that set the hardware
+#     clock would fail.
+#
+# The API is privileged by design. It must rely on authentication (mTLS),
+# authorization (IP whitelist), audit logging, and strict package-operation
+# controls — not on OS-level sandboxing that is incompatible with the
+# requirement to run arbitrary distribution maintainer scripts against the
+# real host environment.
 LockPersonality=true
 MemoryDenyWriteExecute=false
 RestrictRealtime=true
