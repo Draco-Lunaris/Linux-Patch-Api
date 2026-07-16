@@ -178,6 +178,11 @@ impl Scheduler {
         if state.self_update.is_some() {
             return Err(SelfUpdateAdmissionError::AlreadyInProgress);
         }
+        // Check for active mutation — self-update cannot proceed
+        // while a package-manager command is running.
+        if state.active_mutation.is_some() {
+            return Err(SelfUpdateAdmissionError::JobsInProgress { count: 1 });
+        }
 
         let active_count = state
             .jobs
@@ -405,6 +410,11 @@ impl Scheduler {
             if state.active_mutation.is_some() {
                 return Err(TryMutationError::Busy);
             }
+            // Check for self-update in progress — cache refresh cannot
+            // run during a self-update.
+            if state.self_update.is_some() {
+                return Err(TryMutationError::Busy);
+            }
             state.active_mutation = Some(job_id);
 
             // Same watchdog pattern as run_mutation: the slot is cleared
@@ -504,6 +514,27 @@ impl Scheduler {
             emit_event(&state, "job_status", job_id, &status, progress, &message);
         }
         Ok(())
+    }
+
+    /// Wait for a running slot to become available, then start the job.
+    /// This is the correct way to dispatch a job — it blocks until
+    /// max_concurrent allows the job to start, rather than abandoning
+    /// it. The waiting happens inside the spawned task, not in the
+    /// HTTP handler.
+    pub async fn wait_and_start_job(&self, job_id: &Uuid) {
+        loop {
+            match self.start_job(job_id).await {
+                Ok(()) => return,
+                Err(_) => {
+                    // Slot not available — wait briefly and retry.
+                    // This is a simple polling approach. A more
+                    // sophisticated implementation would use a Notify,
+                    // but polling at 100ms is sufficient for the
+                    // expected concurrency levels (single-digit).
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
     }
 
     pub async fn update_job(

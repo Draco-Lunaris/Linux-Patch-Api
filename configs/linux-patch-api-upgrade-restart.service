@@ -16,11 +16,12 @@ Type=oneshot
 # fall back to jq, and if neither is available, we abort (fail-closed).
 ExecStartPre=/bin/sh -c 'test -f /var/lib/linux_patch_api/upgrade-pending || exit 55'
 ExecStartPre=/bin/sh -c 'STATE_FILE=/var/lib/linux_patch_api/upgrade-state.json; if [ ! -f "$STATE_FILE" ]; then echo "State file missing but marker exists — unsafe to restart, aborting"; exit 55; fi; if command -v python3 >/dev/null 2>&1; then STATE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get(\"state\",\"unknown\"))" "$STATE_FILE" 2>/dev/null); elif command -v jq >/dev/null 2>&1; then STATE=$(jq -r ".state // \"unknown\"" "$STATE_FILE" 2>/dev/null); else echo "No JSON parser available — aborting (fail-closed)"; exit 55; fi; if [ "$STATE" = "restart_pending" ]; then echo "State is restart_pending — safe to restart"; else echo "State is $STATE — not safe to restart, aborting"; exit 55; fi'
-# Check if the agent is already running. If it is, the replacement
-# process is already initializing — do NOT restart it again. The
-# timer will re-fire, but if the process reaches readiness it will
-# clear the marker and the timer will stop.
-ExecStartPre=/bin/sh -c 'if systemctl is-active --quiet linux-patch-api.service 2>/dev/null; then echo "Agent is already active — replacement is initializing, not restarting"; exit 55; fi'
+# If the agent is already active, check how long it has been running.
+# If it started less than 60 seconds ago, the replacement is still
+# initializing — skip this timer firing to avoid killing it.
+# If it has been up for more than 60 seconds and the state is still
+# restart_pending, the replacement failed to reach readiness — restart.
+ExecStartPre=/bin/sh -c 'if systemctl is-active --quiet linux-patch-api.service 2>/dev/null; then ACTIVE_TIME=$(systemctl show -p ActiveEnterTimestamp --value linux-patch-api.service 2>/dev/null); if [ -n "$ACTIVE_TIME" ]; then NOW=$(date +%s); STARTED=$(date -d "$ACTIVE_TIME" +%s 2>/dev/null || echo 0); if [ "$STARTED" -gt 0 ] && [ $((NOW - STARTED)) -lt 60 ]; then echo "Agent started $((NOW - STARTED))s ago — replacement still initializing, skipping"; exit 55; fi; fi; fi'
 ExecStart=systemctl restart linux-patch-api.service
 # Do NOT use ExecStartPost to remove the marker.
 # The new process removes the marker after successful readiness (READY=1).

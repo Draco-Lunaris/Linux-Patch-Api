@@ -285,12 +285,7 @@ pub async fn reboot_system(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                // Atomically transition to Running, enforcing max_concurrent.
-                // If max_concurrent is reached, keep the job pending and exit.
-                if let Err(e) = scheduler_clone.start_job(&job_id_clone).await {
-                    warn!(job_id = %job_id_clone, error = %e, "Job could not start — max_concurrent reached, keeping pending");
-                    return;
-                }
+                scheduler_clone.wait_and_start_job(&job_id_clone).await;
 
                 // Execute reboot
                 match backend_clone.reboot_system(delay_clone) {
