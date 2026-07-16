@@ -156,17 +156,9 @@ pub async fn apply_patches(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                scheduler_clone.wait_and_start_job(&job_id_clone).await;
-
-                // MANDATORY: Refresh package cache before applying patches
-                let _ = scheduler_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Refreshing package index...".to_string()),
-                    )
-                    .await;
+                // MANDATORY: Refresh package cache before applying patches.
+                // Use dispatch_mutation to atomically start the job and
+                // acquire the mutation slot for the cache refresh.
                 let _ = scheduler_clone
                     .add_job_log(&job_id_clone, "Refreshing package cache...".to_string())
                     .await;
@@ -176,7 +168,7 @@ pub async fn apply_patches(
                 let cache_state_for_refresh = cache_state_clone.clone();
                 let backend_for_refresh = backend_clone.clone();
                 let refresh_result = scheduler_clone
-                    .run_mutation(job_id_clone, move || {
+                    .dispatch_mutation(job_id_clone, move || {
                         backend_for_refresh.refresh_package_cache(&cache_state_for_refresh)
                     })
                     .await;

@@ -485,6 +485,15 @@ impl Scheduler {
     /// The job remains Pending if the transition is rejected.
     pub async fn start_job(&self, job_id: &Uuid) -> Result<(), anyhow::Error> {
         let mut state = self.state.lock().await;
+
+        // Check admission mode — don't start jobs during shutdown/recovery
+        if state.admission != AdmissionMode::Open {
+            return Err(anyhow::anyhow!(
+                "Admission not open (mode={:?}) — job remains pending",
+                state.admission
+            ));
+        }
+
         let running = state
             .jobs
             .values()
@@ -526,14 +535,118 @@ impl Scheduler {
             match self.start_job(job_id).await {
                 Ok(()) => return,
                 Err(_) => {
-                    // Slot not available — wait briefly and retry.
-                    // This is a simple polling approach. A more
-                    // sophisticated implementation would use a Notify,
-                    // but polling at 100ms is sufficient for the
-                    // expected concurrency levels (single-digit).
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
+        }
+    }
+
+    /// Atomically start a job AND acquire the mutation slot, then run
+    /// the closure in spawn_blocking. This is the correct way to
+    /// dispatch a package-mutating job — it combines max_concurrent
+    /// enforcement and mutation serialization into one atomic
+    /// operation. If either limit is reached, it waits and retries.
+    ///
+    /// The job transitions to Running only when both the max_concurrent
+    /// slot and the mutation slot are acquired simultaneously. This
+    /// prevents jobs from becoming Running and then immediately failing
+    /// because the mutation slot is busy.
+    pub async fn dispatch_mutation<F, T>(self: &Arc<Self>, job_id: Uuid, f: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use tokio::sync::oneshot;
+
+        // Wait until we can atomically acquire both the max_concurrent
+        // slot (job → Running) and the mutation slot (active_mutation).
+        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
+
+        loop {
+            let mut state = self.state.lock().await;
+
+            // Check admission mode
+            if state.admission == AdmissionMode::Frozen {
+                return Err(anyhow::anyhow!(
+                    "Mutation admission frozen — shutdown in progress"
+                ));
+            }
+            if state.admission == AdmissionMode::Recovery {
+                return Err(anyhow::anyhow!(
+                    "Mutation rejected — system in recovery mode"
+                ));
+            }
+
+            // Check reboot pending — don't start mutations after reboot is committed
+            if state.reboot_pending.is_some() {
+                drop(state);
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                continue;
+            }
+
+            // Check max_concurrent
+            let running = state
+                .jobs
+                .values()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
+            let already_running = state
+                .jobs
+                .get(&job_id)
+                .map(|j| j.status == JobStatus::Running)
+                .unwrap_or(false);
+
+            if !already_running && running >= state.max_concurrent {
+                drop(state);
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                continue;
+            }
+
+            // Check mutation slot
+            if state.active_mutation.is_some() {
+                drop(state);
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                continue;
+            }
+
+            // Both slots available — acquire them atomically
+            state.active_mutation = Some(job_id);
+            let event_data;
+            if let Some(job) = state.jobs.get_mut(&job_id) {
+                job.status = JobStatus::Running;
+                job.updated_at = Utc::now();
+                job.add_log("Job started".to_string());
+                event_data = Some((job.status.clone(), job.progress, job.message.clone()));
+            } else {
+                event_data = None;
+            }
+            if let Some((status, progress, message)) = event_data {
+                emit_event(&state, "job_status", &job_id, &status, progress, &message);
+            }
+
+            // Spawn the blocking task with watchdog
+            let sched = self.clone();
+            tokio::spawn(async move {
+                let join_handle = tokio::task::spawn_blocking(f);
+                let result = match join_handle.await {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(anyhow::anyhow!("Mutation task panicked: {}", join_err)),
+                };
+                // Clear both slots
+                let mut state = sched.state.lock().await;
+                state.active_mutation = None;
+                let _ = result_tx.send(result);
+            });
+
+            break;
+        }
+
+        match result_rx.await {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!(
+                "Mutation result channel closed — task was cancelled"
+            )),
         }
     }
 
@@ -894,6 +1007,11 @@ fn admit_job_inner(
     }
     if state.self_update.is_some() {
         return Err(JobAdmissionError::SelfUpdateInProgress);
+    }
+    // Reject new jobs if a reboot is pending — the system is about to
+    // reboot and should not accept new work.
+    if state.reboot_pending.is_some() {
+        return Err(JobAdmissionError::AdmissionFrozen);
     }
 
     let active_count = state

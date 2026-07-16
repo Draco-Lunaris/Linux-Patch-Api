@@ -304,14 +304,11 @@ pub async fn install_packages(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                scheduler_clone.wait_and_start_job(&job_id_clone).await;
-
-                // Execute installation through the scheduler's mutation slot.
-                // The closure runs in spawn_blocking, so it must be Send + 'static
-                // — we move the backend clone into the closure (no borrows).
+                // Execute installation through dispatch_mutation — atomically
+                // starts the job and acquires the mutation slot.
                 let backend_for_mutation = backend_clone.clone();
                 let install_result = scheduler_clone
-                    .run_mutation(job_id_clone, move || {
+                    .dispatch_mutation(job_id_clone, move || {
                         backend_for_mutation.install_packages(&packages, &options)
                     })
                     .await;
@@ -538,8 +535,6 @@ pub async fn update_package(
                 tokio::spawn(async move {
                     let job_id_clone = job_id;
 
-                    scheduler_clone.wait_and_start_job(&job_id_clone).await;
-
                     // Transition from Reserving to Installing before invoking
                     // the package manager. FAIL-CLOSED: if this persistence
                     // fails, abort the self-update.
@@ -560,12 +555,12 @@ pub async fn update_package(
                         return;
                     }
 
-                    // Execute update through the scheduler's mutation slot.
-                    // The closure runs in spawn_blocking — move backend clone in.
+                    // Execute update through dispatch_mutation — atomically
+                    // starts the job and acquires the mutation slot.
                     let backend_for_mutation = backend_clone.clone();
                     let pkg_name_for_mutation = pkg_name.clone();
                     let update_result = scheduler_clone
-                        .run_mutation(job_id_clone, move || {
+                        .dispatch_mutation(job_id_clone, move || {
                             backend_for_mutation.update_package(&pkg_name_for_mutation)
                         })
                         .await;
@@ -890,13 +885,12 @@ pub async fn update_package(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                scheduler_clone.wait_and_start_job(&job_id_clone).await;
-
-                // Execute update through the scheduler's mutation slot
+                // Execute update through dispatch_mutation — atomically
+                // starts the job and acquires the mutation slot.
                 let backend_for_mutation = backend_clone.clone();
                 let pkg_name_for_mutation = pkg_name.clone();
                 let update_result = scheduler_clone
-                    .run_mutation(job_id_clone, move || {
+                    .dispatch_mutation(job_id_clone, move || {
                         backend_for_mutation.update_package(&pkg_name_for_mutation)
                     })
                     .await;
@@ -966,13 +960,12 @@ pub async fn remove_package(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                scheduler_clone.wait_and_start_job(&job_id_clone).await;
-
-                // Execute removal through the scheduler's mutation slot
+                // Execute removal through dispatch_mutation — atomically
+                // starts the job and acquires the mutation slot.
                 let backend_for_mutation = backend_clone.clone();
                 let pkg_name_for_mutation = pkg_name.clone();
                 let remove_result = scheduler_clone
-                    .run_mutation(job_id_clone, move || {
+                    .dispatch_mutation(job_id_clone, move || {
                         backend_for_mutation.remove_package(&pkg_name_for_mutation, false)
                     })
                     .await;
