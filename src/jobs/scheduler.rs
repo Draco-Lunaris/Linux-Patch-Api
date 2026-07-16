@@ -95,6 +95,12 @@ pub struct SchedulerState {
     /// The job ID currently executing a package-DB mutation, if any.
     /// At most one mutation runs at a time.
     active_mutation: Option<Uuid>,
+    /// Monotonic generation counter for mutation ownership. Incremented
+    /// each time a mutation acquires the slot. The watchdog stores the
+    /// generation at acquisition time and checks it before clearing
+    /// shared state, preventing a stale watchdog from clearing a newer
+    /// operation's ownership.
+    mutation_generation: u64,
     /// Active self-update operation, if any.
     self_update: Option<UpgradeOperation>,
     /// Pending reboot reservation: the job ID of the owner, if any.
@@ -124,6 +130,7 @@ impl Scheduler {
                 admission: AdmissionMode::Open,
                 jobs: HashMap::new(),
                 active_mutation: None,
+                mutation_generation: 0,
                 self_update: None,
                 reboot_pending: None,
                 max_concurrent: max_concurrent.max(1),
@@ -592,6 +599,10 @@ impl Scheduler {
 
             // All slots acquired atomically.
             state.active_mutation = Some(job_id);
+            // Increment the mutation generation so the watchdog can
+            // verify it still owns the slot before clearing shared state.
+            state.mutation_generation = state.mutation_generation.wrapping_add(1);
+            let generation = state.mutation_generation;
             if let Some(job) = state.jobs.get_mut(&job_id) {
                 if !job_already_running {
                     job.status = JobStatus::Running;
@@ -622,19 +633,24 @@ impl Scheduler {
                 // Watchdog: always clear active_mutation and finalize
                 // the job state. The caller may have been dropped
                 // (cancelled) but the job must reach a terminal state.
+                //
+                // Ownership safety: verify the generation matches
+                // before clearing shared state. A stale watchdog from
+                // a previous operation must not clear a newer
+                // operation's mutation ownership.
                 let mut state = sched.state.lock().await;
-                if state.active_mutation == Some(job_id_owned) {
+                let still_owns = state.active_mutation == Some(job_id_owned)
+                    && state.mutation_generation == generation;
+
+                if still_owns {
                     state.active_mutation = None;
                 }
 
                 // Try to send the result to the caller. If the caller
                 // was cancelled (dropped), the receiver is gone and
-                // the send fails — we mark the job Failed (cancelled)
-                // because we cannot know the caller's intent.
+                // the send fails — we mark the job terminal.
                 let caller_alive = if let Ok(mut guard) = result_tx.lock() {
                     if let Some(tx) = guard.take() {
-                        // The send returns Err if the receiver was
-                        // dropped. We use this to detect cancellation.
                         if tx.send(result).is_ok() {
                             true
                         } else {
@@ -647,20 +663,50 @@ impl Scheduler {
                     false
                 };
 
-                if !caller_alive {
+                if !caller_alive && still_owns {
+                    // Terminal-state policy for caller cancellation:
+                    //
+                    // - caller absent, closure succeeds: mark Failed
+                    //   with a message explaining the caller was
+                    //   cancelled after the underlying operation
+                    //   completed. The operation ran to completion but
+                    //   the result could not be delivered.
+                    //
+                    // - caller absent, closure fails: mark Failed with
+                    //   the underlying diagnostic preserved.
+                    //
+                    // - closure panicked: mark Failed (the JoinError
+                    //   is already captured in `result` as an Err).
+                    //
+                    // In all cases the job must NOT remain Running.
                     if let Some(job) = state.jobs.get_mut(&job_id_owned) {
                         if matches!(job.status, JobStatus::Running | JobStatus::Pending) {
                             job.status = JobStatus::Failed;
-                            job.error = Some(
-                                "Caller cancelled before mutation result was received"
-                                    .to_string(),
-                            );
+                            match &result {
+                                Ok(_) => {
+                                    job.error = Some(
+                                        "Caller cancelled after mutation completed — result could not be delivered"
+                                            .to_string(),
+                                    );
+                                    job.add_log(
+                                        "Watchdog: caller dropped, operation succeeded but result undeliverable"
+                                            .to_string(),
+                                    );
+                                }
+                                Err(e) => {
+                                    let diag = format!(
+                                        "Caller cancelled with underlying error: {}",
+                                        e
+                                    );
+                                    job.error = Some(diag);
+                                    job.add_log(
+                                        "Watchdog: caller dropped, operation failed"
+                                            .to_string(),
+                                    );
+                                }
+                            }
                             job.completed_at = Some(Utc::now());
                             job.updated_at = job.completed_at.unwrap();
-                            job.add_log(
-                                "Watchdog: caller dropped, marking job Failed (cancelled)"
-                                    .to_string(),
-                            );
                             let event_data =
                                 (job.status.clone(), job.progress, job.message.clone());
                             emit_event(
@@ -967,6 +1013,7 @@ impl Scheduler {
         SchedulerStateSnapshot {
             admission: s.admission,
             active_mutation: s.active_mutation,
+            mutation_generation: s.mutation_generation,
             self_update: s.self_update.clone(),
             reboot_pending: s.reboot_pending,
         }
@@ -1224,6 +1271,7 @@ pub struct RebootReservationGuard {
 pub struct SchedulerStateSnapshot {
     pub admission: AdmissionMode,
     pub active_mutation: Option<Uuid>,
+    pub mutation_generation: u64,
     pub self_update: Option<UpgradeOperation>,
     pub reboot_pending: Option<Uuid>,
 }

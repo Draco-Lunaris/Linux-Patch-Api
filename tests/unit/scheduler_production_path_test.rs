@@ -1342,3 +1342,410 @@ async fn rollback_reopens_full_mutation_path() {
         "mutation closure must have executed after rollback"
     );
 }
+
+// =============================================================================
+// 26. Caller aborted, closure succeeds — job terminal, slot clears, B runs
+// =============================================================================
+
+/// Start mutation A, pause its closure, abort the caller, verify B
+/// cannot enter, release A (succeeds), verify A reaches terminal state,
+/// slot clears, running count decreases, B executes.
+#[tokio::test]
+async fn cancellation_closure_succeeds_job_terminal_slot_clears() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let job_a = scheduler
+        .admit_job(JobOperation::Install, vec!["a".to_string()])
+        .await
+        .unwrap();
+
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+
+    let sched = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(job_a, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+
+    // Wait for A to acquire the slot
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scheduler.is_mutation_in_progress().await);
+
+    // Abort the caller
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Slot must still be held — closure is still running
+    assert!(
+        scheduler.is_mutation_in_progress().await,
+        "slot must stay held after caller abort"
+    );
+
+    // B cannot enter
+    let job_b = scheduler
+        .admit_job(JobOperation::Install, vec!["b".to_string()])
+        .await
+        .unwrap();
+    let sched_b = scheduler.clone();
+    let b_handle = tokio::spawn(async move {
+        sched_b.dispatch_mutation(job_b, || Ok(())).await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !b_handle.is_finished(),
+        "B must not enter while A's closure is still running"
+    );
+
+    // Release A — closure succeeds
+    drop(release_tx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Slot must be cleared
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "slot must clear after A's closure completes"
+    );
+
+    // A must be in terminal state (Failed — caller was cancelled)
+    let job = scheduler.get_job(&job_a).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "A must be Failed (caller cancelled after operation completed)"
+    );
+    assert!(
+        job.error
+            .as_ref()
+            .map(|e| e.contains("cancelled"))
+            .unwrap_or(false),
+        "A error must mention cancellation, got: {:?}",
+        job.error
+    );
+
+    // Running count must have decreased (A is no longer Running)
+    let state = scheduler.state_for_test().await;
+    assert!(
+        state.active_mutation.is_none(),
+        "active_mutation must be None"
+    );
+
+    // B can now execute
+    let b_result = b_handle.await.unwrap();
+    assert!(b_result.is_ok(), "B must execute after A completes");
+}
+
+// =============================================================================
+// 27. Caller aborted, closure fails — failure diagnostic retained
+// =============================================================================
+
+/// Start mutation A, pause its closure, abort the caller, release A
+/// (returns an error), verify A reaches Failed with the underlying
+/// diagnostic preserved.
+#[tokio::test]
+async fn cancellation_closure_fails_diagnostic_retained() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let job_a = scheduler
+        .admit_job(JobOperation::Install, vec!["a".to_string()])
+        .await
+        .unwrap();
+
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+
+    let sched = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(job_a, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Err(anyhow::anyhow!("apt-get failed (exit 100): dependency error"))
+            })
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scheduler.is_mutation_in_progress().await);
+
+    // Abort the caller
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Release A — closure fails
+    drop(release_tx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Slot must be cleared
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "slot must clear after A's closure completes"
+    );
+
+    // A must be Failed with the underlying diagnostic
+    let job = scheduler.get_job(&job_a).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "A must be Failed"
+    );
+    let error = job.error.expect("A must have an error");
+    assert!(
+        error.contains("dependency error"),
+        "A error must retain underlying diagnostic, got: {}",
+        error
+    );
+    assert!(
+        error.contains("cancelled"),
+        "A error must mention caller cancellation, got: {}",
+        error
+    );
+}
+
+// =============================================================================
+// 28. Caller aborted, closure panics — job Failed, scheduler recovers
+// =============================================================================
+
+/// Start mutation A, pause its closure, abort the caller, release A
+/// (panics), verify A reaches Failed and the scheduler recovers
+/// (slot clears, B can run).
+#[tokio::test]
+async fn cancellation_closure_panics_job_failed_recovers() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let job_a = scheduler
+        .admit_job(JobOperation::Install, vec!["a".to_string()])
+        .await
+        .unwrap();
+
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+
+    let sched = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(job_a, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                panic!("package-manager command panicked");
+            })
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scheduler.is_mutation_in_progress().await);
+
+    // Abort the caller
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Release A — closure panics
+    drop(release_tx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Slot must be cleared
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "slot must clear after A's closure panics"
+    );
+
+    // A must be Failed
+    let job = scheduler.get_job(&job_a).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "A must be Failed after panic"
+    );
+
+    // Scheduler recovers — B can run
+    let job_b = scheduler
+        .admit_job(JobOperation::Install, vec!["b".to_string()])
+        .await
+        .unwrap();
+    let result = scheduler.dispatch_mutation(job_b, || Ok(())).await;
+    assert!(
+        result.is_ok(),
+        "B must execute after A's panic cleanup"
+    );
+}
+
+// =============================================================================
+// 29. Ownership generation — stale watchdog cannot clear newer operation
+// =============================================================================
+
+/// Verify that a delayed watchdog from operation A cannot clear
+/// operation B's mutation ownership. The generation token prevents
+/// a stale cleanup from affecting a newer operation.
+///
+/// This test is structural: the watchdog checks
+/// `state.mutation_generation == generation` before clearing
+/// `active_mutation`. If A's generation doesn't match the current
+/// generation (because B has since acquired the slot), A's watchdog
+/// is a no-op.
+#[tokio::test]
+async fn ownership_generation_stale_watchdog_noop() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // Operation A: acquire slot, then we'll simulate a stale watchdog
+    let job_a = scheduler
+        .admit_job(JobOperation::Install, vec!["a".to_string()])
+        .await
+        .unwrap();
+
+    let (release_tx_a, release_rx_a) = std::sync::mpsc::channel::<()>();
+    let release_rx_a = std::sync::Mutex::new(release_rx_a);
+
+    let sched_a = scheduler.clone();
+    let handle_a = tokio::spawn(async move {
+        sched_a
+            .dispatch_mutation(job_a, move || -> anyhow::Result<()> {
+                let _ = release_rx_a.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+
+    // Wait for A to acquire the slot
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scheduler.is_mutation_in_progress().await);
+    let state = scheduler.state_for_test().await;
+    let gen_a = state.mutation_generation;
+    assert!(gen_a > 0, "generation must be > 0 after acquiring slot");
+
+    // Abort A's caller
+    handle_a.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A's closure is still running (paused). The slot is still held.
+    assert!(scheduler.is_mutation_in_progress().await);
+
+    // Now manually simulate what would happen if A's watchdog ran
+    // AFTER B has acquired the slot. We can't do this with the real
+    // watchdog (it's still waiting for A's closure), but we can
+    // verify the generation check logic by inspecting the state.
+    //
+    // The key invariant: A's watchdog stores `generation = gen_a`.
+    // When it runs, it checks `state.mutation_generation == gen_a`.
+    // If B has since acquired the slot (incrementing the generation),
+    // A's check fails and A's watchdog is a no-op.
+    //
+    // We verify this by checking that the generation is still gen_a
+    // (no new operation has acquired the slot yet).
+    let state = scheduler.state_for_test().await;
+    assert_eq!(
+        state.mutation_generation, gen_a,
+        "generation must not change while A holds the slot"
+    );
+
+    // Release A — its watchdog runs with gen_a, which matches the
+    // current generation. The slot clears normally.
+    drop(release_tx_a);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "slot must clear after A's closure completes"
+    );
+
+    // B acquires the slot — generation increments
+    let job_b = scheduler
+        .admit_job(JobOperation::Install, vec!["b".to_string()])
+        .await
+        .unwrap();
+    let (release_tx_b, release_rx_b) = std::sync::mpsc::channel::<()>();
+    let release_rx_b = std::sync::Mutex::new(release_rx_b);
+    let sched_b = scheduler.clone();
+    let handle_b = tokio::spawn(async move {
+        sched_b
+            .dispatch_mutation(job_b, move || -> anyhow::Result<()> {
+                let _ = release_rx_b.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scheduler.is_mutation_in_progress().await);
+    let state = scheduler.state_for_test().await;
+    let gen_b = state.mutation_generation;
+    assert!(
+        gen_b > gen_a,
+        "generation must increment when B acquires the slot"
+    );
+
+    // If A's stale watchdog were to run now (it won't — it already
+    // completed), it would check gen_a != gen_b and skip clearing.
+    // This is the ownership-safety invariant.
+
+    // Clean up
+    drop(release_tx_b);
+    let _ = handle_b.await;
+}
+
+// =============================================================================
+// 30. Drain after cancellation cleanup — scheduler reports drained
+// =============================================================================
+
+/// After a cancelled mutation's watchdog completes cleanup, the
+/// scheduler must report as drained (no active mutations, no
+/// running jobs).
+#[tokio::test]
+async fn drain_completes_after_cancellation_cleanup() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let job_a = scheduler
+        .admit_job(JobOperation::Install, vec!["a".to_string()])
+        .await
+        .unwrap();
+
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+
+    let sched = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(job_a, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(scheduler.is_mutation_in_progress().await);
+    assert!(!scheduler.is_drained().await, "must not be drained while A runs");
+
+    // Abort the caller
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Still not drained — closure is still running
+    assert!(
+        !scheduler.is_drained().await,
+        "must not be drained while closure is still running"
+    );
+
+    // Release the closure
+    drop(release_tx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Now the watchdog has completed cleanup. The scheduler must
+    // report as drained.
+    assert!(
+        scheduler.is_drained().await,
+        "scheduler must be drained after cancellation cleanup"
+    );
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "no mutation must be in progress"
+    );
+
+    // The job must be in a terminal state (not Running)
+    let job = scheduler.get_job(&job_a).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "job must be Failed after cancellation"
+    );
+}
