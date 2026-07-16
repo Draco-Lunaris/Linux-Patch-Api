@@ -385,6 +385,13 @@ log "Step 5: Starting linux-patch-api.service..."
 sudo systemctl daemon-reload
 sudo systemctl enable linux-patch-api.service
 
+# Stop any previously-running instance first — the package may have
+# been installed from a prior CI run, and `systemctl start` is a
+# no-op if the service is already active. We need a clean restart
+# so the service picks up the new test config and TLS material.
+sudo systemctl stop linux-patch-api.service 2>/dev/null || true
+sleep 2
+
 # Start the service — this MUST succeed
 sudo systemctl start linux-patch-api.service 2>&1 | tee "$ARTIFACT_DIR/service-start.log" || {
     systemctl status linux-patch-api.service > "$ARTIFACT_DIR/service-status.txt" 2>&1 || true
