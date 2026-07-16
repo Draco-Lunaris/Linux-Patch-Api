@@ -403,10 +403,13 @@ sudo systemctl stop linux-patch-api-upgrade-restart.timer 2>/dev/null || true
 sudo rm -f /var/lib/linux_patch_api/upgrade-pending \
            /var/lib/linux_patch_api/upgrade-state.json 2>/dev/null || true
 
-# Start the service — this MUST succeed. We capture the exit code
-# separately from the tee pipe so pipefail doesn't interfere.
+# Start the service — this MUST succeed. We temporarily disable
+# set -e so we can capture the exit code and produce diagnostics
+# before failing.
+set +e
 sudo systemctl start linux-patch-api.service > "$ARTIFACT_DIR/service-start.log" 2>&1
 START_RC=$?
+set -e
 if [[ $START_RC -ne 0 ]]; then
     systemctl status linux-patch-api.service > "$ARTIFACT_DIR/service-status.txt" 2>&1 || true
     journalctl -u linux-patch-api.service --no-pager -b > "$ARTIFACT_DIR/journal-lpa.txt" 2>&1 || true
