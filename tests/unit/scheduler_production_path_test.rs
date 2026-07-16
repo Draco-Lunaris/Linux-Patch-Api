@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use linux_patch_api::jobs::manager::{JobOperation, JobStatus};
 use linux_patch_api::jobs::scheduler::{
-    AdmissionMode, RebootAdmissionError, Scheduler, TryMutationError,
+    AdmissionMode, RebootAdmissionError, Scheduler, SelfUpdateAdmissionError, TryMutationError,
 };
 
 // =============================================================================
@@ -1762,5 +1762,329 @@ async fn drain_completes_after_cancellation_cleanup() {
         job.status,
         JobStatus::Failed,
         "job must be Failed after cancellation"
+    );
+}
+
+// =============================================================================
+// 31. Self-update owner can enter its mutation closure
+// =============================================================================
+
+/// The self-update handler reserves `state.self_update`, creates the
+/// owning job, then calls `dispatch_mutation(job_id, ...)`.
+/// `dispatch_mutation` must allow the owning job through — otherwise
+/// the self-update blocks itself.
+#[tokio::test]
+async fn self_update_owner_enters_mutation_closure() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0.0", "2.0.0")
+        .await
+        .unwrap();
+    let job_id = guard.commit();
+
+    assert!(
+        scheduler.is_self_update_in_progress().await,
+        "self-update should be reserved"
+    );
+
+    // The owning job must be able to enter its mutation closure.
+    let result: Result<(), anyhow::Error> = scheduler.dispatch_mutation(job_id, || Ok(())).await;
+    assert!(
+        result.is_ok(),
+        "owning self-update job must enter its mutation closure, got: {:?}",
+        result
+    );
+
+    // Self-update ownership must NOT be cleared by dispatch_mutation.
+    assert!(
+        scheduler.is_self_update_in_progress().await,
+        "self-update ownership must remain set after dispatch_mutation"
+    );
+}
+
+// =============================================================================
+// 32. Non-owning package job rejected while self-update is reserved
+// =============================================================================
+
+/// While a self-update is reserved, `dispatch_mutation` must reject
+/// every mutation job whose job_id does not match the self-update
+/// owner. This preserves the self-update barrier for all non-owning
+/// jobs.
+#[tokio::test]
+async fn non_owning_job_rejected_during_self_update() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0.0", "2.0.0")
+        .await
+        .unwrap();
+    let _su_job_id = guard.commit();
+
+    // A different job_id (not the self-update owner) must be rejected.
+    let other_job_id = uuid::Uuid::new_v4();
+    let result: Result<(), anyhow::Error> =
+        scheduler.dispatch_mutation(other_job_id, || Ok(())).await;
+    assert!(
+        result.is_err(),
+        "non-owning job must be rejected while self-update is reserved"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("self-update"),
+        "error should mention self-update, got: {}",
+        err_msg
+    );
+
+    // No mutation should have started.
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "no mutation should be in progress after rejection"
+    );
+}
+
+// =============================================================================
+// 33. A second self-update reservation is rejected
+// =============================================================================
+
+/// While a self-update is already reserved, a second self-update
+/// reservation must be rejected by `try_reserve_self_update`. This
+/// is the first line of defense; `dispatch_mutation` is the second.
+#[tokio::test]
+async fn second_self_update_reservation_rejected() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0.0", "2.0.0")
+        .await
+        .unwrap();
+    let su_job_id = guard.commit();
+
+    // A second reservation must fail.
+    let result = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "2.0.0", "3.0.0")
+        .await;
+    assert!(
+        matches!(result, Err(SelfUpdateAdmissionError::AlreadyInProgress)),
+        "second self-update reservation must be rejected"
+    );
+
+    // The original self-update must still be in progress.
+    assert!(
+        scheduler.is_self_update_in_progress().await,
+        "original self-update must still be in progress"
+    );
+
+    // The owning job can still enter its mutation closure.
+    let result: Result<(), anyhow::Error> = scheduler.dispatch_mutation(su_job_id, || Ok(())).await;
+    assert!(
+        result.is_ok(),
+        "owning self-update job must still be able to run after rejected second reservation"
+    );
+}
+
+// =============================================================================
+// 34. Reboot reservation blocks the owning self-update mutation
+// =============================================================================
+
+/// A reboot reservation must block even the owning self-update job's
+/// mutation. The reboot check (step 2) precedes the self-update
+/// owner check (step 3) in `dispatch_mutation`, so a reboot
+/// reservation rejects the owning self-update job.
+#[tokio::test]
+async fn reboot_reservation_blocks_owning_self_update_mutation() {
+    let scheduler = Scheduler::new(5, 10);
+
+    // Reserve self-update first.
+    let guard = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0.0", "2.0.0")
+        .await
+        .unwrap();
+    let su_job_id = guard.commit();
+
+    // We need a reboot reservation while self-update is active.
+    // reserve_reboot with force=false rejects if self_update is set.
+    // Use force=true + ack=true to bypass (audit-logged).
+    let reboot_guard = scheduler.reserve_reboot(true, true).await.unwrap();
+    let reboot_job_id = reboot_guard.job_id;
+
+    assert!(
+        scheduler.is_self_update_in_progress().await,
+        "self-update should still be in progress"
+    );
+
+    // The owning self-update job must be rejected because reboot is reserved.
+    let result: Result<(), anyhow::Error> = scheduler.dispatch_mutation(su_job_id, || Ok(())).await;
+    assert!(
+        result.is_err(),
+        "owning self-update mutation must be rejected when reboot is reserved"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("reboot"),
+        "error should mention reboot reservation, got: {}",
+        err_msg
+    );
+
+    // No mutation should have started.
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "no mutation should be in progress"
+    );
+
+    // Clean up: roll back the reboot so the owning self-update can proceed.
+    assert!(
+        scheduler
+            .rollback_reboot(reboot_job_id, Some("test rollback".to_string()))
+            .await,
+        "rollback should succeed for the owner"
+    );
+
+    // Now the owning self-update job can enter its mutation closure.
+    let result: Result<(), anyhow::Error> = scheduler.dispatch_mutation(su_job_id, || Ok(())).await;
+    assert!(
+        result.is_ok(),
+        "owning self-update job must run after reboot rollback, got: {:?}",
+        result
+    );
+}
+
+// =============================================================================
+// 35. Self-update ownership persists until lifecycle release
+// =============================================================================
+
+/// `dispatch_mutation` must NOT clear or transfer self-update
+/// ownership. The ownership remains set until the self-update
+/// lifecycle (release_self_update or force_clear_self_update)
+/// releases it.
+#[tokio::test]
+async fn self_update_ownership_persists_through_dispatch() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0.0", "2.0.0")
+        .await
+        .unwrap();
+    let su_job_id = guard.commit();
+
+    // Run the owning mutation — succeeds.
+    let result: Result<(), anyhow::Error> = scheduler.dispatch_mutation(su_job_id, || Ok(())).await;
+    assert!(result.is_ok());
+
+    // Ownership must still be set after dispatch_mutation completes.
+    assert!(
+        scheduler.is_self_update_in_progress().await,
+        "self-update ownership must persist after dispatch_mutation"
+    );
+
+    // Verify via state snapshot that the job_id matches.
+    let snap = scheduler.state_for_test().await;
+    assert!(snap.self_update.is_some(), "self_update field must be Some");
+    assert_eq!(
+        snap.self_update.as_ref().unwrap().job_id,
+        su_job_id,
+        "self_update job_id must match the owning job"
+    );
+
+    // Run a second dispatch_mutation for the same owning job —
+    // ownership must still be set.
+    let result: Result<(), anyhow::Error> = scheduler.dispatch_mutation(su_job_id, || Ok(())).await;
+    assert!(result.is_ok());
+    assert!(
+        scheduler.is_self_update_in_progress().await,
+        "self-update ownership must persist after second dispatch_mutation"
+    );
+
+    // Now release via the lifecycle API.
+    let released = scheduler.release_self_update(&su_job_id).await;
+    assert!(released, "release_self_update should succeed for the owner");
+    assert!(
+        !scheduler.is_self_update_in_progress().await,
+        "self-update ownership must be cleared after release_self_update"
+    );
+}
+
+// =============================================================================
+// 36. Caller cancellation finalizes the self-update job safely
+// =============================================================================
+
+/// When the caller future is cancelled while the owning self-update
+/// mutation's blocking closure is still running, the watchdog must
+/// finalize the job state (Failed) and release the mutation slot.
+/// Self-update ownership must remain set (it is released by the
+/// self-update lifecycle, not by dispatch_mutation).
+#[tokio::test]
+async fn caller_cancellation_finalizes_self_update_job() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let guard = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0.0", "2.0.0")
+        .await
+        .unwrap();
+    let su_job_id = guard.commit();
+
+    // Use a barrier to keep the blocking closure running.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+
+    let sched = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(su_job_id, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+
+    // Wait for the mutation to start.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        scheduler.is_mutation_in_progress().await,
+        "owning self-update mutation should be in progress"
+    );
+
+    // Cancel the caller.
+    handle.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The mutation slot is still held while the closure runs.
+    assert!(
+        scheduler.is_mutation_in_progress().await,
+        "mutation slot must be held while closure is still running"
+    );
+
+    // Release the closure — the watchdog finalizes the job.
+    drop(release_tx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The mutation slot must be released.
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "mutation slot must be released after watchdog cleanup"
+    );
+
+    // The job must be in a terminal state (Failed due to cancellation).
+    let job = scheduler.get_job(&su_job_id).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "self-update job must be Failed after caller cancellation"
+    );
+
+    // Self-update ownership must remain set — dispatch_mutation does
+    // not clear it. The self-update lifecycle (release/force_clear)
+    // is responsible.
+    assert!(
+        scheduler.is_self_update_in_progress().await,
+        "self-update ownership must remain set after cancellation — \
+         it is released by the self-update lifecycle, not dispatch_mutation"
+    );
+
+    // Clean up.
+    scheduler.force_clear_self_update().await;
+    assert!(
+        !scheduler.is_self_update_in_progress().await,
+        "self-update ownership must be cleared after force_clear"
     );
 }

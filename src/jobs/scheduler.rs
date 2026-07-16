@@ -562,10 +562,24 @@ impl Scheduler {
             }
 
             // 3. Self-update conflict
-            if state.self_update.is_some() {
-                return Err(anyhow::anyhow!(
-                    "Mutation rejected — self-update in progress"
-                ));
+            //
+            // When a self-update is reserved, only the job that OWNS
+            // that reservation may enter its mutation closure. Every
+            // other mutation (package jobs AND a second self-update
+            // attempt) is rejected. This preserves the self-update
+            // barrier for all non-owning jobs while allowing the
+            // owning self-update job to actually execute its package
+            // command through dispatch_mutation.
+            //
+            // Ownership is NOT cleared or transferred here — it
+            // remains set until the self-update lifecycle (guard
+            // commit/release or force_clear) releases it.
+            if let Some(ref su) = state.self_update {
+                if su.job_id != job_id {
+                    return Err(anyhow::anyhow!(
+                        "Mutation rejected — self-update in progress"
+                    ));
+                }
             }
 
             // 4. Job must exist and be Pending
