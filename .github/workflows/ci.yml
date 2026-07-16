@@ -124,16 +124,26 @@ jobs:
 
   # ── Packaged Service Integration Tests (PR + tag, self-hosted) ──────────
   #
-  # These jobs build the .deb on real Ubuntu runners, install it, start
-  # the systemd service, and verify the service environment is compatible
-  # with package management. They run on pull requests AND tag pushes —
-  # not just tags — because the ProtectKernelModules=true failure passed
-  # tag-only CI while corrupting initramfs on real hosts.
+  # These jobs build the .deb on real Ubuntu runners, install it,
+  # generate temporary TLS material, start linux-patch-api.service,
+  # require it to reach active, then submit package operations
+  # through the real mTLS API endpoint. The package transaction runs
+  # as a descendant of linux-patch-api.service — NOT from the runner
+  # shell.
   #
-  # The kernel/initramfs regression test reinstalls the kernel package
-  # and verifies the initramfs is generated with modules. The reboot
-  # step is skipped on CI runners (requires a disposable VM) but the
-  # initramfs verification provides the critical coverage.
+  # Two test phases:
+  #   1. Basic service-path: harmless package reinstall via API
+  #   2. Kernel regression: reinstall a known installed kernel package
+  #      via API and verify initramfs integrity (vmlinuz, initrd,
+  #      lsinitramfs, module entries for the exact kernel ABI)
+  #
+  # LXC runners that lack /lib/modules use an explicitly named
+  # REDUCED_COVERAGE mode that is NOT reported as full kernel coverage.
+  #
+  # Artifacts uploaded: effective unit, service status, API request and
+  # job output, process/cgroup evidence, apt history and terminal logs,
+  # dpkg log and audit output, exact tested kernel ABI, lsinitramfs
+  # output.
 
   integration-u2404:
     name: Integration (Ubuntu 24.04)
@@ -145,7 +155,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y initramfs-tools 2>/dev/null || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl python3 initramfs-tools 2>/dev/null || true
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Run integration test
@@ -170,7 +180,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y initramfs-tools 2>/dev/null || true
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl openssl python3 initramfs-tools 2>/dev/null || true
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Run integration test
