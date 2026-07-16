@@ -385,19 +385,34 @@ log "Step 5: Starting linux-patch-api.service..."
 sudo systemctl daemon-reload
 sudo systemctl enable linux-patch-api.service
 
-# Stop any previously-running instance first — the package may have
-# been installed from a prior CI run, and `systemctl start` is a
-# no-op if the service is already active. We need a clean restart
-# so the service picks up the new test config and TLS material.
+# Reset any failed state from a prior run, then stop to ensure a
+# clean start. The package may have been installed from a prior CI
+# run, and `systemctl start` is a no-op if the service is already
+# active. We need a clean restart so the service picks up the new
+# test config and TLS material.
+sudo systemctl reset-failed linux-patch-api.service 2>/dev/null || true
 sudo systemctl stop linux-patch-api.service 2>/dev/null || true
 sleep 2
 
-# Start the service — this MUST succeed
-sudo systemctl start linux-patch-api.service 2>&1 | tee "$ARTIFACT_DIR/service-start.log" || {
+# Clean up any leftover upgrade state from a prior CI run. If the
+# upgrade-pending marker or upgrade-state.json exists from a previous
+# self-update test, the service enters recovery mode on startup and
+# may fail to reach active. Also stop the upgrade-restart timer that
+# the postinst may have started.
+sudo systemctl stop linux-patch-api-upgrade-restart.timer 2>/dev/null || true
+sudo rm -f /var/lib/linux_patch_api/upgrade-pending \
+           /var/lib/linux_patch_api/upgrade-state.json 2>/dev/null || true
+
+# Start the service — this MUST succeed. We capture the exit code
+# separately from the tee pipe so pipefail doesn't interfere.
+sudo systemctl start linux-patch-api.service > "$ARTIFACT_DIR/service-start.log" 2>&1
+START_RC=$?
+if [[ $START_RC -ne 0 ]]; then
     systemctl status linux-patch-api.service > "$ARTIFACT_DIR/service-status.txt" 2>&1 || true
     journalctl -u linux-patch-api.service --no-pager -b > "$ARTIFACT_DIR/journal-lpa.txt" 2>&1 || true
-    fail "linux-patch-api.service failed to start" 2
-}
+    cat "$ARTIFACT_DIR/service-start.log"
+    fail "linux-patch-api.service failed to start (exit code $START_RC)" 2
+fi
 
 # Wait for the service to reach active (Type=notify, so this waits for READY=1)
 log "Waiting for service to reach active..."
