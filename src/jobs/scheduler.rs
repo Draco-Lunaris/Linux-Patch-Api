@@ -327,6 +327,10 @@ impl Scheduler {
         F: FnOnce() -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
+        use tokio::sync::oneshot;
+
+        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
+
         {
             let mut state = self.state.lock().await;
             if state.admission == AdmissionMode::Frozen {
@@ -345,38 +349,40 @@ impl Scheduler {
                 ));
             }
             state.active_mutation = Some(job_id);
+
+            // Spawn the blocking task. When it completes, it sends the
+            // result through the channel. A watchdog task receives the
+            // result and clears the slot. This ensures the slot is
+            // cleared when the blocking task finishes, even if the
+            // calling future is cancelled (aborted). The blocking task
+            // itself cannot be cancelled — it runs to completion on a
+            // blocking thread.
+            let sched = self.clone();
+            tokio::spawn(async move {
+                let join_handle = tokio::task::spawn_blocking(f);
+                let result = match join_handle.await {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(anyhow::anyhow!("Mutation task panicked: {}", join_err)),
+                };
+                // Clear the slot regardless of result
+                sched.state.lock().await.active_mutation = None;
+                // Send the result to the caller (if still waiting)
+                let _ = result_tx.send(result);
+            });
         }
 
-        // RAII guard: clears active_mutation on drop, even if the
-        // future is cancelled (task aborted) while awaiting spawn_blocking.
-        struct MutationGuard {
-            scheduler: Arc<Scheduler>,
+        // Await the result. If this future is cancelled (aborted),
+        // result_rx is dropped, but the watchdog task continues and
+        // clears the slot when the blocking task finishes. The slot
+        // stays set until the blocking task completes — no new
+        // mutation can start while the old command is still running.
+        match result_rx.await {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!(
+                "Mutation result channel closed — task was cancelled but blocking command may still be running"
+            )),
         }
-        impl Drop for MutationGuard {
-            fn drop(&mut self) {
-                if let Ok(mut state) = self.scheduler.state.try_lock() {
-                    state.active_mutation = None;
-                } else {
-                    let sched = self.scheduler.clone();
-                    tokio::spawn(async move {
-                        sched.state.lock().await.active_mutation = None;
-                    });
-                }
-            }
-        }
-
-        let guard = MutationGuard {
-            scheduler: self.clone(),
-        };
-
-        // Run the mutation outside the lock in a blocking thread.
-        // The guard is dropped after this, clearing the slot.
-        let result = tokio::task::spawn_blocking(f).await;
-
-        // Explicitly drop the guard (also dropped on early return/error)
-        drop(guard);
-
-        result.map_err(|e| anyhow::anyhow!("Mutation task panicked: {}", e))?
     }
 
     /// Try to run a mutation without blocking. Returns `Err(MutationBusy)`
@@ -386,7 +392,11 @@ impl Scheduler {
         F: FnOnce() -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        let job_id = Uuid::new_v4(); // synthetic ID for try_run
+        use tokio::sync::oneshot;
+
+        let job_id = Uuid::new_v4();
+        let (result_tx, result_rx) = oneshot::channel::<Result<T>>();
+
         {
             let mut state = self.state.lock().await;
             if state.admission != AdmissionMode::Open {
@@ -396,36 +406,29 @@ impl Scheduler {
                 return Err(TryMutationError::Busy);
             }
             state.active_mutation = Some(job_id);
+
+            // Same watchdog pattern as run_mutation: the slot is cleared
+            // when the blocking task completes, even if this future is
+            // cancelled.
+            let sched = self.clone();
+            tokio::spawn(async move {
+                let join_handle = tokio::task::spawn_blocking(f);
+                let result = match join_handle.await {
+                    Ok(inner) => inner,
+                    Err(join_err) => Err(anyhow::anyhow!("Task panicked: {}", join_err)),
+                };
+                sched.state.lock().await.active_mutation = None;
+                let _ = result_tx.send(result);
+            });
         }
 
-        // RAII guard for cancellation safety
-        struct MutationGuard {
-            scheduler: Arc<Scheduler>,
+        match result_rx.await {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(e)) => Err(TryMutationError::Failed(e)),
+            Err(_) => Err(TryMutationError::Failed(anyhow::anyhow!(
+                "Mutation result channel closed — task was cancelled but blocking command may still be running"
+            ))),
         }
-        impl Drop for MutationGuard {
-            fn drop(&mut self) {
-                if let Ok(mut state) = self.scheduler.state.try_lock() {
-                    state.active_mutation = None;
-                } else {
-                    let sched = self.scheduler.clone();
-                    tokio::spawn(async move {
-                        sched.state.lock().await.active_mutation = None;
-                    });
-                }
-            }
-        }
-
-        let guard = MutationGuard {
-            scheduler: self.clone(),
-        };
-
-        let result = tokio::task::spawn_blocking(f).await;
-
-        drop(guard);
-
-        result
-            .map_err(|e| TryMutationError::Failed(anyhow::anyhow!("Task panicked: {}", e)))?
-            .map_err(TryMutationError::Failed)
     }
 
     // ------------------------------------------------------------------
@@ -465,6 +468,42 @@ impl Scheduler {
 
     pub async fn get_job(&self, job_id: &Uuid) -> Option<Job> {
         self.state.lock().await.jobs.get(job_id).cloned()
+    }
+
+    /// Atomically transition a job to Running status, enforcing
+    /// max_concurrent. Returns Err if the concurrency limit is reached.
+    /// The job remains Pending if the transition is rejected.
+    pub async fn start_job(&self, job_id: &Uuid) -> Result<(), anyhow::Error> {
+        let mut state = self.state.lock().await;
+        let running = state
+            .jobs
+            .values()
+            .filter(|j| j.status == JobStatus::Running)
+            .count();
+        let already_running = state
+            .jobs
+            .get(job_id)
+            .map(|j| j.status == JobStatus::Running)
+            .unwrap_or(false);
+        if !already_running && running >= state.max_concurrent {
+            return Err(anyhow::anyhow!(
+                "max_concurrent limit ({}) reached — job remains pending",
+                state.max_concurrent
+            ));
+        }
+        let event_data;
+        if let Some(job) = state.jobs.get_mut(job_id) {
+            job.status = JobStatus::Running;
+            job.updated_at = Utc::now();
+            job.add_log("Job started".to_string());
+            event_data = Some((job.status.clone(), job.progress, job.message.clone()));
+        } else {
+            event_data = None;
+        }
+        if let Some((status, progress, message)) = event_data {
+            emit_event(&state, "job_status", job_id, &status, progress, &message);
+        }
+        Ok(())
     }
 
     pub async fn update_job(

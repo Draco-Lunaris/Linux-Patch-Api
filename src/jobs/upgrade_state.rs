@@ -602,17 +602,36 @@ pub fn finalize_successful_restart_at(state_path: &Path, marker_path: &Path) {
     clear_marker_at(marker_path);
 }
 
-/// Write a `Recovering` state to disk so the next startup (if this process
-/// crashes during recovery) also enters recovery mode.
+/// Write a `Recovering` state to disk, preserving the target version
+/// from the existing state file so startup verification can still
+/// check the installed version against the expected target.
 pub fn write_recovering_state() {
+    // Read the existing state to preserve target_version and from_version.
+    // If the state file is missing or corrupt, use empty strings (which
+    // will force the startup verification to fail-closed since it can't
+    // verify against an unknown target).
+    let (from_version, target_version, job_id, generation) = match read_state() {
+        Ok(existing) => (
+            existing.from_version,
+            existing.target_version,
+            existing.job_id,
+            existing.generation,
+        ),
+        Err(_) => (String::new(), String::new(), String::new(), 0),
+    };
+
     let state = UpgradeState {
         state: UpgradePhase::Recovering,
-        job_id: String::new(),
-        from_version: String::new(),
-        target_version: String::new(),
+        job_id,
+        from_version,
+        target_version,
         started_at: Utc::now().to_rfc3339(),
         restart_deadline: None,
-        generation: next_generation(),
+        generation: if generation > 0 {
+            generation
+        } else {
+            next_generation()
+        },
     };
     if let Err(e) = write_state(&state) {
         warn!(error = %e, "Failed to write recovering state — next startup may not detect recovery mode");

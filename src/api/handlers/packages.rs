@@ -304,18 +304,12 @@ pub async fn install_packages(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                // Update job to running
-                let _ = scheduler_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Starting installation...".to_string()),
-                    )
-                    .await;
-                let _ = scheduler_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
+                // Atomically transition to Running, enforcing max_concurrent.
+                // If max_concurrent is reached, keep the job pending and exit.
+                if let Err(e) = scheduler_clone.start_job(&job_id_clone).await {
+                    warn!(job_id = %job_id_clone, error = %e, "Job could not start — max_concurrent reached, keeping pending");
+                    return;
+                }
 
                 // Execute installation through the scheduler's mutation slot.
                 // The closure runs in spawn_blocking, so it must be Send + 'static
@@ -549,18 +543,12 @@ pub async fn update_package(
                 tokio::spawn(async move {
                     let job_id_clone = job_id;
 
-                    // Update job to running
-                    let _ = scheduler_clone
-                        .update_job(
-                            &job_id_clone,
-                            JobStatus::Running,
-                            Some(0),
-                            Some("Starting self-update...".to_string()),
-                        )
-                        .await;
-                    let _ = scheduler_clone
-                        .add_job_log(&job_id_clone, "Job started".to_string())
-                        .await;
+                    // Atomically transition to Running, enforcing max_concurrent.
+                    // If max_concurrent is reached, keep the job pending and exit.
+                    if let Err(e) = scheduler_clone.start_job(&job_id_clone).await {
+                        warn!(job_id = %job_id_clone, error = %e, "Job could not start — max_concurrent reached, keeping pending");
+                        return;
+                    }
 
                     // Transition from Reserving to Installing before invoking
                     // the package manager. FAIL-CLOSED: if this persistence
@@ -912,17 +900,12 @@ pub async fn update_package(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                let _ = scheduler_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Starting update...".to_string()),
-                    )
-                    .await;
-                let _ = scheduler_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
+                // Atomically transition to Running, enforcing max_concurrent.
+                // If max_concurrent is reached, keep the job pending and exit.
+                if let Err(e) = scheduler_clone.start_job(&job_id_clone).await {
+                    warn!(job_id = %job_id_clone, error = %e, "Job could not start — max_concurrent reached, keeping pending");
+                    return;
+                }
 
                 // Execute update through the scheduler's mutation slot
                 let backend_for_mutation = backend_clone.clone();
@@ -998,18 +981,12 @@ pub async fn remove_package(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                // Update job to running
-                let _ = scheduler_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Starting removal...".to_string()),
-                    )
-                    .await;
-                let _ = scheduler_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
+                // Atomically transition to Running, enforcing max_concurrent.
+                // If max_concurrent is reached, keep the job pending and exit.
+                if let Err(e) = scheduler_clone.start_job(&job_id_clone).await {
+                    warn!(job_id = %job_id_clone, error = %e, "Job could not start — max_concurrent reached, keeping pending");
+                    return;
+                }
 
                 // Execute removal through the scheduler's mutation slot
                 let backend_for_mutation = backend_clone.clone();

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
-use crate::jobs::manager::JobStatus;
+
 use crate::jobs::scheduler::{AdmissionMode, Scheduler};
 use crate::packages::PackageManagerBackend;
 
@@ -285,18 +285,12 @@ pub async fn reboot_system(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                // Update job to running
-                let _ = scheduler_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Preparing system reboot...".to_string()),
-                    )
-                    .await;
-                let _ = scheduler_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
+                // Atomically transition to Running, enforcing max_concurrent.
+                // If max_concurrent is reached, keep the job pending and exit.
+                if let Err(e) = scheduler_clone.start_job(&job_id_clone).await {
+                    warn!(job_id = %job_id_clone, error = %e, "Job could not start — max_concurrent reached, keeping pending");
+                    return;
+                }
 
                 // Execute reboot
                 match backend_clone.reboot_system(delay_clone) {

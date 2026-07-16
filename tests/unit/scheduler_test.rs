@@ -684,10 +684,12 @@ async fn max_concurrent_enforced_on_start() {
 // 17. Mutation cancellation clears the slot
 // =============================================================================
 
-/// Aborting the task that awaits run_mutation must clear the
-/// active_mutation slot so a new mutation can proceed.
+/// Aborting the task that awaits run_mutation must NOT clear the
+/// slot while the blocking command is still running. The slot stays
+/// set (fail-closed) until the blocking task completes, preventing
+/// a second mutation from overlapping with the still-running command.
 #[tokio::test]
-async fn mutation_cancellation_clears_slot() {
+async fn mutation_cancellation_keeps_slot_until_blocking_completes() {
     let scheduler = Scheduler::new(5, 10);
 
     let job_id = scheduler
@@ -714,27 +716,42 @@ async fn mutation_cancellation_clears_slot() {
         "mutation should be in progress"
     );
 
-    // Abort the task — this cancels the future
+    // Abort the task — this cancels the await but NOT the blocking command.
     handle.abort();
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // The slot must be cleared by the RAII guard
+    // The slot must STILL be set — the blocking command is still running.
+    // This prevents a second mutation from starting and overlapping.
     assert!(
-        !scheduler.is_mutation_in_progress().await,
-        "mutation slot must be cleared after task cancellation"
+        scheduler.is_mutation_in_progress().await,
+        "mutation slot must stay set after cancellation — blocking command still running"
     );
 
-    // A new mutation should be admissible
+    // A second mutation must be rejected while the first is still running
     let job2 = scheduler
         .admit_job(JobOperation::Install, vec!["pkg2".to_string()])
         .await
         .unwrap();
+    let result: Result<(), anyhow::Error> = scheduler.run_mutation(job2, || Ok(())).await;
+    assert!(
+        result.is_err(),
+        "second mutation must be rejected while first blocking command is still running"
+    );
+
+    // Release the channel — the blocking command completes
+    drop(tx);
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Now the slot must be cleared by the watchdog
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "mutation slot must be cleared after blocking command completes"
+    );
+
+    // A new mutation should now be admissible
     let result = scheduler.run_mutation(job2, || Ok(())).await;
     assert!(
         result.is_ok(),
-        "new mutation should succeed after cancellation"
+        "new mutation should succeed after blocking command completes"
     );
-
-    // Cleanup
-    drop(tx);
 }

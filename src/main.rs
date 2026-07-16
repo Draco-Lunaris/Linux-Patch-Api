@@ -690,16 +690,17 @@ async fn main() -> Result<()> {
             };
 
             let versions_match = if expected_target.is_empty() {
-                // No target version in state (e.g. InterruptedInstall with
-                // empty target) — accept if installed version matches running
-                installed_version.as_deref() == Some(&running_version)
+                // No target version in state — FAIL-CLOSED. We cannot
+                // verify the upgrade succeeded without knowing the
+                // expected target. Enter recovery mode.
+                false
             } else {
                 // All three must agree: running == installed == target
                 installed_version.as_deref() == Some(&running_version)
                     && installed_version.as_deref() == Some(&expected_target)
             };
 
-            if !versions_match && !expected_target.is_empty() {
+            if !versions_match {
                 error!(
                     running_version = %running_version,
                     installed_version = ?installed_version,
@@ -816,13 +817,14 @@ async fn main() -> Result<()> {
                 Err(_) => String::new(),
             };
             let versions_match = if expected_target.is_empty() {
-                installed_version.as_deref() == Some(&running_version)
+                // No target version — FAIL-CLOSED
+                false
             } else {
                 installed_version.as_deref() == Some(&running_version)
                     && installed_version.as_deref() == Some(&expected_target)
             };
 
-            if !versions_match && !expected_target.is_empty() {
+            if !versions_match {
                 error!(
                     running_version = %running_version,
                     installed_version = ?installed_version,

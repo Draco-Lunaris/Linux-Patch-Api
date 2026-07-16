@@ -156,18 +156,12 @@ pub async fn apply_patches(
             tokio::spawn(async move {
                 let job_id_clone = job_id;
 
-                // Update job to running
-                let _ = scheduler_clone
-                    .update_job(
-                        &job_id_clone,
-                        JobStatus::Running,
-                        Some(0),
-                        Some("Starting patch application...".to_string()),
-                    )
-                    .await;
-                let _ = scheduler_clone
-                    .add_job_log(&job_id_clone, "Job started".to_string())
-                    .await;
+                // Atomically transition to Running, enforcing max_concurrent.
+                // If max_concurrent is reached, keep the job pending and exit.
+                if let Err(e) = scheduler_clone.start_job(&job_id_clone).await {
+                    warn!(job_id = %job_id_clone, error = %e, "Job could not start — max_concurrent reached, keeping pending");
+                    return;
+                }
 
                 // MANDATORY: Refresh package cache before applying patches
                 let _ = scheduler_clone
@@ -264,21 +258,43 @@ pub async fn apply_patches(
                                             "Reboot admitted by scheduler".to_string(),
                                         )
                                         .await;
-                                    match backend_clone.reboot_system(request.reboot_delay_seconds)
-                                    {
-                                        Ok(_) => {
+                                    match scheduler_clone.admit_reboot(true, false).await {
+                                        Ok(_reboot_job_id) => {
                                             let _ = scheduler_clone
                                                 .add_job_log(
                                                     &job_id_clone,
-                                                    "Reboot command executed".to_string(),
+                                                    "Reboot admitted by scheduler".to_string(),
                                                 )
                                                 .await;
+                                            match backend_clone
+                                                .reboot_system(request.reboot_delay_seconds)
+                                            {
+                                                Ok(_) => {
+                                                    let _ = scheduler_clone
+                                                        .add_job_log(
+                                                            &job_id_clone,
+                                                            "Reboot command executed".to_string(),
+                                                        )
+                                                        .await;
+                                                }
+                                                Err(e) => {
+                                                    let _ = scheduler_clone
+                                                        .add_job_log(
+                                                            &job_id_clone,
+                                                            format!("Reboot failed: {}", e),
+                                                        )
+                                                        .await;
+                                                }
+                                            }
                                         }
-                                        Err(e) => {
+                                        Err(reboot_err) => {
                                             let _ = scheduler_clone
                                                 .add_job_log(
                                                     &job_id_clone,
-                                                    format!("Reboot failed: {}", e),
+                                                    format!(
+                                                        "Reboot admission rejected: {}",
+                                                        reboot_err
+                                                    ),
                                                 )
                                                 .await;
                                         }
@@ -366,21 +382,43 @@ pub async fn apply_patches(
                                             ),
                                         )
                                         .await;
-                                    match backend_clone.reboot_system(request.reboot_delay_seconds)
-                                    {
-                                        Ok(_) => {
+                                    match scheduler_clone.admit_reboot(true, false).await {
+                                        Ok(_reboot_job_id) => {
                                             let _ = scheduler_clone
                                                 .add_job_log(
                                                     &job_id_clone,
-                                                    "Reboot command executed".to_string(),
+                                                    "Reboot admitted by scheduler".to_string(),
                                                 )
                                                 .await;
+                                            match backend_clone
+                                                .reboot_system(request.reboot_delay_seconds)
+                                            {
+                                                Ok(_) => {
+                                                    let _ = scheduler_clone
+                                                        .add_job_log(
+                                                            &job_id_clone,
+                                                            "Reboot command executed".to_string(),
+                                                        )
+                                                        .await;
+                                                }
+                                                Err(e) => {
+                                                    let _ = scheduler_clone
+                                                        .add_job_log(
+                                                            &job_id_clone,
+                                                            format!("Reboot failed: {}", e),
+                                                        )
+                                                        .await;
+                                                }
+                                            }
                                         }
-                                        Err(e) => {
+                                        Err(reboot_err) => {
                                             let _ = scheduler_clone
                                                 .add_job_log(
                                                     &job_id_clone,
-                                                    format!("Reboot failed: {}", e),
+                                                    format!(
+                                                        "Reboot admission rejected: {}",
+                                                        reboot_err
+                                                    ),
                                                 )
                                                 .await;
                                         }
