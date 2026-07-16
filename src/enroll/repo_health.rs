@@ -153,8 +153,10 @@ pub async fn check_and_provision_repo_config(manager_url: &str) -> Result<RepoHe
         .await
         .context("Failed to fetch repo config from manager during self-heal")?;
 
-    let sources_match = read_file_content(&sources_path).as_deref() == Some(expected_repo.sources_config.as_str());
-    let keyring_match = read_file_content(&keyring_path).as_deref() == Some(expected_repo.gpg_public_key.as_str());
+    let sources_match =
+        read_file_content(&sources_path).as_deref() == Some(expected_repo.sources_config.as_str());
+    let keyring_match =
+        read_file_content(&keyring_path).as_deref() == Some(expected_repo.gpg_public_key.as_str());
 
     if sources_match && keyring_match {
         tracing::info!(
@@ -302,7 +304,10 @@ mod tests {
         let path = dir.path().join("data.txt");
         std::fs::write(&path, "some content").unwrap();
         let path_str = path.to_str().unwrap();
-        assert_eq!(read_file_content(path_str), Some("some content".to_string()));
+        assert_eq!(
+            read_file_content(path_str),
+            Some("some content".to_string())
+        );
     }
 
     #[test]
