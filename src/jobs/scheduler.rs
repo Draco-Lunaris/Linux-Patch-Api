@@ -322,7 +322,7 @@ impl Scheduler {
     /// The closure is executed OUTSIDE the lock — the lock is only held
     /// to set `active_mutation`. This prevents blocking the scheduler
     /// while a package-manager command runs.
-    pub async fn run_mutation<F, T>(&self, job_id: Uuid, f: F) -> Result<T>
+    pub async fn run_mutation<F, T>(self: &Arc<Self>, job_id: Uuid, f: F) -> Result<T>
     where
         F: FnOnce() -> Result<T> + Send + 'static,
         T: Send + 'static,
@@ -347,21 +347,41 @@ impl Scheduler {
             state.active_mutation = Some(job_id);
         }
 
-        // Run the mutation outside the lock in a blocking thread
+        // RAII guard: clears active_mutation on drop, even if the
+        // future is cancelled (task aborted) while awaiting spawn_blocking.
+        struct MutationGuard {
+            scheduler: Arc<Scheduler>,
+        }
+        impl Drop for MutationGuard {
+            fn drop(&mut self) {
+                if let Ok(mut state) = self.scheduler.state.try_lock() {
+                    state.active_mutation = None;
+                } else {
+                    let sched = self.scheduler.clone();
+                    tokio::spawn(async move {
+                        sched.state.lock().await.active_mutation = None;
+                    });
+                }
+            }
+        }
+
+        let guard = MutationGuard {
+            scheduler: self.clone(),
+        };
+
+        // Run the mutation outside the lock in a blocking thread.
+        // The guard is dropped after this, clearing the slot.
         let result = tokio::task::spawn_blocking(f).await;
 
-        // Clear the mutation slot regardless of result
-        {
-            let mut state = self.state.lock().await;
-            state.active_mutation = None;
-        }
+        // Explicitly drop the guard (also dropped on early return/error)
+        drop(guard);
 
         result.map_err(|e| anyhow::anyhow!("Mutation task panicked: {}", e))?
     }
 
     /// Try to run a mutation without blocking. Returns `Err(MutationBusy)`
     /// if a mutation is already in progress or admission is frozen.
-    pub async fn try_run_mutation<F, T>(&self, f: F) -> Result<T, TryMutationError>
+    pub async fn try_run_mutation<F, T>(self: &Arc<Self>, f: F) -> Result<T, TryMutationError>
     where
         F: FnOnce() -> Result<T> + Send + 'static,
         T: Send + 'static,
@@ -378,12 +398,30 @@ impl Scheduler {
             state.active_mutation = Some(job_id);
         }
 
+        // RAII guard for cancellation safety
+        struct MutationGuard {
+            scheduler: Arc<Scheduler>,
+        }
+        impl Drop for MutationGuard {
+            fn drop(&mut self) {
+                if let Ok(mut state) = self.scheduler.state.try_lock() {
+                    state.active_mutation = None;
+                } else {
+                    let sched = self.scheduler.clone();
+                    tokio::spawn(async move {
+                        sched.state.lock().await.active_mutation = None;
+                    });
+                }
+            }
+        }
+
+        let guard = MutationGuard {
+            scheduler: self.clone(),
+        };
+
         let result = tokio::task::spawn_blocking(f).await;
 
-        {
-            let mut state = self.state.lock().await;
-            state.active_mutation = None;
-        }
+        drop(guard);
 
         result
             .map_err(|e| TryMutationError::Failed(anyhow::anyhow!("Task panicked: {}", e)))?
@@ -405,6 +443,13 @@ impl Scheduler {
     pub async fn enter_recovery(&self) {
         let mut state = self.state.lock().await;
         state.admission = AdmissionMode::Recovery;
+    }
+
+    /// Reopen admission to normal operation. Called after successful
+    /// startup finalization or recovery completion.
+    pub async fn reopen_admission(&self) {
+        let mut state = self.state.lock().await;
+        state.admission = AdmissionMode::Open;
     }
 
     /// Check if the scheduler is drained (no active mutations, no running jobs).
@@ -430,6 +475,29 @@ impl Scheduler {
         message: Option<String>,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
+
+        // Enforce max_concurrent: reject transition to Running if
+        // max_concurrent running jobs already exist.
+        if status == JobStatus::Running {
+            let running = state
+                .jobs
+                .values()
+                .filter(|j| j.status == JobStatus::Running)
+                .count();
+            // Don't count the job being updated (it might already be Running)
+            let already_running = state
+                .jobs
+                .get(job_id)
+                .map(|j| j.status == JobStatus::Running)
+                .unwrap_or(false);
+            if !already_running && running >= state.max_concurrent {
+                return Err(anyhow::anyhow!(
+                    "max_concurrent limit ({}) reached — cannot start another job",
+                    state.max_concurrent
+                ));
+            }
+        }
+
         let event_data;
         if let Some(job) = state.jobs.get_mut(job_id) {
             job.status = status;

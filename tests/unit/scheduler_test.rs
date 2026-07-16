@@ -582,3 +582,159 @@ async fn is_drained_reports_correctly() {
         "should be drained after mutation completes"
     );
 }
+
+// =============================================================================
+// 15. Recovery reopens admission after successful finalization
+// =============================================================================
+
+/// After enter_recovery() and then reopen_admission(), the scheduler
+/// must accept jobs again.
+#[tokio::test]
+async fn recovery_reopens_admission_after_finalization() {
+    let scheduler = Scheduler::new(5, 10);
+
+    scheduler.enter_recovery().await;
+    assert_eq!(
+        scheduler.admission_mode().await,
+        AdmissionMode::Recovery,
+        "should be in recovery"
+    );
+
+    // Job admission must fail in recovery
+    let result = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
+        .await;
+    assert!(result.is_err(), "job admission should fail in recovery");
+
+    // Reopen admission
+    scheduler.reopen_admission().await;
+    assert_eq!(
+        scheduler.admission_mode().await,
+        AdmissionMode::Open,
+        "should be open after reopen"
+    );
+
+    // Job admission must succeed now
+    let result = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
+        .await;
+    assert!(result.is_ok(), "job admission should succeed after reopen");
+}
+
+// =============================================================================
+// 16. max_concurrent enforced on job start
+// =============================================================================
+
+/// With max_concurrent=1, starting a second job while one is running
+/// must fail.
+#[tokio::test]
+async fn max_concurrent_enforced_on_start() {
+    let scheduler = Scheduler::new(1, 10);
+
+    let j1 = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg1".to_string()])
+        .await
+        .unwrap();
+    let j2 = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg2".to_string()])
+        .await
+        .unwrap();
+
+    // Start j1 — should succeed
+    scheduler
+        .update_job(
+            &j1,
+            linux_patch_api::jobs::manager::JobStatus::Running,
+            Some(0),
+            Some("starting".to_string()),
+        )
+        .await
+        .unwrap();
+
+    // Start j2 — must fail (max_concurrent=1)
+    let result = scheduler
+        .update_job(
+            &j2,
+            linux_patch_api::jobs::manager::JobStatus::Running,
+            Some(0),
+            Some("starting".to_string()),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "starting j2 should fail with max_concurrent=1"
+    );
+
+    // Complete j1
+    scheduler.complete_job(&j1).await.unwrap();
+
+    // Now j2 should start
+    let result = scheduler
+        .update_job(
+            &j2,
+            linux_patch_api::jobs::manager::JobStatus::Running,
+            Some(0),
+            Some("starting".to_string()),
+        )
+        .await;
+    assert!(result.is_ok(), "j2 should start after j1 completes");
+}
+
+// =============================================================================
+// 17. Mutation cancellation clears the slot
+// =============================================================================
+
+/// Aborting the task that awaits run_mutation must clear the
+/// active_mutation slot so a new mutation can proceed.
+#[tokio::test]
+async fn mutation_cancellation_clears_slot() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let job_id = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
+        .await
+        .unwrap();
+
+    // Start a mutation that blocks on a channel
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let rx = std::sync::Mutex::new(rx);
+    let s = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        s.run_mutation(job_id, move || {
+            let _ = rx.lock().unwrap().recv();
+            Ok(())
+        })
+        .await
+    });
+
+    // Give it time to acquire the slot
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert!(
+        scheduler.is_mutation_in_progress().await,
+        "mutation should be in progress"
+    );
+
+    // Abort the task — this cancels the future
+    handle.abort();
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // The slot must be cleared by the RAII guard
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "mutation slot must be cleared after task cancellation"
+    );
+
+    // A new mutation should be admissible
+    let job2 = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg2".to_string()])
+        .await
+        .unwrap();
+    let result = scheduler.run_mutation(job2, || Ok(())).await;
+    assert!(
+        result.is_ok(),
+        "new mutation should succeed after cancellation"
+    );
+
+    // Cleanup
+    drop(tx);
+}

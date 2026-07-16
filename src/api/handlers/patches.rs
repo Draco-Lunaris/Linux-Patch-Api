@@ -251,19 +251,45 @@ pub async fn apply_patches(
                                     ),
                                 )
                                 .await;
-                            // Trigger actual reboot via system handler
-                            match backend_clone.reboot_system(request.reboot_delay_seconds) {
-                                Ok(_) => {
+                            // Trigger actual reboot via scheduler admission.
+                            // The patch job is completing, so we use force=true
+                            // to bypass the active-job check. But we still
+                            // check for active mutations (force=true, ack=false
+                            // rejects if a mutation is in progress).
+                            match scheduler_clone.admit_reboot(true, false).await {
+                                Ok(_reboot_job_id) => {
                                     let _ = scheduler_clone
                                         .add_job_log(
                                             &job_id_clone,
-                                            "Reboot command executed".to_string(),
+                                            "Reboot admitted by scheduler".to_string(),
                                         )
                                         .await;
+                                    match backend_clone.reboot_system(request.reboot_delay_seconds)
+                                    {
+                                        Ok(_) => {
+                                            let _ = scheduler_clone
+                                                .add_job_log(
+                                                    &job_id_clone,
+                                                    "Reboot command executed".to_string(),
+                                                )
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            let _ = scheduler_clone
+                                                .add_job_log(
+                                                    &job_id_clone,
+                                                    format!("Reboot failed: {}", e),
+                                                )
+                                                .await;
+                                        }
+                                    }
                                 }
-                                Err(e) => {
+                                Err(reboot_err) => {
                                     let _ = scheduler_clone
-                                        .add_job_log(&job_id_clone, format!("Reboot failed: {}", e))
+                                        .add_job_log(
+                                            &job_id_clone,
+                                            format!("Reboot admission rejected: {}", reboot_err),
+                                        )
                                         .await;
                                 }
                             }

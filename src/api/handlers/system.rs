@@ -15,7 +15,7 @@ use uuid::Uuid;
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
 use crate::jobs::manager::JobStatus;
-use crate::jobs::scheduler::Scheduler;
+use crate::jobs::scheduler::{AdmissionMode, Scheduler};
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
@@ -195,6 +195,16 @@ pub async fn health_check(
             cache_status_val.last_update.map(|dt| dt.to_rfc3339()),
         )
     };
+
+    // Check if the scheduler is in recovery mode. If so, report degraded.
+    let admission_mode = scheduler.admission_mode().await;
+    if admission_mode == AdmissionMode::Recovery {
+        status = "degraded".to_string();
+    }
+    let self_update_active = scheduler.is_self_update_in_progress().await;
+    if self_update_active {
+        status = "degraded".to_string();
+    }
 
     // CRL status from shared state — re-evaluate expiry at query time
     let crl = crl_state.load();

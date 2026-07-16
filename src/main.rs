@@ -295,13 +295,6 @@ async fn main() -> Result<()> {
     };
     if should_block_for_upgrade {
         info!("Blocking package operations based on persistent upgrade state — entering recovery mode until initialization completes");
-        // The scheduler doesn't yet have a set_self_update_in_progress method.
-        // For startup blocking, use enter_recovery() to block all mutations
-        // and jobs. The finalization path below clears this by transitioning
-        // the scheduler back to Open admission (via force_clear_self_update
-        // or a future clear_recovery method).
-        // TODO: Replace with scheduler.enter_recovery().await plus a synthetic
-        // self-update reservation once set_self_update_in_progress is added.
         scheduler.enter_recovery().await;
     }
     let in_recovery_mode = startup_reconciliation
@@ -747,7 +740,8 @@ async fn main() -> Result<()> {
 
                     linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
                     scheduler.force_clear_self_update().await;
-                    info!("Self-update admission block cleared — server ready for mutations");
+                    scheduler.reopen_admission().await;
+                    info!("Admission reopened — server ready for mutations");
                 }
             }
         } else if needs_state_finalize && repair_failed {
@@ -858,7 +852,8 @@ async fn main() -> Result<()> {
                     }
                     linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
                     scheduler.force_clear_self_update().await;
-                    info!("Self-update admission block cleared — server ready for mutations");
+                    scheduler.reopen_admission().await;
+                    info!("Admission reopened — server ready for mutations");
                 }
             }
         } else if needs_state_finalize && repair_failed {

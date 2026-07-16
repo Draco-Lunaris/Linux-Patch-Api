@@ -427,23 +427,72 @@ pub async fn update_package(
 
         // Resolve from/target versions BEFORE the atomic reservation. These
         // are needed by try_reserve_self_update and the persistent state write.
-        let from_version = backend
-            .get_installed_version(&package_name)
-            .unwrap_or(None)
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-        let target_version = backend
-            .get_candidate_version(&package_name)
-            .unwrap_or(None)
-            .unwrap_or_else(|| from_version.clone());
-        if target_version != from_version {
+        // FAIL-CLOSED: If we cannot determine the installed version or the
+        // candidate version, we must NOT proceed with the self-update.
+        let from_version = match backend.get_installed_version(&package_name) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                error!(request_id = %request_id, "Cannot determine installed version — aborting self-update");
+                let response = ApiResponse::<()>::error(
+                    "VERSION_LOOKUP_FAILED",
+                    "Cannot determine the currently installed version. Self-update aborted for safety.",
+                    None,
+                    true,
+                );
+                return HttpResponse::Conflict().json(response);
+            }
+            Err(e) => {
+                error!(request_id = %request_id, error = %e, "Failed to query installed version — aborting self-update");
+                let response = ApiResponse::<()>::error(
+                    "VERSION_LOOKUP_FAILED",
+                    "Failed to query the installed version from the package manager. Self-update aborted for safety.",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                    true,
+                );
+                return HttpResponse::Conflict().json(response);
+            }
+        };
+        let target_version = match backend.get_candidate_version(&package_name) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                error!(request_id = %request_id, "Cannot determine candidate version — aborting self-update");
+                let response = ApiResponse::<()>::error(
+                    "VERSION_LOOKUP_FAILED",
+                    "Cannot determine the candidate (target) version. Self-update aborted for safety.",
+                    None,
+                    true,
+                );
+                return HttpResponse::Conflict().json(response);
+            }
+            Err(e) => {
+                error!(request_id = %request_id, error = %e, "Failed to query candidate version — aborting self-update");
+                let response = ApiResponse::<()>::error(
+                    "VERSION_LOOKUP_FAILED",
+                    "Failed to query the candidate version from the package manager. Self-update aborted for safety.",
+                    Some(serde_json::json!({"error": e.to_string()})),
+                    true,
+                );
+                return HttpResponse::Conflict().json(response);
+            }
+        };
+        if target_version == from_version {
             info!(
                 from_version = %from_version,
-                target_version = %target_version,
-                "Resolved target version for self-update"
+                "Target version equals installed version — no update available"
             );
-        } else {
-            warn!("Could not resolve target version — using from_version as placeholder");
+            let response = ApiResponse::<()>::error(
+                "NO_UPDATE_AVAILABLE",
+                "The candidate version matches the installed version — no update is available.",
+                None,
+                false,
+            );
+            return HttpResponse::Ok().json(response);
         }
+        info!(
+            from_version = %from_version,
+            target_version = %target_version,
+            "Resolved target version for self-update"
+        );
 
         // Atomically reserve the self-update slot. This performs all checks
         // (no running jobs, no existing self-update, queue capacity) and
@@ -572,19 +621,19 @@ pub async fn update_package(
                                 return;
                             }
 
-                            // Verify the installed version changed
-                            let installed_version = backend_clone
-                                .get_installed_version(&pkg_name)
-                                .unwrap_or(None);
+                            // Verify the installed version matches the target.
+                            // FAIL-CLOSED: If we cannot read the installed version,
+                            // or it doesn't match the target, enter recovery.
+                            let installed_version = backend_clone.get_installed_version(&pkg_name);
 
                             match &installed_version {
-                                Some(v) if v != &from_version => {
+                                Ok(Some(v)) if v == &target_version => {
                                     info!(
                                         job_id = %job_id_clone,
                                         from_version = %from_version,
                                         installed_version = %v,
                                         target_version = %target_version,
-                                        "Self-update verified — installed version changed"
+                                        "Self-update verified — installed version matches target"
                                     );
                                     let _ = scheduler_clone
                                         .add_job_log(
@@ -593,7 +642,7 @@ pub async fn update_package(
                                         )
                                         .await;
                                 }
-                                Some(v) if v == &from_version => {
+                                Ok(Some(v)) if v == &from_version => {
                                     warn!(
                                         job_id = %job_id_clone,
                                         installed_version = %v,
@@ -607,17 +656,54 @@ pub async fn update_package(
                                         )
                                         .await;
                                     let _ = scheduler_clone.complete_job(&job_id_clone).await;
-                                    // Release the self-update lock, clear state and marker
                                     scheduler_clone.release_self_update(&job_id_clone).await;
                                     crate::jobs::upgrade_state::clear_state();
                                     crate::jobs::upgrade_state::clear_marker();
                                     return;
                                 }
-                                _ => {
-                                    warn!(
+                                Ok(Some(v)) => {
+                                    error!(
                                         job_id = %job_id_clone,
-                                        "Could not verify installed version after update — proceeding with restart"
+                                        from_version = %from_version,
+                                        installed_version = %v,
+                                        target_version = %target_version,
+                                        "Self-update installed unexpected version — entering recovery, NOT restarting"
                                     );
+                                    crate::jobs::upgrade_state::write_recovering_state();
+                                    let _ = scheduler_clone
+                                        .fail_job(&job_id_clone, format!(
+                                            "Installed version {} does not match target {}. Entered recovery mode.",
+                                            v, target_version
+                                        ))
+                                        .await;
+                                    return;
+                                }
+                                Ok(None) => {
+                                    error!(
+                                        job_id = %job_id_clone,
+                                        "Cannot determine installed version after update — entering recovery, NOT restarting"
+                                    );
+                                    crate::jobs::upgrade_state::write_recovering_state();
+                                    let _ = scheduler_clone
+                                        .fail_job(&job_id_clone,
+                                            "Cannot determine installed version after update. Entered recovery mode.".to_string()
+                                        )
+                                        .await;
+                                    return;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        job_id = %job_id_clone,
+                                        error = %e,
+                                        "Failed to query installed version after update — entering recovery, NOT restarting"
+                                    );
+                                    crate::jobs::upgrade_state::write_recovering_state();
+                                    let _ = scheduler_clone
+                                        .fail_job(&job_id_clone, format!(
+                                            "Failed to query installed version: {}. Entered recovery mode.", e
+                                        ))
+                                        .await;
+                                    return;
                                 }
                             }
 
@@ -740,38 +826,25 @@ pub async fn update_package(
                             );
                         }
 
-                        // Transition to StartingNewProcess before issuing
-                        // the restart command. This persists the state so
-                        // the new process knows it's the replacement.
-                        let mut restart_state =
-                            crate::jobs::upgrade_state::UpgradeState::installing(
-                                &job_id_clone.to_string(),
-                                &from_version,
-                                &target_version,
-                            );
-                        restart_state.to_starting_new_process();
-                        if let Err(e) = crate::jobs::upgrade_state::write_state(&restart_state) {
-                            error!(
-                                error = %e,
-                                "Failed to write StartingNewProcess state — keeping fallback timer armed, not cancelling marker"
-                            );
-                            // Don't cancel the marker — the fallback timer
-                            // is still needed since we can't persist state.
-                        }
-
                         // Trigger the restart immediately. restart_own_service
                         // is fire-and-forget (spawn, not output) so it doesn't
                         // block a tokio worker thread. The process will be
                         // killed by the restart.
+                        //
+                        // Do NOT transition to StartingNewProcess or clear the
+                        // marker here. The restart command is merely spawned —
+                        // it may fail, and the new process hasn't reached
+                        // readiness yet. The fallback timer must remain
+                        // eligible (state stays RestartPending, marker stays).
+                        // The new process clears the marker after successful
+                        // readiness (READY=1 + version verification).
                         info!(job_id = %job_id_clone, "Initiating service restart after self-update drain");
                         match backend_clone.restart_own_service() {
                             Ok(_) => {
                                 info!(job_id = %job_id_clone, "Service restart command spawned — process will be replaced");
-                                // Cancel the fallback timer only AFTER
-                                // successful restart launch. The marker
-                                // file is the cancellation signal.
-                                info!(job_id = %job_id_clone, "Cancelling fallback restart timer by removing marker");
-                                crate::jobs::upgrade_state::clear_marker();
+                                // Do NOT clear the marker. The fallback timer
+                                // remains armed. The new process will clear it
+                                // after successful readiness.
                             }
                             Err(e) => {
                                 error!(
