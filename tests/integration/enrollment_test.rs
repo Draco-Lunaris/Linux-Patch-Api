@@ -797,7 +797,6 @@ async fn test_provision_repo_config_unknown_distro_returns_error() {
 
 #[allow(unused_imports)]
 use linux_patch_api::enroll::repo_health::{check_and_provision_repo_config, RepoHealResult};
-use wiremock::matchers::query_param;
 
 /// Create a mock repo config response for testing
 fn mock_repo_config_response(sources_config: &str, gpg_key: &str) -> ResponseTemplate {
@@ -822,7 +821,6 @@ async fn test_repo_health_self_heal_content_match_returns_already_configured() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/pki/repo-config"))
-        .and(query_param("distro_id", "debian"))
         .respond_with(mock_repo_config_response(
             expected_sources,
             expected_gpg_key,
@@ -873,7 +871,6 @@ async fn test_repo_health_self_heal_content_mismatch_triggers_reprovision() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/pki/repo-config"))
-        .and(query_param("distro_id", "debian"))
         .respond_with(mock_repo_config_response(new_sources, new_gpg_key))
         .named("repo_config_fetch_new")
         .mount(&server)
