@@ -105,7 +105,7 @@ cat > "${BUILD_DIR}/DEBIAN/control" <<EOF
 Package: linux-patch-api
 Version: ${VERSION}-${RELEASE}
 Architecture: amd64
-Maintainer: Echo <echo@moon-dragon.us>
+Maintainer: Draco-Lunaris-Echo
 Installed-Size: ${INSTALLED_SIZE}
 Depends: systemd, libsystemd0
 Section: admin

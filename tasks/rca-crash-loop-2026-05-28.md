@@ -1,7 +1,7 @@
 # Root Cause Analysis: linux-patch-api Crash Loop
 
 **Date:** 2026-05-28
-**Affected Hosts:** sonarr, apt-cacher-ng, radarr-lxc, lidarr-lxc, deluge-lxc (all .moon-dragon.us)
+**Affected Hosts:** Multiple managed hosts
 **Symptom:** Agent crash loop with "Address already in use" on port 12443, causing flapping between healthy/unreachable on manager
 
 ---
@@ -20,7 +20,7 @@ The result: hosts stuck in an **infinite crash loop** that cannot self-recover w
 
 ## Evidence Preserved
 
-### radarr-lxc (still crash-looping, evidence intact)
+### host-1 (still crash-looping, evidence intact)
 
 | Metric | Value |
 |--------|-------|
@@ -33,27 +33,27 @@ The result: hosts stuck in an **infinite crash loop** that cannot self-recover w
 | Certs exist | Yes (valid May 28 2026 → May 28 2027) |
 | systemd MainPID | 0 (not tracking the enrollment process) |
 
-### lidarr-lxc (still crash-looping, evidence intact)
+### host-2 (still crash-looping, evidence intact)
 
 | Metric | Value |
 |--------|-------|
 | NRestarts | 4,822+ |
 | PID holding port 12443 | 1207 (`linux-patch-api --enroll`) started at 15:42 |
-| Same pattern as radarr-lxc |
+| Same pattern as host-1 |
 
-### deluge-lxc (still crash-looping, evidence intact)
+### host-3 (still crash-looping, evidence intact)
 
 | Metric | Value |
 |--------|-------|
 | NRestarts | 4,494+ |
 | PID holding port 12443 | 51035 (`linux-patch-api --enroll`) started at 15:11 |
-| Same pattern as radarr-lxc |
+| Same pattern as host-1 |
 
-### sonarr (evidence destroyed by fix)
+### host-4 (evidence destroyed by fix)
 
 Fixed before full investigation. NRestarts was 117,647+ over 8 days. Pattern inferred from partial logs.
 
-### apt-cacher-ng (evidence destroyed by fix)
+### host-5 (evidence destroyed by fix)
 
 Fixed before full investigation. Pattern inferred from partial logs.
 
@@ -105,9 +105,9 @@ Meanwhile, the systemd service is also enabled and trying to restart:
 
 **Key insight:** systemd's `MainPID=0` — it has LOST TRACK of the enrollment process because it was started outside systemd (via `sudo` from an SSH session). The enrollment process is an orphan holding the port.
 
-**Evidence from radarr-lxc:**
+**Evidence from host-1:**
 ```
-PID 1218: linux-patch-api --enroll https://linux-patch-manager-dev.moon-dragon.us
+PID 1218: linux-patch-api --enroll https://patch-manager.example.com
   State: S (sleeping)
   FD 16: socket:[900840468] → LISTEN on 0.0.0.0:12443
   Parent: PID 1217 (sudo) → PID 1216 (bash -c from SSH session)
@@ -235,9 +235,9 @@ info!("Listening on {}", bind_address);  // Move here
 ## Immediate Actions Needed
 
 Three hosts are still crash-looping with enrollment processes holding port 12443:
-- **radarr-lxc** — PID 1218 holding port, NRestarts=4,762
-- **lidarr-lxc** — PID 1207 holding port, NRestarts=4,822
-- **deluge-lxc** — PID 51035 holding port, NRestarts=4,494
+- **host-1** — PID 1218 holding port, NRestarts=4,762
+- **host-2** — PID 1207 holding port, NRestarts=4,822
+- **host-3** — PID 51035 holding port, NRestarts=4,494
 
 To fix each host:
 1. Kill the enrollment process: `sudo kill <pid>`
@@ -250,7 +250,7 @@ To fix each host:
 
 ## Lessons Learned
 
-1. **Do NOT destroy evidence before completing RCA.** I fixed apt-cacher-ng before fully investigating the crash loop, destroying diagnostic evidence. Kelly had to point this out.
+1. **Do NOT destroy evidence before completing RCA.** I fixed host-5 before fully investigating the crash loop, destroying diagnostic evidence.
 2. **Investigate first, fix second.** When doing RCA, preserve the crash-looping hosts and gather all evidence before applying fixes.
 3. **The enrollment process port conflict was the dominant cause** on the currently-affected hosts, not TIME_WAIT. I initially misdiagnosed this because I destroyed the evidence too early.
 
@@ -264,4 +264,4 @@ Confidence: 95% (diagnosis)
 - Evidence: Process state showing enrollment PID holding port 12443 while systemd has MainPID=0
 - Evidence: `ps aux` and `/proc` data confirming enrollment process is alive and bound
 - Uncertainties: None significant — the evidence chain is complete and consistent
-- Test Status: Partially tested — apt-cacher-ng and sonarr were fixed before full investigation; radarr/lidarr/deluge still crash-looping with preserved evidence
+- Test Status: Partially tested — host-4 and host-5 were fixed before full investigation; host-1/host-2/host-3 still crash-looping with preserved evidence

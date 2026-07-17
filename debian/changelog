@@ -2,13 +2,13 @@ linux-patch-api (2.3.0) unstable; urgency=low
 
   * Release v2.3.0
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 16 Jul 2026 19:00:33 +0000
+ -- Draco-Lunaris-Echo  Thu, 16 Jul 2026 19:00:33 +0000
 
 linux-patch-api (2.2.0) unstable; urgency=low
 
   * Release v2.2.0
 
- -- git-echo <git-echo@moon-dragon.us>  Tue, 14 Jul 2026 20:20:56 +0000
+ -- Draco-Lunaris-Echo  Tue, 14 Jul 2026 20:20:56 +0000
 
 linux-patch-api (2.1.2) unstable; urgency=low
 
@@ -17,55 +17,55 @@ linux-patch-api (2.1.2) unstable; urgency=low
   * fix: retry fix-broken when dist-upgrade fails with unmet dependencies
   * Reduce delayed restart timer from 300s to 30s
 
- -- git-echo <git-echo@moon-dragon.us>  Tue, 14 Jul 2026 16:40:00 +0000
+ -- Draco-Lunaris-Echo  Tue, 14 Jul 2026 16:40:00 +0000
 
 linux-patch-api (2.1.1) unstable; urgency=low
 
   * Release v2.1.1
 
- -- git-echo <git-echo@moon-dragon.us>  Tue, 07 Jul 2026 20:27:07 +0000
+ -- Draco-Lunaris-Echo  Tue, 07 Jul 2026 20:27:07 +0000
 
 linux-patch-api (2.1.0) unstable; urgency=low
 
   * Release v2.1.0
 
- -- git-echo <git-echo@moon-dragon.us>  Tue, 07 Jul 2026 18:31:14 +0000
+ -- Draco-Lunaris-Echo  Tue, 07 Jul 2026 18:31:14 +0000
 
 linux-patch-api (2.0.4) unstable; urgency=low
 
   * Release v2.0.4
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 02 Jul 2026 21:41:45 -0500
+ -- Draco-Lunaris-Echo  Thu, 02 Jul 2026 21:41:45 -0500
 
 linux-patch-api (2.0.3) unstable; urgency=low
 
   * Release v2.0.3
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 02 Jul 2026 15:40:41 -0500
+ -- Draco-Lunaris-Echo  Thu, 02 Jul 2026 15:40:41 -0500
 
 linux-patch-api (2.0.2) unstable; urgency=low
 
   * Release v2.0.2
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 02 Jul 2026 14:25:02 -0500
+ -- Draco-Lunaris-Echo  Thu, 02 Jul 2026 14:25:02 -0500
 
 linux-patch-api (2.0.1) unstable; urgency=low
 
   * Release v2.0.1
 
- -- git-echo <git-echo@moon-dragon.us>  Wed, 01 Jul 2026 14:54:55 -0500
+ -- Draco-Lunaris-Echo  Wed, 01 Jul 2026 14:54:55 -0500
 
 linux-patch-api (1.5.8) unstable; urgency=low
 
   * Release v1.5.8
 
- -- git-echo <git-echo@moon-dragon.us>  Fri, 26 Jun 2026 19:42:56 +0000
+ -- Draco-Lunaris-Echo  Fri, 26 Jun 2026 19:42:56 +0000
 
 linux-patch-api (1.5.7) unstable; urgency=low
 
   * Release v1.5.7
 
- -- git-echo <git-echo@moon-dragon.us>  Fri, 26 Jun 2026 00:05:59 -0500
+ -- Draco-Lunaris-Echo  Fri, 26 Jun 2026 00:05:59 -0500
 
 linux-patch-api (1.5.6-1) stable; urgency=medium
 
@@ -73,21 +73,21 @@ linux-patch-api (1.5.6-1) stable; urgency=medium
   * fix: DNF patching failures (exit code 100 handling in cache refresh)
   * fix: quinn-proto 0.11.14 -> 0.11.15 (RUSTSEC-2026-0185)
 
- -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 25 Jun 2026 11:15:00 -0500
+ -- Draco-Lunaris-Echo  Thu, 25 Jun 2026 11:15:00 -0500
 
 linux-patch-api (1.5.5-1) stable; urgency=medium
 
   * fix: remove rust-cache from self-hosted build jobs (broken rustup on Fedora/AlmaLinux)
   * Includes all fixes from v1.5.2-v1.5.3 (postinst restart, StartLimitIntervalSec, CI cleanup)
 
- -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 11:15:00 -0500
+ -- Draco-Lunaris-Echo  Thu, 19 Jun 2026 11:15:00 -0500
 
 linux-patch-api (1.5.3-1) stable; urgency=medium
 
   * fix: move Add Rust to PATH before rust-cache in self-hosted build jobs
   * Includes all fixes from v1.5.2 (postinst restart, StartLimitIntervalSec, CI cleanup)
 
- -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 10:35:00 -0500
+ -- Draco-Lunaris-Echo  Thu, 19 Jun 2026 10:35:00 -0500
 
 linux-patch-api (1.5.2-1) stable; urgency=medium
 
@@ -97,68 +97,68 @@ linux-patch-api (1.5.2-1) stable; urgency=medium
   * ci: add Rust dependency caching to self-hosted build jobs
   * ci: use pre-built cargo-audit binary
 
- -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 10:10:00 -0500
+ -- Draco-Lunaris-Echo  Thu, 19 Jun 2026 10:10:00 -0500
 
 linux-patch-api (1.5.1-1) stable; urgency=medium
 
   * fix: handle unset VERSION_ID in self-update.sh for Arch Linux
   * fix: use apt-get install instead of dpkg -i for Debian self-update
 
- -- Draco-Lunaris-Echo <draco-lunaris-echo@moon-dragon.us>  Thu, 19 Jun 2026 04:15:00 -0500
+ -- Draco-Lunaris-Echo  Thu, 19 Jun 2026 04:15:00 -0500
 
 linux-patch-api (1.5.0) unstable; urgency=low
 
   * Release v1.5.0
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 18 Jun 2026 21:35:12 -0500
+ -- Draco-Lunaris-Echo  Thu, 18 Jun 2026 21:35:12 -0500
 
 linux-patch-api (1.5.0-rc6) unstable; urgency=low
 
   * Release v1.5.0-rc6
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 18 Jun 2026 20:46:58 -0500
+ -- Draco-Lunaris-Echo  Thu, 18 Jun 2026 20:46:58 -0500
 
 linux-patch-api (1.5.0-rc5) unstable; urgency=low
 
   * Release v1.5.0-rc5
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 18 Jun 2026 12:47:54 -0500
+ -- Draco-Lunaris-Echo  Thu, 18 Jun 2026 12:47:54 -0500
 
 linux-patch-api (1.5.0-rc4) unstable; urgency=low
 
   * Release v1.5.0-rc4
 
- -- git-echo <git-echo@moon-dragon.us>  Thu, 18 Jun 2026 09:29:34 -0500
+ -- Draco-Lunaris-Echo  Thu, 18 Jun 2026 09:29:34 -0500
 
 linux-patch-api (1.5.0-rc3) unstable; urgency=low
 
   * Release v1.5.0-rc3
 
- -- git-echo <git-echo@moon-dragon.us>  Wed, 17 Jun 2026 15:40:12 -0500
+ -- Draco-Lunaris-Echo  Wed, 17 Jun 2026 15:40:12 -0500
 
 linux-patch-api (1.5.0-rc2) unstable; urgency=low
 
   * Release v1.5.0-rc2
 
- -- git-echo <git-echo@moon-dragon.us>  Tue, 16 Jun 2026 22:01:18 -0500
+ -- Draco-Lunaris-Echo  Tue, 16 Jun 2026 22:01:18 -0500
 
 linux-patch-api (1.5.0-rc1) unstable; urgency=low
 
   * Release v1.5.0-rc1
 
- -- git-echo <git-echo@moon-dragon.us>  Tue, 16 Jun 2026 20:25:17 -0500
+ -- Draco-Lunaris-Echo  Tue, 16 Jun 2026 20:25:17 -0500
 
 linux-patch-api (1.4.3) unstable; urgency=low
 
   * Release v1.4.3
 
- -- git-echo <git-echo@moon-dragon.us>  Fri, 12 Jun 2026 18:30:56 -0500
+ -- Draco-Lunaris-Echo  Fri, 12 Jun 2026 18:30:56 -0500
 
 linux-patch-api (1.4.2) unstable; urgency=medium
 
   * fix: use pinned CA cert for outbound TLS in CRL refresh
 
- -- Echo <echo@moon-dragon.us>  Wed, 11 Jun 2026 01:15:00 -0500
+ -- Draco-Lunaris-Echo  Wed, 11 Jun 2026 01:15:00 -0500
 
 linux-patch-api (1.4.1) unstable; urgency=medium
 
@@ -166,7 +166,7 @@ linux-patch-api (1.4.1) unstable; urgency=medium
   * fix: remove hardcoded version strings in debian/control, build-package.sh, install.sh
   * chore: bump version to 1.4.1
 
- -- Echo <echo@moon-dragon.us>  Tue, 10 Jun 2026 13:00:00 -0500
+ -- Draco-Lunaris-Echo  Tue, 10 Jun 2026 13:00:00 -0500
 
 linux-patch-api (1.2.0) unstable; urgency=medium
 
@@ -176,4 +176,4 @@ linux-patch-api (1.2.0) unstable; urgency=medium
   * Fix --enroll to exit after completion (no port conflict)
   * Add SO_REUSEADDR to prevent Address already in use errors
 
- -- Echo <echo@moon-dragon.us>  Mon, 26 May 2026 00:00:00 -0500
+ -- Draco-Lunaris-Echo  Mon, 26 May 2026 00:00:00 -0500

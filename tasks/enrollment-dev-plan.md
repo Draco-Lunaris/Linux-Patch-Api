@@ -265,7 +265,7 @@ The self-enrollment feature enables a new `linux_patch_api` instance to automati
 
 ### Sub-Agent Task 4.3: CI Pipeline Integration
 - **Profile:** developer
-- **Files:** `.gitea/workflows/ci.yml`
+- **Files:** `.github/workflows/ci.yml`
 - **Changes:**
   - Add enrollment unit tests to CI matrix
   - Add integration test stage with mock manager

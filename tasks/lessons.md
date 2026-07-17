@@ -1,9 +1,9 @@
 # Lessons Learned
 
 ## 2026-05-02 - Infrastructure Host Protection (CRITICAL)
-**Mistake:** Attempted to install Rust and system packages on ares (Docker GPU host) without explicit approval.
-**Correction:** Kelly explicitly stated: "Ares and MoonProx13 are docker and LXC hosts... YOU WILL NEVER install anything on them without explicit approval. I do not want them touched." and "Building all binaries happens through the CI/CD workflow and is done by the Gitea Runner actors. That is the only approved route."
-**Rule:** NEVER install packages or make system-level changes on ares or moonprox13 without explicit approval. NEVER build binaries locally or on dev/runners - use CI/CD ONLY.
+**Mistake:** Attempted to install Rust and system packages on infrastructure hosts without explicit approval.
+**Correction:** Infrastructure hosts (Docker/LXC hosts) must not be modified without explicit approval. Building all binaries happens through the CI/CD workflow.
+**Rule:** NEVER install packages or make system-level changes on infrastructure hosts without explicit approval. NEVER build binaries locally or on dev/runners - use CI/CD ONLY.
 **Status:** Active
 
 ## 2026-05-02 - Systemd ProtectSystem=strict blocks package management
@@ -24,8 +24,8 @@
 **Rule:** Use Type=simple unless the binary explicitly calls sd_notify().
 **Status:** Active
 
-## 2026-05-02 - Binary version mismatch between LXCs
-**Mistake:** Assumed all LXCs had the same binary version. Dev/u2404 had older Apr 9 build while u2204 had newer Apr 30 build.
+## 2026-05-02 - Binary version mismatch between containers
+**Mistake:** Assumed all containers had the same binary version. Dev/u2404 had older Apr 9 build while u2204 had newer Apr 30 build.
 **Correction:** Always verify binary versions match before testing. Different BuildIDs mean different code.
 **Rule:** Check binary versions (file size, BuildID, --version output) on all target systems before testing.
 **Status:** Active
@@ -33,7 +33,7 @@
 ## 2026-05-02 - Always run cargo fmt AND cargo clippy locally before pushing
 **Mistake:** Pushed code changes without running cargo fmt and cargo clippy locally, causing 8 CI iterations to fix formatting and lint errors.
 **Correction:** Run `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features -- -D warnings` locally before every push.
-**Rule:** ALWAYS run cargo fmt AND cargo clippy locally before pushing to Gitea. Fix all errors before pushing.
+**Rule:** ALWAYS run cargo fmt AND cargo clippy locally before pushing. Fix all errors before pushing.
 **Status:** Active
 
 ## 2026-05-02 - rustls 0.23 API: builder() vs builder_with_provider()
@@ -97,9 +97,9 @@
 **Status:** Active
 
 ## 2026-05-20 - Ask for help with access blocks immediately (CRITICAL)
-**Mistake:** Spent many turns and significant compute time trying to work around not having root access on the Alpine runner (investigating doas.conf errors, trying alternative approaches) instead of simply asking Kelly to install sudo.
-**Correction:** Kelly installed sudo in seconds. The time and money I wasted on workarounds far exceeded the trivial effort of asking for help.
-**Rule:** When blocked by an access or permission issue, ASK KELLY IMMEDIATELY. Do not spend time on workarounds. A quick fix by Kelly is worth far more than hours of AI compute trying to bypass the block. My processing time costs real money.
+**Mistake:** Spent many turns and significant compute time trying to work around not having root access on the Alpine runner instead of simply asking for sudo to be installed.
+**Correction:** Sudo was installed in seconds. The time and money wasted on workarounds far exceeded the trivial effort of asking for help.
+**Rule:** When blocked by an access or permission issue, ASK FOR HELP IMMEDIATELY. Do not spend time on workarounds. A quick fix is worth far more than hours of compute trying to bypass the block.
 **Status:** Active
 
 ## 2026-05-03 - Systemd sandbox whack-a-mole pattern

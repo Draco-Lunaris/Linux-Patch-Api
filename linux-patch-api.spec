@@ -5,7 +5,7 @@ Version:        VERSION_PLACEHOLDER
 Release:        RELEASE_PLACEHOLDER%{?dist}
 Summary:        Secure remote package management API for Linux systems
 License:        MIT
-URL:            https://gitea.moon-dragon.us/echo/linux_patch_api
+URL:            https://github.com/Draco-Lunaris/Linux-Patch-Api
 Source0:        linux-patch-api-%{version}.tar.gz
 BuildArch:      x86_64
 
@@ -193,12 +193,12 @@ fi
 
 # Changelog
 %changelog
-* Tue Jul 14 2026 Echo <echo@moon-dragon.us> - 2.1.2-1
+* Tue Jul 14 2026 Draco-Lunaris-Echo - 2.1.2-1
 - Bidirectional self-update guard to prevent concurrent apt operations
 - Retry fix-broken when dist-upgrade fails with unmet dependencies
 - Reduce delayed restart timer from 300s to 30s
 
-* Tue May 27 2026 Echo <echo@moon-dragon.us> - 1.1.17-1
+* Tue May 27 2026 Draco-Lunaris-Echo - 1.1.17-1
 - Add mandatory package cache refresh before patch_apply
 - Add health check cache refresh when stale (>4h)
 - Add cache status fields to health response
@@ -206,14 +206,14 @@ fi
 - Add degraded health status on cache failure
 - New src/packages/cache.rs module
 
-* Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.16-1
+* Tue May 20 2026 Draco-Lunaris-Echo - 1.1.16-1
 - Add Pacman package manager backend for Arch Linux
 - Fix: Pacman backend not yet implemented error on Arch systems
 - Support pacman -Q for package listing, pacman -Qi for package details
 - Support pacman -Qu for patch/update detection
 - Fix Arch CI: add stale package cleanup and version verification
 
-* Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.15-1
+* Tue May 20 2026 Draco-Lunaris-Echo - 1.1.15-1
 - Add DNF package manager backend for Fedora/RHEL/CentOS 8+
 - Add YUM package manager backend for RHEL/CentOS 7
 - Fix: DNF backend not yet implemented error on Fedora systems
@@ -221,7 +221,7 @@ fi
 - Support dnf check-update (exit code 100) for patch detection
 - Support yum check-update (exit code 100) for patch detection
 
-* Tue May 20 2026 Echo <echo@moon-dragon.us> - 1.1.14-1
+* Tue May 20 2026 Draco-Lunaris-Echo - 1.1.14-1
 - Fix RPM packaging: pre-build binary before tarball (like Alpine/Arch pattern)
 - Fix rpmbuild can't find cargo in PATH - binary now included in source tarball
 - Fix config file ownership: add %defattr(-,root,root,-) in %files section
@@ -230,19 +230,19 @@ fi
 - Add stale RPM cleanup and version verification to build-rpm.sh
 - Support SKIP_CARGO_BUILD=1 like Alpine/Arch builds
 
-* Wed May 20 2026 Echo <echo@moon-dragon.us> - 1.1.12-1
+* Wed May 20 2026 Draco-Lunaris-Echo - 1.1.12-1
 - Add APK (Alpine Linux) package manager backend
 - Add machine-id generation to Alpine pre-install script
 - Fix OpenRC init script ownership (root:root)
 
 
-* Wed May 20 2026 Echo <echo@moon-dragon.us> - 1.1.10-1
+* Wed May 20 2026 Draco-Lunaris-Echo - 1.1.10-1
 - Fix Alpine install scripts: use separate files with valid abuild suffixes
 - Root cause: .apk-install is not a valid abuild suffix (abuild silently fails)
 - Correct format: pkgname.pre-install, .post-install, .pre-deinstall, .post-deinstall
 - Verified on actual Alpine runner: install script suffixes now pass abuild validation
 
-* Tue May 19 2026 Echo <echo@moon-dragon.us> - 1.1.9-1
+* Tue May 19 2026 Draco-Lunaris-Echo - 1.1.9-1
 - Fix non-Ubuntu packages: align Arch, RPM, Alpine with Debian baseline
 - Remove system user creation (service runs as root)
 - Fix ownership to root:root across all platforms
@@ -251,18 +251,18 @@ fi
 - Fix RPM: add runtime deps, comment BuildRequires for CI
 - Add comprehensive installation docs for all platforms
 
-* Tue May 19 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
+* Tue May 19 2026 Draco-Lunaris-Echo - 1.1.8-1
 - Fix RPM packaging: runtime deps, match Debian install behavior, comment BuildRequires for CI
 - Remove system user creation (service runs as root per systemd unit)
 - Fix ownership to root:root matching Debian package
 - Add openssl-libs and ca-certificates runtime dependencies
 
-* Mon May 18 2026 Echo <echo@moon-dragon.us> - 1.1.8-1
+* Mon May 18 2026 Draco-Lunaris-Echo - 1.1.8-1
 - Fix FQDN resolution: prioritize hostname -f over /etc/hostname
 - Fix display_name blank: add hostname field to enrollment request
 - Fix Arch/Alpine/RPM packaging: install scripts, user creation, directory creation
 
-* Thu Apr 09 2026 Echo <echo@moon-dragon.us> - 1.1.7-1
+* Thu Apr 09 2026 Draco-Lunaris-Echo - 1.1.7-1
 - Initial production release
 - Secure mTLS-authenticated REST API for remote package management
 - 15 API endpoints for package install/remove, patch application, system management

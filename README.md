@@ -614,7 +614,7 @@ See [PERFORMANCE_BENCHMARK.md](./PERFORMANCE_BENCHMARK.md) for detailed benchmar
 
 ```bash
 # Clone repository
-git clone https://git.local/linux-patch-api.git
+git clone https://github.com/Draco-Lunaris/Linux-Patch-Api.git
 cd linux-patch-api
 
 # Install Rust toolchain
@@ -683,9 +683,9 @@ linux-patch-api --check-config
 
 ### Contact
 
-- Internal Documentation: [Internal Wiki](https://wiki.internal/linux-patch-api)
-- Security Team: security@internal
-- Development Team: dev-team@internal
+- Documentation: [README](https://github.com/Draco-Lunaris/Linux-Patch-Api#readme)
+- Security: [GitHub Security Advisories](https://github.com/Draco-Lunaris/Linux-Patch-Api/security/advisories)
+- Issues: [GitHub Issues](https://github.com/Draco-Lunaris/Linux-Patch-Api/issues)
 
 ---
 

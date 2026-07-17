@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build RPM Package for RHEL/CentOS/Fedora
 # Run on: RHEL 8/9, CentOS 8/9, Fedora 38+
-# Designed for native Gitea Actions runner execution
+# Designed for CI runner execution
 #
 # Build pattern: Pre-build binary BEFORE creating tarball (like Alpine/Arch)
 # The binary is included in the source tarball so rpmbuild's %build
