@@ -796,11 +796,11 @@ mod tests {
 
         assert_eq!(
             reconcile_startup_state_at(&state_path, &marker_path),
-            StartupReconciliation::RecoveryMode
+            StartupReconciliation::OrphanedMarker
         );
-        // State file should NOT be cleared in recovery mode
+        // State file should NOT exist (that's what makes it orphaned)
         assert!(!state_path.exists());
-        // Marker should NOT be cleared in recovery mode
+        // Marker should NOT be cleared — preserved for diagnosis
         assert!(marker_path.exists());
     }
 
