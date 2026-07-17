@@ -718,8 +718,8 @@ async fn finalize_clears_state_but_not_marker() {
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
     assert_eq!(
         result,
-        upgrade_state::StartupReconciliation::RecoveryMode,
-        "marker without state after finalize failure must enter RecoveryMode"
+        upgrade_state::StartupReconciliation::OrphanedMarker,
+        "marker without state after finalize failure must return OrphanedMarker"
     );
     assert!(
         marker_path.exists(),
@@ -728,7 +728,7 @@ async fn finalize_clears_state_but_not_marker() {
 }
 
 /// write_recovering_state fails. If the process then crashes, the next
-/// startup sees marker (if it exists) without state → RecoveryMode (correct).
+/// startup sees marker (if it exists) without state → OrphanedMarker (correct).
 /// If no marker, Clean (correct — recovery completed and cleared everything).
 #[actix_web::test]
 async fn recovering_state_write_fails_with_marker() {
@@ -743,8 +743,8 @@ async fn recovering_state_write_fails_with_marker() {
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
     assert_eq!(
         result,
-        upgrade_state::StartupReconciliation::RecoveryMode,
-        "failed write_recovering_state with marker must enter RecoveryMode"
+        upgrade_state::StartupReconciliation::OrphanedMarker,
+        "failed write_recovering_state with marker must return OrphanedMarker"
     );
 }
 
