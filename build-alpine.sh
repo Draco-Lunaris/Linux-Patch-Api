@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build Alpine Package (.apk)
 # Run on: Alpine Linux 3.18+
-# Designed for native Gitea Actions runner execution
+# Designed for CI runner execution
 
 set -e
 
@@ -116,7 +116,7 @@ pkgname=linux-patch-api
 pkgver=${ALPINE_VERSION}
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
-url="https://gitea.moon-dragon.us/echo/linux_patch_api"
+url="https://github.com/Draco-Lunaris/Linux-Patch-Api"
 arch="x86_64"
 license="MIT"
 makedepends=""

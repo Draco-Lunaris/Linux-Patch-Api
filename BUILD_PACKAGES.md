@@ -622,4 +622,4 @@ jobs:
 For issues or questions:
 - Review logs: `journalctl -u linux-patch-api -f`
 - Check documentation: `/usr/share/doc/linux-patch-api/`
-- Report issues: https://git.local/linux-patch-api/issues
+- Report issues: https://github.com/Draco-Lunaris/Linux-Patch-Api/issues

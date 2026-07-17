@@ -897,34 +897,21 @@ fn openrc_readiness_verifies_service_availability() {
 // 20. CI workflow YAML and shell commands parse successfully
 // =============================================================================
 
-/// Both CI workflow YAML files parse as valid YAML. Also verify the
-/// `verify-enrollment-cli` step's grep command uses proper quoting (the
-/// `--enroll` flag is quoted with `--`).
+/// The CI workflow YAML file parses as valid YAML and has the expected
+/// structure.
 #[test]
 fn ci_workflow_yaml_and_shell_commands_parse() {
-    let files = [".github/workflows/ci.yml", ".gitea/workflows/ci.yml"];
+    let file = ".github/workflows/ci.yml";
 
-    for file in &files {
-        let content =
-            std::fs::read_to_string(file).unwrap_or_else(|_| panic!("failed to read {}", file));
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&content)
-            .unwrap_or_else(|e| panic!("{} failed to parse as valid YAML: {}", file, e));
-        // Sanity: it's a mapping with a "jobs" key.
-        assert!(
-            parsed.get("jobs").is_some(),
-            "{} should have a top-level 'jobs' key",
-            file
-        );
-    }
-
-    // Verify the grep command in verify-enrollment-cli uses proper quoting
-    // (the --enroll flag is quoted with -- to prevent it being treated as
-    // a grep option).
-    let gitea_ci = std::fs::read_to_string(".gitea/workflows/ci.yml").unwrap();
-    // The step should contain a grep invocation with the flag quoted.
+    let content =
+        std::fs::read_to_string(file).unwrap_or_else(|_| panic!("failed to read {}", file));
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&content)
+        .unwrap_or_else(|e| panic!("{} failed to parse as valid YAML: {}", file, e));
+    // Sanity: it's a mapping with a "jobs" key.
     assert!(
-        gitea_ci.contains("grep -q -- '--enroll'"),
-        "verify-enrollment-cli step must use 'grep -q -- '--enroll'' (proper quoting with --)"
+        parsed.get("jobs").is_some(),
+        "{} should have a top-level 'jobs' key",
+        file
     );
 }
 

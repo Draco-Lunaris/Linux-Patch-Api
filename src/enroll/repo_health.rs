@@ -248,7 +248,7 @@ fn read_file_content(path: &str) -> Option<String> {
 ///   silent no-op.
 ///
 /// # Arguments
-/// * `manager_url` - The manager base URL (e.g., `https://lpm.moon-dragon.us`).
+/// * `manager_url` - The manager base URL (e.g., `https://patch-manager.example.com`).
 ///
 /// # Returns
 /// - `Ok(AlreadyConfigured)` if both the sources file and GPG keyring exist.

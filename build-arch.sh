@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build Arch Linux Package (.pkg.tar.zst)
 # Run on: Arch Linux / Manjaro
-# Designed for native Gitea Actions runner execution
+# Designed for CI runner execution
 
 set -e
 
@@ -69,7 +69,7 @@ pkgname=linux-patch-api
 pkgver=VERSION_PLACEHOLDER
 pkgrel=1
 pkgdesc="Secure remote package management API for Linux systems"
-url="https://gitea.moon-dragon.us/echo/linux_patch_api"
+url="https://github.com/Draco-Lunaris/Linux-Patch-Api"
 arch=('x86_64')
 license=('MIT')
 depends=('systemd')

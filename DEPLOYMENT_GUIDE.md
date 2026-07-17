@@ -99,7 +99,7 @@ Complete guide for deploying Linux Patch API to production environments.
 
 ```bash
 # Download package
-wget https://git.local/linux-patch-api/releases/v1.0.0/linux-patch-api_1.0.0-1_amd64.deb
+wget https://github.com/Draco-Lunaris/Linux-Patch-Api/releases/v1.0.0/linux-patch-api_1.0.0-1_amd64.deb
 
 # Install package
 dpkg -i linux-patch-api_1.0.0-1_amd64.deb
@@ -228,7 +228,7 @@ curl --cacert /etc/linux_patch_api/certs/ca.pem \
 
 ```bash
 # Download package
-wget https://git.local/linux-patch-api/releases/v1.0.0/linux-patch-api-1.0.0-1.x86_64.rpm
+wget https://github.com/Draco-Lunaris/Linux-Patch-Api/releases/v1.0.0/linux-patch-api-1.0.0-1.x86_64.rpm
 
 # Install package (RHEL/CentOS 8/9)
 dnf install -y ./linux-patch-api-1.0.0-1.x86_64.rpm
@@ -336,7 +336,7 @@ For distributions without package support (Alpine, Arch, etc.)
 
 ```bash
 # Download installer
-wget https://git.local/linux-patch-api/releases/v1.0.0/install.sh
+wget https://github.com/Draco-Lunaris/Linux-Patch-Api/releases/v1.0.0/install.sh
 chmod +x install.sh
 
 # Run installer (requires root)
@@ -523,7 +523,7 @@ rpm -ivh linux-patch-api-1.2.0-1.x86_64.rpm
 cat >> /etc/linux_patch_api/config.yaml <<EOF
 
 enrollment:
-  manager_url: "https://lpm.local"
+  manager_url: "https://patch-manager.example.com"
   polling_interval_seconds: 60
   max_poll_attempts: 1440
   cert_renewal_threshold_days: 7
@@ -592,10 +592,10 @@ rpm -ivh linux-patch-api-1.2.0-1.x86_64.rpm
 
 ```bash
 # Basic enrollment with manager URL
-sudo linux-patch-api --enroll https://lpm.local
+sudo linux-patch-api --enroll https://patch-manager.example.com
 
 # With verbose logging for troubleshooting
-sudo linux-patch-api --enroll https://lpm.local --verbose
+sudo linux-patch-api --enroll https://patch-manager.example.com --verbose
 ```
 
 **Important:** The `--enroll` command provisions certificates and **exits**. It does NOT start the server. This prevents port conflicts with the systemd service.
@@ -636,7 +636,7 @@ Enrollment behavior can be tuned via the `enrollment` section in `/etc/linux_pat
 ```yaml
 # Enrollment Configuration
 enrollment:
-  manager_url: "https://lpm.local"
+  manager_url: "https://patch-manager.example.com"
   polling_interval_seconds: 60    # Time between approval polls (default: 60)
   max_poll_attempts: 1440         # Maximum poll attempts (default: 1440 = 24 hours)
   polling_token: ""               # Auto-populated during enrollment (do not edit)

@@ -156,7 +156,7 @@ Roll out v2.0.0 to production agents with zero downtime.
 
 #### 3.2 CI Pipeline Activation
 1. Add `LPA_REPO_GPG_KEY` secret to GitHub Actions
-2. Add `LPA_REPO_GPG_KEY` secret to Gitea Actions
+2. Add `LPA_REPO_GPG_KEY` secret to GitHub Actions
 3. Ensure SSH access from CI runner to manager host
 4. Trigger a test build — verify `publish-to-manager-repo` job runs successfully
 5. Verify packages appear in repo with valid GPG signatures
@@ -224,7 +224,7 @@ Verify the `publish-to-manager-repo` CI job works end-to-end.
 #### 4.1 Verify CI Config Syntax
 ```bash
 python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
-python3 -c "import yaml; yaml.safe_load(open('.gitea/workflows/ci.yml'))"
+python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
 ```
 **Expected:** both files parse as valid YAML
 
@@ -232,7 +232,7 @@ python3 -c "import yaml; yaml.safe_load(open('.gitea/workflows/ci.yml'))"
 ```bash
 # Check that publish-to-manager-repo depends on all build jobs
 grep -A5 'publish-to-manager-repo' .github/workflows/ci.yml | grep 'needs:'
-grep -A5 'publish-to-manager-repo' .gitea/workflows/ci.yml | grep 'needs:'
+grep -A5 'publish-to-manager-repo' .github/workflows/ci.yml | grep 'needs:'
 ```
 **Expected:** all build jobs listed as dependencies
 
@@ -248,8 +248,8 @@ grep -A5 'publish-to-manager-repo' .gitea/workflows/ci.yml | grep 'needs:'
    - Arch packages signed and published
 5. Verify packages on manager host:
    ```bash
-   ssh root@manager.moon-dragon.us "ls -la /var/www/lpa-repo/apt/pool/"
-   ssh root@manager.moon-dragon.us "ls -la /var/www/lpa-repo/dnf/"
+   ssh root@patch-manager.example.com "ls -la /var/www/lpa-repo/apt/pool/"
+   ssh root@patch-manager.example.com "ls -la /var/www/lpa-repo/dnf/"
    ```
 
 #### 4.4 Verify GPG Signatures
@@ -260,9 +260,9 @@ apt-cache policy linux-patch-api  # should show new version from lpa repo
 apt-get install --dry-run linux-patch-api  # should verify GPG signature
 ```
 
-#### 4.5 Verify Gitea CI Job
-1. Push tag to Gitea repo
-2. Monitor Gitea Actions pipeline
+#### 4.5 Verify CI Job
+1. Push tag to repo
+2. Monitor GitHub Actions pipeline
 3. Verify same steps run successfully
 
 #### 4.6 Cleanup Test Artifacts
@@ -276,7 +276,7 @@ git push origin :refs/tags/v2.0.0-rc1
 ### Parallel Sub-Agent Assignment
 - **Sub-agent H (developer):** Steps 4.1-4.2 (config syntax + dependency verification)
 - **Sub-agent I (hacker):** Steps 4.3-4.4 (dry-run + GPG verification)
-- **Sub-agent J (developer):** Steps 4.5-4.6 (Gitea verification + cleanup)
+- **Sub-agent J (developer):** Steps 4.5-4.6 (CI verification + cleanup)
 - H can run immediately; I depends on H; J depends on I
 
 ---
@@ -303,7 +303,7 @@ Item 3 (Deployment Plan)
 Item 4 (CI/CD Verification)
   ├─ Sub-agent H: config syntax + dependency verification
   ├─ Sub-agent I: dry-run + GPG verification (depends on H)
-  ├─ Sub-agent J: Gitea verification + cleanup (depends on I)
+  ├─ Sub-agent J: CI verification + cleanup (depends on I)
   └─ Wait for all → DONE
 ```
 

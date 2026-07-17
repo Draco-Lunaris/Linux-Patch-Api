@@ -230,7 +230,7 @@
 |------|---------|------|
 | Rust Toolchain | Development | Free |
 | cargo-audit | Security scanning | Free |
-| Git/Gitea | Version control | Self-hosted |
+| GitHub | Version control / CI | Free |
 | Wireshark | Network analysis | Free |
 | Burp Suite | Security testing | Community (Free) |
 

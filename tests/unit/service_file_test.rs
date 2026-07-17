@@ -10,7 +10,7 @@
 //! Any systemd sandboxing directive that creates a private namespace or
 //! restricts kernel/filesystem access will cause maintainer scripts to
 //! silently fail or produce corrupted host state. The
-//! `ProtectKernelModules=true` failure on kore.moon-dragon.us
+//! `ProtectKernelModules=true` failure on a production host
 //! demonstrated this: update-initramfs generated an initramfs without
 //! kernel modules because `/usr/lib/modules` was masked, and the next
 //! boot failed.

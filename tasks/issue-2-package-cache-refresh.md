@@ -3,13 +3,13 @@
 **Version:** 1.1.17  
 **Date:** 2026-05-27  
 **Status:** Approved  
-**Gitea Issue:** https://gitea-lxc.moon-dragon.us/git-echo/linux_patch_api/issues/2
+**GitHub Issue:** https://github.com/Draco-Lunaris/Linux-Patch-Api/issues
 
 ---
 
 ## Problem Statement
 
-On 2026-05-27, `dashboard.moon-dragon.us` (Ubuntu 24.04.2 LTS, agent v1.1.16) had 11 pending patches but ALL `patch_apply` jobs failed with 404 errors. Root cause: stale `apt` package cache referencing superseded versions no longer in upstream repos.
+On 2026-05-27, a managed host (Ubuntu 24.04.2 LTS, agent v1.1.16) had 11 pending patches but ALL `patch_apply` jobs failed with 404 errors. Root cause: stale `apt` package cache referencing superseded versions no longer in upstream repos.
 
 **Impact:** 700/757 total jobs failed (92.5% failure rate) across all managed hosts.
 
