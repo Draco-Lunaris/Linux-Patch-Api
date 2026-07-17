@@ -28,7 +28,9 @@ pub use identity::{
     get_primary_ip, get_route_source_ip, is_container_bridge, is_link_local,
 };
 /// Re-export repo self-heal entry point.
-pub use repo_health::{check_and_provision_repo_config, RepoHealResult};
+pub use repo_health::{
+    check_and_provision_repo_config, check_gpg_key_health, GpgKeyStatus, RepoHealResult,
+};
 
 /// Error type for enrollment conflict (HTTP 409).
 /// Used to signal that the host is already registered and we should
