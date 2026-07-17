@@ -22,6 +22,14 @@ use crate::packages::{
     PackageSpec, SELF_PACKAGE_NAME,
 };
 
+/// Normalize a version string for comparison by stripping a leading `v`
+/// prefix and any Debian revision suffix (e.g. `-1` in `2.3.0-1`).
+/// This ensures `2.3.0` (CARGO_PKG_VERSION) matches `2.3.0-1` (dpkg).
+fn normalize_version(v: &str) -> String {
+    let v = v.strip_prefix('v').unwrap_or(v);
+    v.split('-').next().unwrap_or(v).to_string()
+}
+
 /// Validate all package names and versions in a request
 fn validate_package_names(packages: &[PackageSpec]) -> Result<(), String> {
     for pkg in packages {
@@ -436,13 +444,43 @@ pub async fn update_package(
                 "Forcing pre-self-update cache refresh to ensure fresh candidate version"
             );
         }
-        match backend.refresh_package_cache(cache_state.get_ref()) {
-            Ok(_) => info!(request_id = %request_id, "Pre-self-update cache refresh completed"),
-            Err(e) => warn!(
+        // Retry the cache refresh up to 3 times with short delays.
+        // The apt-get update may fail if another apt-get process (e.g.
+        // the health check poller or patch poller running inside this
+        // same agent) holds /var/lib/apt/lists/lock. Without a retry,
+        // the candidate version lookup reads a stale cache and the
+        // self-update silently no-ops with NO_UPDATE_AVAILABLE.
+        let mut cache_refreshed = false;
+        for attempt in 1..=3u8 {
+            match backend.refresh_package_cache(cache_state.get_ref()) {
+                Ok(_) => {
+                    info!(
+                        request_id = %request_id,
+                        attempt = attempt,
+                        "Pre-self-update cache refresh completed"
+                    );
+                    cache_refreshed = true;
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        request_id = %request_id,
+                        attempt = attempt,
+                        error = %e,
+                        "Pre-self-update cache refresh failed — will retry"
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2u64 * attempt as u64))
+                            .await;
+                    }
+                }
+            }
+        }
+        if !cache_refreshed {
+            warn!(
                 request_id = %request_id,
-                error = %e,
-                "Pre-self-update cache refresh failed — proceeding with potentially stale candidate version"
-            ),
+                "Pre-self-update cache refresh failed after 3 attempts — proceeding with potentially stale candidate version"
+            );
         }
 
         // Resolve from/target versions BEFORE the atomic reservation. These
@@ -495,7 +533,7 @@ pub async fn update_package(
                 return HttpResponse::Conflict().json(response);
             }
         };
-        if target_version == from_version {
+        if normalize_version(&target_version) == normalize_version(&from_version) {
             info!(
                 from_version = %from_version,
                 "Target version equals installed version — no update available"
@@ -631,10 +669,14 @@ pub async fn update_package(
                             // Verify the installed version matches the target.
                             // FAIL-CLOSED: If we cannot read the installed version,
                             // or it doesn't match the target, enter recovery.
+                            // Use normalized comparison to handle Debian revision
+                            // suffix differences (e.g. "2.4.0-1" vs "2.4.0").
                             let installed_version = backend_clone.get_installed_version(&pkg_name);
+                            let target_norm = normalize_version(&target_version);
+                            let from_norm = normalize_version(&from_version);
 
                             match &installed_version {
-                                Ok(Some(v)) if v == &target_version => {
+                                Ok(Some(v)) if normalize_version(v) == target_norm => {
                                     info!(
                                         job_id = %job_id_clone,
                                         from_version = %from_version,
@@ -649,7 +691,7 @@ pub async fn update_package(
                                         )
                                         .await;
                                 }
-                                Ok(Some(v)) if v == &from_version => {
+                                Ok(Some(v)) if normalize_version(v) == from_norm => {
                                     warn!(
                                         job_id = %job_id_clone,
                                         installed_version = %v,
@@ -662,7 +704,21 @@ pub async fn update_package(
                                                 .to_string(),
                                         )
                                         .await;
-                                    let _ = scheduler_clone.complete_job(&job_id_clone).await;
+                                    // Fail the job (not complete) so the manager
+                                    // does not interpret a no-op as success. The
+                                    // manager's reconnect-confirm logic would
+                                    // otherwise see "succeeded" but an unchanged
+                                    // version and mark it failed with a confusing
+                                    // message. Failing here is more honest.
+                                    let _ = scheduler_clone
+                                        .fail_job(
+                                            &job_id_clone,
+                                            "Self-update was a no-op — installed version unchanged. \
+                                             The candidate version may have been stale; retry with a \
+                                             fresh cache refresh."
+                                                .to_string(),
+                                        )
+                                        .await;
                                     scheduler_clone.release_self_update(&job_id_clone).await;
                                     crate::jobs::upgrade_state::clear_state();
                                     crate::jobs::upgrade_state::clear_marker();
