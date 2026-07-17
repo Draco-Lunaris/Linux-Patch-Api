@@ -54,12 +54,11 @@ post_upgrade() {
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
 
-    # Create upgrade-pending marker so the new process knows it's starting
-    # after a self-update restart. The new process clears this after init.
-    # Also used by the restart service as a precondition (ConditionPathExists)
-    # to prevent spurious restarts.
-    mkdir -p /var/lib/linux_patch_api
-    touch /var/lib/linux_patch_api/upgrade-pending
+    # The upgrade-pending marker is NOT created here. It is created by
+    # the agent itself when it writes the RestartPending upgrade state,
+    # ensuring the marker and state file are always consistent.
+    # The fallback timer polls for the marker via ConditionPathExists
+    # and will fire when the agent creates it.
 
     # Schedule a 30s delayed restart as a FALLBACK safety net.
     #

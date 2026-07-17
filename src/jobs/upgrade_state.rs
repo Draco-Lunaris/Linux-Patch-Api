@@ -257,8 +257,16 @@ pub enum StartupReconciliation {
     /// set to block jobs, and dpkg --configure -a should run via pre-flight.
     /// The state file should NOT be cleared until after cleanup succeeds.
     InterruptedInstall,
-    /// Recovery mode — state file is corrupt/missing but marker exists, or
-    /// state is inconsistent. All ops blocked, health degraded.
+    /// Orphaned marker — marker exists but no state file. This happens
+    /// when the package is upgraded outside the agent's self-update flow
+    /// (manual apt-get install, unattended-upgrades, etc.). The caller
+    /// should run dpkg --configure -a, then verify the installed package
+    /// version matches the running binary version. If they match, clear
+    /// the marker and resume normal operation. If they don't, enter
+    /// recovery mode.
+    OrphanedMarker,
+    /// Recovery mode — state file is corrupt, or state is inconsistent.
+    /// All ops blocked, health degraded.
     RecoveryMode,
 }
 
@@ -415,6 +423,24 @@ pub fn marker_exists() -> bool {
     Path::new(UPGRADE_MARKER_PATH).exists()
 }
 
+/// Create the upgrade-pending marker file.
+/// Called by the self-update handler AFTER successfully writing the
+/// RestartPending state. This ensures the marker and state file are
+/// always consistent — the marker only exists when the agent's state
+/// machine is actively tracking a self-update.
+pub fn create_marker() {
+    let marker = Path::new(UPGRADE_MARKER_PATH);
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::File::create(marker) {
+        Ok(_) => info!("Upgrade-pending marker created"),
+        Err(e) => {
+            warn!(error = %e, "Failed to create upgrade-pending marker — fallback timer will not fire");
+        }
+    }
+}
+
 /// Remove the upgrade-pending marker file.
 pub fn clear_marker() {
     let marker = Path::new(UPGRADE_MARKER_PATH);
@@ -452,11 +478,18 @@ pub fn reconcile_startup_state_at(state_path: &Path, marker_path: &Path) -> Star
         Err(StateError::Clean) => {
             // No state file — check if marker exists
             if marker_path.exists() {
+                // Marker exists but no state file. This is an orphaned marker
+                // — the package was likely upgraded outside the agent's
+                // self-update flow (manual apt-get install, unattended-upgrades,
+                // etc.). The agent's state machine never ran, so no state file
+                // was written. Run dpkg --configure -a and verify package health
+                // before resuming.
                 warn!(
-                    "Upgrade marker exists but state file is missing — entering recovery mode. \
-                     An upgrade may have been interrupted. dpkg --configure -a will run via pre-flight."
+                    "Upgrade marker exists but state file is missing — orphaned marker. \
+                     Package may have been upgraded externally. dpkg --configure -a will run \
+                     via pre-flight, then package health will be verified."
                 );
-                return StartupReconciliation::RecoveryMode;
+                return StartupReconciliation::OrphanedMarker;
             }
             return StartupReconciliation::Clean;
         }

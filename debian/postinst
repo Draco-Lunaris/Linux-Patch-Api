@@ -106,11 +106,11 @@ if [ "$1" = "configure" ]; then
         # then triggers the restart immediately. This timer is a fallback
         # in case the agent crashes before completing the drain.
         #
-        # Using `systemctl restart` (not `start`) ensures idempotency:
-        # if a previous timer is still running from a retried upgrade,
-        # it is reset rather than duplicated.
-        mkdir -p /var/lib/linux_patch_api
-        touch /var/lib/linux_patch_api/upgrade-pending
+        # The upgrade-pending marker is NOT created here. It is created
+        # by the agent itself when it writes the RestartPending upgrade
+        # state, ensuring the marker and state file are always consistent.
+        # The fallback timer polls for the marker via ConditionPathExists
+        # and will fire when the agent creates it.
         systemctl daemon-reload
         systemctl restart linux-patch-api-upgrade-restart.timer
     fi
