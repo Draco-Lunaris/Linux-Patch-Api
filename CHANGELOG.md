@@ -9,19 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [2.4.0] - 2026-07-16
+
 ### Added
-- **Self-enrollment workflow**: Automated host registration with linux_patch_manager
-  - CLI flag: `--enroll <MANAGER_URL>` for enrollment mode
-  - Three-phase enrollment: Registration → Polling (24h timeout) → PKI Provisioning
-  - Automatic certificate provisioning to configured mTLS paths
-  - Automatic manager IP whitelist append after successful enrollment
-  - Configurable polling interval (default 60s) and max attempts (default 1440/24h)
-  - Signal handling for graceful shutdown during enrollment
-- Enrollment configuration section in config.yaml (`enrollment.*`)
-- Identity extraction module (machine-id, FQDN, IP addresses, OS details)
-- PKI bundle validation with PEM format checking
-- Atomic certificate file writing with secure permissions (key=0600, certs=0644)
-- Whitelist auto-append with file locking and duplicate detection
+- **Command timeouts**: All external command executions now have per-call deadlines
+  - `CACHE_REFRESH_TIMEOUT` (300s) for apt-get update / dnf check-update / apk update
+  - `PACKAGE_OP_TIMEOUT` (1800s) for apt-get install / dnf upgrade / pacman -Syu
+  - `QUICK_OP_TIMEOUT` (60s) for dpkg / systemctl / rpm / hostname / uname
+  - SIGTERM → 5s grace → SIGKILL escalation on timeout
+  - `CommandError::from_timeout()` returns structured timeout error classified as `TIMEOUT`
+  - `run_with_timeout` added to `CommandRunner` trait (default: no timeout, for mock compat)
+- **GPG key health reporting**: `GET /health` now includes `gpg_key_status` and `gpg_key_expires_at`
+  - Checks provisioned keyring file existence and uses `gpg --show-keys --with-colons` for expiry
+  - Falls back to valid (file-exists) if gpg binary is not installed
+  - Downgrades overall health to `degraded` when key is missing/expired/revoked
+- **`name` key in `os_details`**: Agent now emits `/etc/os-release` `ID` field as `name` during
+  enrollment, giving the manager's `detect_distro_id` a reliable second signal
+
+### Fixed
+- **#158, #156**: `SystemCommandRunner` had no timeout on any subprocess. A hung `apt-get update`
+  or `systemctl show` could block the agent's mutation semaphore for hours. Replaced
+  `std::process::Command` with `tokio::process::Command` + `kill_on_drop` + per-call timeouts.
+- **#157**: Self-update silently no-op'd when the local apt cache was stale (>900s). The candidate
+  version lookup read the stale cache, found `target == installed`, and returned
+  `NO_UPDATE_AVAILABLE` without ever invoking `apt-get install`. Now forces a cache refresh
+  before `get_candidate_version` regardless of `is_stale()`.
+- **#126 HIGH-1**: Agent `/health` never reported `gpg_key_status`, making the manager's GPG-key
+  health pathway dead code. Every agent was misclassified as legacy.
+- **#126 MED-1**: Agent never emitted `name` key in `os_details`, leaving the manager's second
+  distro detection signal inert.
+- **#126 LOW-1**: README version mismatch (line 3 said 2.0.0, line 698 said 1.0.0).
+- `CACHE_REFRESH_TIMEOUT_SECS` was defined but never referenced anywhere; `run_command_with_timeout`
+  in cache.rs was misnamed — its body was a bare `Command::output()` with no timeout.
+
+### Changed
+- Removed `.gitea/` directory — CI now runs exclusively via `.github/workflows/ci.yml`
+- Replaced all internal infrastructure references (Gitea URLs, moon-dragon.us hostnames,
+  internal emails) with GitHub URLs and generic placeholders
+- Rewrote `scripts/upload-release.sh` from Gitea API to GitHub API / `gh` CLI
+- `Cargo.toml` author updated to `Draco-Lunaris-Echo`
 
 ---
 

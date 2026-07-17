@@ -193,6 +193,13 @@ fi
 
 # Changelog
 %changelog
+* Thu Jul 16 2026 Draco-Lunaris-Echo - 2.4.0-1
+- Add command timeouts to prevent apt mutex deadlock (#158, #156)
+- Force cache refresh before self-update candidate lookup (#157)
+- Add gpg_key_status and gpg_key_expires_at to health payload (#126)
+- Add name key to os_details for distro detection (#126)
+- Remove all internal infrastructure references
+
 * Tue Jul 14 2026 Draco-Lunaris-Echo - 2.1.2-1
 - Bidirectional self-update guard to prevent concurrent apt operations
 - Retry fix-broken when dist-upgrade fails with unmet dependencies

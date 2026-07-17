@@ -1,3 +1,14 @@
+linux-patch-api (2.4.0) unstable; urgency=low
+
+  * Release v2.4.0
+  * Add command timeouts to prevent apt mutex deadlock (#158, #156)
+  * Force cache refresh before self-update candidate lookup (#157)
+  * Add gpg_key_status and gpg_key_expires_at to health payload (#126)
+  * Add name key to os_details for distro detection (#126)
+  * Remove all internal infrastructure references
+
+ -- Draco-Lunaris-Echo  Thu, 16 Jul 2026 21:30:00 +0000
+
 linux-patch-api (2.3.0) unstable; urgency=low
 
   * Release v2.3.0
