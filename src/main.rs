@@ -77,6 +77,18 @@ enum ExitCode {
     EnrollmentInProgress = 2,
 }
 
+/// Normalize a version string for comparison by stripping a leading `v` prefix
+/// and any Debian revision suffix (e.g. `-1` in `2.3.0-1`).
+///
+/// This is necessary because `CARGO_PKG_VERSION` yields `"2.3.0"` while
+/// `dpkg -s` yields `"2.3.0-1"`. Without normalization, the startup
+/// version verification after a self-update always fails, putting the
+/// agent into permanent recovery mode.
+fn normalize_version(v: &str) -> String {
+    let v = v.strip_prefix('v').unwrap_or(v);
+    v.split('-').next().unwrap_or(v).to_string()
+}
+
 #[actix_web::main]
 async fn main() -> Result<()> {
     // Parse command line arguments
@@ -689,22 +701,46 @@ async fn main() -> Result<()> {
                 Err(_) => String::new(),
             };
 
-            let versions_match = if expected_target.is_empty() {
-                // No target version in state — FAIL-CLOSED. We cannot
-                // verify the upgrade succeeded without knowing the
-                // expected target. Enter recovery mode.
-                false
+            // Normalize versions for comparison. dpkg reports the full
+            // Debian version (e.g. "2.3.0-1") while CARGO_PKG_VERSION is
+            // just the upstream version ("2.3.0"). The manager's
+            // target_version may be either form. We compare the
+            // normalized upstream portion only.
+            let running_norm = normalize_version(&running_version);
+            let installed_norm = installed_version.as_deref().map(normalize_version);
+            let target_norm = if expected_target.is_empty() {
+                None
             } else {
-                // All three must agree: running == installed == target
-                installed_version.as_deref() == Some(&running_version)
-                    && installed_version.as_deref() == Some(&expected_target)
+                Some(normalize_version(&expected_target))
+            };
+
+            // If expected_target is empty, the state file was not
+            // written properly (e.g. the old process was killed before
+            // persisting the target version). Rather than entering
+            // permanent recovery mode, verify that the running version
+            // matches the installed version — if they agree, the
+            // upgrade succeeded and we can safely clear state.
+            let versions_match = if let Some(ref t) = target_norm {
+                // All three must agree (normalized): running == installed == target
+                installed_norm.as_deref() == Some(&running_norm)
+                    && installed_norm.as_deref() == Some(t)
+            } else {
+                // No target version in state — verify running == installed.
+                // If they match, the binary and package agree, so the
+                // upgrade is consistent. This avoids a permanent
+                // recovery-mode deadlock when the state file is missing
+                // the target version.
+                installed_norm.as_deref() == Some(&running_norm)
             };
 
             if !versions_match {
                 error!(
                     running_version = %running_version,
+                    running_norm = %running_norm,
                     installed_version = ?installed_version,
+                    installed_norm = ?installed_norm,
                     expected_target = %expected_target,
+                    target_norm = ?target_norm,
                     "Version mismatch on startup after self-update — entering recovery mode, NOT clearing state"
                 );
                 linux_patch_api::jobs::upgrade_state::write_recovering_state();
@@ -816,19 +852,30 @@ async fn main() -> Result<()> {
                 Ok(s) => s.target_version.clone(),
                 Err(_) => String::new(),
             };
-            let versions_match = if expected_target.is_empty() {
-                // No target version — FAIL-CLOSED
-                false
+            // Normalize versions for comparison (see TLS path for details).
+            let running_norm = normalize_version(&running_version);
+            let installed_norm = installed_version.as_deref().map(normalize_version);
+            let target_norm = if expected_target.is_empty() {
+                None
             } else {
-                installed_version.as_deref() == Some(&running_version)
-                    && installed_version.as_deref() == Some(&expected_target)
+                Some(normalize_version(&expected_target))
+            };
+
+            let versions_match = if let Some(ref t) = target_norm {
+                installed_norm.as_deref() == Some(&running_norm)
+                    && installed_norm.as_deref() == Some(t)
+            } else {
+                installed_norm.as_deref() == Some(&running_norm)
             };
 
             if !versions_match {
                 error!(
                     running_version = %running_version,
+                    running_norm = %running_norm,
                     installed_version = ?installed_version,
+                    installed_norm = ?installed_norm,
                     expected_target = %expected_target,
+                    target_norm = ?target_norm,
                     "Version mismatch — entering recovery mode, NOT clearing state"
                 );
                 linux_patch_api::jobs::upgrade_state::write_recovering_state();
