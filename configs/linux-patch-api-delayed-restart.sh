@@ -50,13 +50,18 @@ get_state() {
     fi
 }
 
-# Wait for the state to be safe for restart.
+# Wait for the marker to appear (the agent creates it when it writes
+# the RestartPending state) and then for the state to be safe for restart.
+# The postinst no longer creates the marker — only the agent does.
 RETRY=0
 while [ "$RETRY" -lt "$MAX_RETRIES" ]; do
-    # Check if marker still exists
+    # Check if marker exists — if not, the agent hasn't written
+    # RestartPending state yet. Keep waiting.
     if [ ! -f "$MARKER" ]; then
-        echo "Upgrade-pending marker no longer exists — aborting restart (already completed)"
-        exit 0
+        echo "Waiting for agent to create upgrade-pending marker (retry $RETRY/$MAX_RETRIES)"
+        sleep "$DELAY"
+        RETRY=$((RETRY + 1))
+        continue
     fi
 
     STATE=$(get_state)

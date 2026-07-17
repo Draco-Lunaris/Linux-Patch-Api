@@ -294,9 +294,16 @@ async fn main() -> Result<()> {
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::Clean => false,
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::RestartInProgress => true,
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall => true,
+        linux_patch_api::jobs::upgrade_state::StartupReconciliation::OrphanedMarker => {
+            warn!(
+                "Orphaned upgrade marker detected — package may have been upgraded externally. \
+                 Running dpkg --configure -a via pre-flight, then verifying package health."
+            );
+            true
+        }
         linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode => {
             error!(
-                "Entering recovery mode — upgrade state is corrupt, missing with marker, or inconsistent. \
+                "Entering recovery mode — upgrade state is corrupt or inconsistent. \
                  All package operations will be blocked. dpkg --configure -a will run via pre-flight. \
                  Health endpoint will report degraded status."
             );
@@ -394,6 +401,8 @@ async fn main() -> Result<()> {
         == linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall
         || startup_reconciliation
             == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode
+        || startup_reconciliation
+            == linux_patch_api::jobs::upgrade_state::StartupReconciliation::OrphanedMarker
     {
         info!("Running startup package database repair");
         match package_backend.repair_package_database() {

@@ -563,19 +563,19 @@ async fn marker_without_state_enters_recovery_mode() {
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
     assert_eq!(
         result,
-        upgrade_state::StartupReconciliation::RecoveryMode,
-        "marker without state must enter RecoveryMode (fail-closed)"
+        upgrade_state::StartupReconciliation::OrphanedMarker,
+        "marker without state must return OrphanedMarker (self-healing)"
     );
 
     // Marker must NOT be cleared — preserved for diagnosis
     assert!(
         marker_path.exists(),
-        "marker should be preserved in RecoveryMode"
+        "marker should be preserved in OrphanedMarker"
     );
 }
 
 /// write_state fails (disk full, permissions) but the postinst still creates
-/// the marker. On restart, marker-without-state → RecoveryMode.
+/// the marker. On restart, marker-without-state → OrphanedMarker.
 #[actix_web::test]
 async fn write_state_failure_leaves_marker_without_state() {
     let dir = TempDir::new().unwrap();
@@ -589,8 +589,8 @@ async fn write_state_failure_leaves_marker_without_state() {
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
     assert_eq!(
         result,
-        upgrade_state::StartupReconciliation::RecoveryMode,
-        "marker without state (write_state failure) must enter RecoveryMode"
+        upgrade_state::StartupReconciliation::OrphanedMarker,
+        "marker without state (write_state failure) must return OrphanedMarker"
     );
 }
 
@@ -718,8 +718,8 @@ async fn finalize_clears_state_but_not_marker() {
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
     assert_eq!(
         result,
-        upgrade_state::StartupReconciliation::RecoveryMode,
-        "marker without state after finalize failure must enter RecoveryMode"
+        upgrade_state::StartupReconciliation::OrphanedMarker,
+        "marker without state after finalize failure must return OrphanedMarker"
     );
     assert!(
         marker_path.exists(),
@@ -728,7 +728,7 @@ async fn finalize_clears_state_but_not_marker() {
 }
 
 /// write_recovering_state fails. If the process then crashes, the next
-/// startup sees marker (if it exists) without state → RecoveryMode (correct).
+/// startup sees marker (if it exists) without state → OrphanedMarker (correct).
 /// If no marker, Clean (correct — recovery completed and cleared everything).
 #[actix_web::test]
 async fn recovering_state_write_fails_with_marker() {
@@ -743,8 +743,8 @@ async fn recovering_state_write_fails_with_marker() {
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
     assert_eq!(
         result,
-        upgrade_state::StartupReconciliation::RecoveryMode,
-        "failed write_recovering_state with marker must enter RecoveryMode"
+        upgrade_state::StartupReconciliation::OrphanedMarker,
+        "failed write_recovering_state with marker must return OrphanedMarker"
     );
 }
 
@@ -768,18 +768,18 @@ async fn recovering_state_write_fails_no_marker() {
     );
 }
 
-/// Full lifecycle: RecoveryMode → finalize clears state and marker →
-/// next restart is Clean. Verifies recovery is self-healing.
+/// Full lifecycle: OrphanedMarker → finalize clears state and marker →
+/// next restart is Clean. Verifies orphaned marker is self-healing.
 #[actix_web::test]
 async fn recovery_mode_self_heals_after_finalize() {
     let dir = TempDir::new().unwrap();
     let state_path = dir.path().join("upgrade-state.json");
     let marker_path = dir.path().join("upgrade-pending");
 
-    // Step 1: marker without state → RecoveryMode
+    // Step 1: marker without state → OrphanedMarker
     std::fs::write(&marker_path, "").unwrap();
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
-    assert_eq!(result, upgrade_state::StartupReconciliation::RecoveryMode);
+    assert_eq!(result, upgrade_state::StartupReconciliation::OrphanedMarker);
 
     // Step 2: simulate finalize_successful_restart (clears both)
     upgrade_state::finalize_successful_restart_at(&state_path, &marker_path);
@@ -968,6 +968,23 @@ fn assert_safe_outcome(
             // state may or may not exist, marker may or may not exist.
             // The key invariant is that the self-update flag will be set,
             // blocking all operations.
+        }
+        upgrade_state::StartupReconciliation::OrphanedMarker => {
+            // OrphanedMarker is safe — admission is blocked, dpkg repair
+            // will run, and version verification will determine whether to
+            // resume or enter recovery. The marker must exist (that's the
+            // trigger), and the state file must NOT exist (that's what makes
+            // it orphaned).
+            assert!(
+                marker_path.exists(),
+                "{}: OrphanedMarker but marker file missing — inconsistent",
+                context
+            );
+            assert!(
+                !state_path.exists(),
+                "{}: OrphanedMarker but state file exists — should be RecoveryMode or RestartInProgress",
+                context
+            );
         }
     }
 }

@@ -659,8 +659,8 @@ fn missing_state_plus_marker_enters_recovery_on_all_init_systems() {
     let result = upgrade_state::reconcile_startup_state_at(&state_path, &marker_path);
     assert_eq!(
         result,
-        StartupReconciliation::RecoveryMode,
-        "marker without state must enter RecoveryMode regardless of init system"
+        StartupReconciliation::OrphanedMarker,
+        "marker without state must return OrphanedMarker regardless of init system"
     );
     assert!(marker_path.exists(), "marker preserved for diagnosis");
 }

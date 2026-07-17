@@ -790,6 +790,14 @@ pub async fn update_package(
                                 // Keep the admission block set — do not clear
                                 return;
                             }
+
+                            // Create the upgrade-pending marker AFTER successfully
+                            // writing the RestartPending state. This ensures the
+                            // marker and state file are always consistent — the
+                            // marker only exists when the agent's state machine is
+                            // actively tracking a self-update. The postinst no longer
+                            // creates the marker.
+                            crate::jobs::upgrade_state::create_marker();
                         }
                         Err(e) => {
                             let _ = scheduler_clone
