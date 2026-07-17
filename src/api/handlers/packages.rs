@@ -350,6 +350,7 @@ pub async fn update_package(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     scheduler: web::Data<Arc<Scheduler>>,
     manager_url: web::Data<Option<String>>,
+    cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     _req: HttpRequest,
 ) -> impl Responder {
     let request_id = Uuid::new_v4().to_string();
@@ -382,6 +383,7 @@ pub async fn update_package(
         // This runs BEFORE the atomic reservation (try_reserve_self_update)
         // because it's a network call that should not hold the job-manager
         // lock. If the repo config is missing, we reject before reserving.
+        let mut repo_config_provisioned = false;
         match manager_url.as_ref() {
             Some(url) => {
                 info!(request_id = %request_id, "Pre-self-update repo config check");
@@ -391,6 +393,7 @@ pub async fn update_package(
                     }
                     Ok(RepoHealResult::Provisioned) => {
                         info!(request_id = %request_id, "Repo config provisioned via self-heal");
+                        repo_config_provisioned = true;
                     }
                     Err(e) => {
                         error!(request_id = %request_id, error = %e, "Repo config self-heal failed — aborting self-update to prevent silent no-op");
@@ -409,6 +412,37 @@ pub async fn update_package(
             None => {
                 warn!(request_id = %request_id, "No manager URL configured — cannot run repo config self-heal. Self-update may be a no-op if repo is not configured.");
             }
+        }
+
+        // Force a package cache refresh before querying the candidate version.
+        // Without this, `apt-cache policy` (or dnf/yum/pacman equivalent) reads
+        // the stale local index and returns the OLD candidate version, causing
+        // the self-update to silently no-op with NO_UPDATE_AVAILABLE (issue #157).
+        // This is always done for self-updates regardless of is_stale() because:
+        //   1. The manager may have published a new version seconds ago
+        //   2. If repo_config was just provisioned, the cache is definitely stale
+        //   3. The 900s staleness threshold is too long for self-updates
+        // Best-effort: if the refresh fails, we log and proceed anyway — the
+        // candidate version lookup may still succeed with a slightly stale cache,
+        // and a failed refresh is better than blocking the self-update entirely.
+        if repo_config_provisioned {
+            info!(
+                request_id = %request_id,
+                "Forcing cache refresh after repo config provisioning"
+            );
+        } else {
+            info!(
+                request_id = %request_id,
+                "Forcing pre-self-update cache refresh to ensure fresh candidate version"
+            );
+        }
+        match backend.refresh_package_cache(cache_state.get_ref()) {
+            Ok(_) => info!(request_id = %request_id, "Pre-self-update cache refresh completed"),
+            Err(e) => warn!(
+                request_id = %request_id,
+                error = %e,
+                "Pre-self-update cache refresh failed — proceeding with potentially stale candidate version"
+            ),
         }
 
         // Resolve from/target versions BEFORE the atomic reservation. These

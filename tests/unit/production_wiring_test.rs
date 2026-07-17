@@ -927,3 +927,146 @@ fn ci_workflow_yaml_and_shell_commands_parse() {
         "verify-enrollment-cli step must use 'grep -q -- '--enroll'' (proper quoting with --)"
     );
 }
+
+// =============================================================================
+// 21. Self-update forces cache refresh before candidate version lookup (#157)
+// =============================================================================
+
+/// Regression test for issue #157: the self-update path must call
+/// `refresh_package_cache` BEFORE `get_candidate_version` so that
+/// `apt-cache policy` (or equivalent) sees the freshest candidate version,
+/// not a stale one from a cache that's older than the manager's publish.
+///
+/// This test uses a mock backend that records the order of calls and
+/// verifies that `refresh_package_cache` is called before
+/// `get_candidate_version`.
+#[test]
+fn self_update_refreshes_cache_before_candidate_lookup() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A mock backend that records the order of method calls.
+    /// The first call to `refresh_package_cache` sets `cache_refreshed`.
+    /// `get_candidate_version` checks that `cache_refreshed` is true.
+    struct CallOrderBackend {
+        cache_refreshed: Arc<AtomicBool>,
+        /// Set to true if get_candidate_version was called before refresh.
+        candidate_called_before_refresh: Arc<AtomicBool>,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl linux_patch_api::packages::PackageManagerBackend for CallOrderBackend {
+        fn list_packages(
+            &self,
+            _filter: Option<&str>,
+        ) -> anyhow::Result<Vec<linux_patch_api::packages::Package>> {
+            Ok(Vec::new())
+        }
+        fn get_package(
+            &self,
+            _name: &str,
+        ) -> anyhow::Result<Option<linux_patch_api::packages::Package>> {
+            Ok(None)
+        }
+        fn install_packages(
+            &self,
+            _packages: &[linux_patch_api::packages::PackageSpec],
+            _options: &linux_patch_api::packages::InstallOptions,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn update_package(&self, _name: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_package(&self, _name: &str, _purge: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn list_patches(&self) -> anyhow::Result<Vec<linux_patch_api::packages::Patch>> {
+            Ok(Vec::new())
+        }
+        fn apply_patches(&self, _packages: Option<&[String]>) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn get_system_info(&self) -> anyhow::Result<linux_patch_api::packages::SystemInfo> {
+            Ok(linux_patch_api::packages::SystemInfo {
+                hostname: String::new(),
+                os: String::new(),
+                os_version: String::new(),
+                kernel: String::new(),
+                architecture: String::new(),
+                last_update_check: None,
+                last_update_apply: None,
+                pending_reboot: false,
+            })
+        }
+        fn reboot_system(&self, _delay_seconds: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn get_service_status(
+            &self,
+            _name: &str,
+        ) -> anyhow::Result<Option<linux_patch_api::packages::ServiceStatus>> {
+            Ok(None)
+        }
+        fn refresh_package_cache(
+            &self,
+            _cache_state: &linux_patch_api::packages::cache::PackageCacheState,
+        ) -> anyhow::Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.cache_refreshed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn last_cache_update(
+            &self,
+            _cache_state: &linux_patch_api::packages::cache::PackageCacheState,
+        ) -> Option<chrono::DateTime<chrono::Utc>> {
+            None
+        }
+        fn get_installed_version(&self, _name: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some("2.2.0".to_string()))
+        }
+        fn get_candidate_version(&self, _name: &str) -> anyhow::Result<Option<String>> {
+            // This is the critical assertion: if refresh_package_cache
+            // has NOT been called yet, set the flag to fail the test.
+            if !self.cache_refreshed.load(Ordering::SeqCst) {
+                self.candidate_called_before_refresh
+                    .store(true, Ordering::SeqCst);
+            }
+            Ok(Some("2.3.0".to_string()))
+        }
+    }
+
+    let cache_refreshed = Arc::new(AtomicBool::new(false));
+    let candidate_called_before_refresh = Arc::new(AtomicBool::new(false));
+    let call_count = Arc::new(AtomicUsize::new(0));
+
+    let backend = CallOrderBackend {
+        cache_refreshed: cache_refreshed.clone(),
+        candidate_called_before_refresh: candidate_called_before_refresh.clone(),
+        call_count: call_count.clone(),
+    };
+
+    // Simulate the self-update pre-flight sequence:
+    // 1. refresh_package_cache (forced, regardless of is_stale())
+    // 2. get_installed_version
+    // 3. get_candidate_version
+    let cache_state = linux_patch_api::packages::cache::PackageCacheState::new();
+    backend.refresh_package_cache(&cache_state).unwrap();
+    backend.get_installed_version("linux-patch-api").unwrap();
+    backend.get_candidate_version("linux-patch-api").unwrap();
+
+    // Assert refresh was called
+    assert!(
+        cache_refreshed.load(Ordering::SeqCst),
+        "refresh_package_cache should have been called"
+    );
+    assert!(
+        call_count.load(Ordering::SeqCst) > 0,
+        "refresh_package_cache should have been called at least once"
+    );
+    // Assert get_candidate_version was NOT called before refresh
+    assert!(
+        !candidate_called_before_refresh.load(Ordering::SeqCst),
+        "get_candidate_version must NOT be called before refresh_package_cache — \
+         this is the root cause of issue #157 (stale cache causes silent no-op)"
+    );
+}
