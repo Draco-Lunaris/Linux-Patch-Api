@@ -76,6 +76,9 @@ pub fn classify_error(err: &AnyhowError) -> &'static str {
 
     // Spawn failure (command not found / permission denied at exec time).
     if let Some(ce) = ce {
+        if ce.timed_out {
+            return error_code::TIMEOUT;
+        }
         if ce.spawn_error.is_some() {
             if lower.contains("no such file") || lower.contains("not found") {
                 return error_code::COMMAND_NOT_FOUND;
@@ -177,6 +180,11 @@ pub struct CommandError {
     /// Set when the command could not be spawned at all (e.g. not found, permission denied).
     /// When set, `exit_code`/`stdout`/`stderr` are meaningless.
     pub spawn_error: Option<String>,
+    /// True when the command exceeded its deadline and was killed by the runner.
+    /// When true, `exit_code` is typically `None` (SIGKILL) and stdout/stderr
+    /// contain whatever was captured before the kill. Mutually exclusive with
+    /// `spawn_error` (a spawn failure never times out).
+    pub timed_out: bool,
 }
 
 impl CommandError {
@@ -189,6 +197,7 @@ impl CommandError {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             spawn_error: None,
+            timed_out: false,
         }
     }
 
@@ -201,6 +210,26 @@ impl CommandError {
             stdout: String::new(),
             stderr: String::new(),
             spawn_error: Some(format!("{}", err)),
+            timed_out: false,
+        }
+    }
+
+    /// Build a `CommandError` for a command that exceeded its deadline and was killed.
+    ///
+    /// `partial_output` is whatever stdout/stderr the runner captured before the kill
+    /// (may be empty if the child produced no output before hanging).
+    pub fn from_timeout(program: &str, args: &[&str], timeout_secs: u64) -> Self {
+        Self {
+            program: program.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!(
+                "command timed out after {}s and was killed (SIGKILL)",
+                timeout_secs
+            ),
+            spawn_error: None,
+            timed_out: true,
         }
     }
 
@@ -208,9 +237,17 @@ impl CommandError {
     ///
     /// Format: `apt-get failed (exit 100): <first non-empty line of stderr or stdout>`
     /// For spawn failures: `apt-get failed to start: <error>`
+    /// For timeouts: `apt-get timed out after 300s`
     pub fn summary(&self) -> String {
         if let Some(ref spawn_err) = self.spawn_error {
             return format!("{} failed to start: {}", self.program, spawn_err);
+        }
+        if self.timed_out {
+            return format!(
+                "{} timed out: {}",
+                self.program,
+                first_nonempty_line(&self.stderr).unwrap_or_default()
+            );
         }
         let detail = first_nonempty_line(&self.stderr)
             .or_else(|| first_nonempty_line(&self.stdout))
@@ -436,8 +473,24 @@ mod tests {
             stdout: String::new(),
             stderr: "Killed\n".to_string(),
             spawn_error: None,
+            timed_out: false,
         };
         assert_eq!(ce.summary(), "apt-get failed (signal): Killed");
+    }
+
+    #[test]
+    fn command_error_summary_timeout() {
+        let ce = CommandError::from_timeout("apt-get", &["update"], 300);
+        let s = ce.summary();
+        assert!(s.starts_with("apt-get timed out:"));
+        assert!(s.contains("300s"));
+    }
+
+    #[test]
+    fn classify_timeout_error() {
+        let ce = CommandError::from_timeout("apt-get", &["update"], 300);
+        let err = AnyhowError::new(ce);
+        assert_eq!(classify_error(&err), error_code::TIMEOUT);
     }
 
     #[test]
