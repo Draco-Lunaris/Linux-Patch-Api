@@ -16,9 +16,14 @@ const CACHE_STATE_PATH: &str = "/var/lib/linux_patch_api/state/cache.json";
 /// Default stale threshold: 15 minutes
 pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 15 * 60;
 
-/// Cache refresh command timeout: 120 seconds
-#[allow(dead_code)]
-const CACHE_REFRESH_TIMEOUT_SECS: u64 = 120;
+/// Cache refresh command timeout: 300 seconds.
+///
+/// This is the upper bound for `apt-get update` / `dnf check-update` / `apk update`.
+/// Under normal conditions these finish in <30s, but a slow upstream mirror can
+/// push that to a minute or two. 300s is the safety net: beyond that, the command
+/// is almost certainly hung on a dead TCP connection (the root cause of issue #158)
+/// and must be killed so it doesn't hold the agent's mutation semaphore indefinitely.
+pub const CACHE_REFRESH_TIMEOUT_SECS: u64 = 300;
 
 /// Persistent cache state (written to cache.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,15 +215,23 @@ where
 ///
 /// On failure, returns a [`CommandError`] (wrapped in anyhow) preserving exit code,
 /// stdout, and stderr so the manager receives the same diagnostics as the local journal.
+/// On timeout, the child is killed (SIGTERM → SIGKILL) and the error is marked
+/// `timed_out = true` so [`classify_error`](super::error_utils::classify_error) returns
+/// [`TIMEOUT`](super::error_utils::error_code::TIMEOUT).
 pub fn run_command_with_timeout(program: &str, args: &[&str]) -> Result<String> {
-    use std::process::Command;
+    let timeout = Duration::from_secs(CACHE_REFRESH_TIMEOUT_SECS);
 
-    let output = match Command::new(program)
-        .args(args)
+    // Build a tokio command with piped stdio and kill_on_drop so a timeout
+    // never orphans the child.
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
         .env("DEBIAN_FRONTEND", "noninteractive")
-        .output()
-    {
-        Ok(o) => o,
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
         Err(e) => {
             return Err(
                 anyhow::Error::new(CommandError::from_spawn_error(program, args, &e))
@@ -226,6 +239,33 @@ pub fn run_command_with_timeout(program: &str, args: &[&str]) -> Result<String> 
             );
         }
     };
+
+    // Block on the async wait-with-timeout. This function is called from
+    // synchronous backend code that already holds the mutation semaphore.
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::try_current()
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .block_on(async move {
+                match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                    Ok(Ok(output)) => Ok(output),
+                    Ok(Err(e)) => Err(anyhow::Error::new(CommandError::from_spawn_error(
+                        program, args, &e,
+                    ))
+                    .context("Cache refresh command failed to wait")),
+                    Err(_) => {
+                        // Timeout elapsed — the child will be killed by kill_on_drop
+                        // when the handle is dropped. Construct a timeout error.
+                        Err(anyhow::Error::new(CommandError::from_timeout(
+                            program,
+                            args,
+                            timeout.as_secs(),
+                        )))
+                    }
+                }
+            })
+    });
+
+    let output = result?;
 
     if !output.status.success() {
         return Err(anyhow::Error::new(CommandError::from_output(

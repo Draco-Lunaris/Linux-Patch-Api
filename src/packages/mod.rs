@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
 
+use coordinator::{CACHE_REFRESH_TIMEOUT, PACKAGE_OP_TIMEOUT, QUICK_OP_TIMEOUT};
+
 /// Maximum allowed length for package names and version strings
 pub const MAX_NAME_LENGTH: usize = 256;
 
@@ -281,7 +283,7 @@ pub trait PackageManagerBackend: Send + Sync {
 /// Used by all backends to avoid duplicated `get_system_info` implementations.
 fn get_system_info_via_runner(runner: &dyn CommandRunner) -> Result<SystemInfo> {
     let hostname = runner
-        .run("hostname", &[])
+        .run_with_timeout("hostname", &[], QUICK_OP_TIMEOUT)
         .ok()
         .map(|o| o.stdout.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -325,13 +327,13 @@ fn get_system_info_via_runner(runner: &dyn CommandRunner) -> Result<SystemInfo> 
         .unwrap_or_else(|| ("Linux".to_string(), "unknown".to_string()));
 
     let kernel = runner
-        .run("uname", &["-r"])
+        .run_with_timeout("uname", &["-r"], QUICK_OP_TIMEOUT)
         .ok()
         .map(|o| o.stdout.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
     let architecture = runner
-        .run("uname", &["-m"])
+        .run_with_timeout("uname", &["-m"], QUICK_OP_TIMEOUT)
         .ok()
         .map(|o| o.stdout.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -360,11 +362,11 @@ fn reboot_system_via_runner(runner: &dyn CommandRunner, delay_seconds: u64) -> R
             delay_minutes, delay_seconds
         );
         let delay_str = format!("+{}", delay_minutes);
-        coordinator::run_command(runner, "shutdown", &["-r", &delay_str])?;
+        coordinator::run_command_timed(runner, "shutdown", &["-r", &delay_str], QUICK_OP_TIMEOUT)?;
         info!("System reboot scheduled in {} minutes", delay_minutes);
     } else {
         info!("Initiating immediate system reboot");
-        coordinator::run_command(runner, "systemctl", &["reboot"])?;
+        coordinator::run_command_timed(runner, "systemctl", &["reboot"], QUICK_OP_TIMEOUT)?;
         info!("System reboot initiated");
     }
     Ok(())
@@ -375,7 +377,7 @@ fn get_systemd_service_status_via_runner(
     runner: &dyn CommandRunner,
     name: &str,
 ) -> Result<Option<ServiceStatus>> {
-    let output = runner.run(
+    let output = runner.run_with_timeout(
         "systemctl",
         &[
             "show",
@@ -384,6 +386,7 @@ fn get_systemd_service_status_via_runner(
             "--",
             name,
         ],
+        QUICK_OP_TIMEOUT,
     )?;
 
     let success = output.success();
@@ -426,9 +429,10 @@ fn get_systemd_service_status_via_runner(
 
     let healthy = if !healthy && active_state == "inactive" && unit_file_state == "enabled" {
         let socket_name = format!("{}.socket", id.trim_end_matches(".service"));
-        if let Ok(socket_output) = runner.run(
+        if let Ok(socket_output) = runner.run_with_timeout(
             "systemctl",
             &["show", &socket_name, "--property=ActiveState", "--no-pager"],
+            QUICK_OP_TIMEOUT,
         ) {
             if socket_output.stdout.contains("ActiveState=active") {
                 true
@@ -459,7 +463,7 @@ fn get_openrc_service_status_via_runner(
     runner: &dyn CommandRunner,
     name: &str,
 ) -> Result<Option<ServiceStatus>> {
-    let output = runner.run("rc-service", &[name, "status"])?;
+    let output = runner.run_with_timeout("rc-service", &[name, "status"], QUICK_OP_TIMEOUT)?;
 
     let stdout = output.stdout.clone();
     let stderr = output.stderr.clone();
@@ -484,7 +488,9 @@ fn get_openrc_service_status_via_runner(
             ("unknown".to_string(), "unknown".to_string(), false)
         };
 
-    let enabled_output = runner.run("rc-update", &["show", "default"]).ok();
+    let enabled_output = runner
+        .run_with_timeout("rc-update", &["show", "default"], QUICK_OP_TIMEOUT)
+        .ok();
 
     let enabled_state = enabled_output
         .map(|o| {
@@ -609,12 +615,19 @@ impl AptBackend {
     /// This is the core wrapper for all apt-get operations. It:
     /// 1. Acquires the process-wide mutex (no concurrent apt calls)
     /// 2. Runs `dpkg --configure -a` pre-flight (clean up prior interrupted state)
-    /// 3. Runs the apt-get command
+    /// 3. Runs the apt-get command with a timeout (PACKAGE_OP_TIMEOUT for installs,
+    ///    CACHE_REFRESH_TIMEOUT for `update`)
     /// 4. On success: runs `dpkg --audit` post-verification
     /// 5. On failure: runs `dpkg --configure -a` cleanup before returning the error
     ///
     /// The mutex is held for the entire duration including pre-flight and cleanup,
     /// ensuring atomicity of the full operation.
+    ///
+    /// The timeout ensures a hung apt-get (e.g. stuck on a dead upstream mirror)
+    /// is killed before it blocks the agent's mutation semaphore for hours.
+    /// On timeout, the child is SIGTERM'd (5s grace) then SIGKILL'd, and the
+    /// error is marked `timed_out = true` so the manager classifies it as
+    /// `TIMEOUT` rather than a generic package-manager failure.
     fn run_apt_safe(&self, args: &[&str]) -> Result<String> {
         let _guard = Self::get_apt_mutex()
             .lock()
@@ -628,7 +641,15 @@ impl AptBackend {
         // Without this, apt-get can hang forever waiting for input on a TTY-less
         // service, and a subsequent SIGKILL leaves dpkg mid-transaction.
         let program = "apt-get";
-        let output = match self.runner.run(program, args) {
+        // Choose the timeout based on the operation. `update` is a cache refresh
+        // (network-bound, shorter timeout); everything else is an install/upgrade
+        // (disk-bound, longer timeout).
+        let timeout = if !args.is_empty() && args[0] == "update" {
+            CACHE_REFRESH_TIMEOUT
+        } else {
+            PACKAGE_OP_TIMEOUT
+        };
+        let output = match self.runner.run_with_timeout(program, args, timeout) {
             Ok(o) => o,
             Err(e) => {
                 let err = e.context("Failed to execute apt command");
@@ -645,6 +666,7 @@ impl AptBackend {
                 stdout: output.stdout.clone(),
                 stderr: output.stderr.clone(),
                 spawn_error: None,
+                timed_out: output.timed_out,
             });
 
             tracing::warn!(error = ?err, "apt-get failed — running dpkg --configure -a cleanup");
@@ -669,9 +691,9 @@ impl AptBackend {
         self.run_apt_safe(args)
     }
 
-    /// Run dpkg command and capture output.
+    /// Run dpkg command and capture output with a quick-op timeout.
     fn run_dpkg(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "dpkg", args)
+        coordinator::run_command_timed(self.runner.as_ref(), "dpkg", args, QUICK_OP_TIMEOUT)
     }
 
     /// Run `apt` (the user-facing CLI, not apt-get) for list/query operations.
@@ -681,7 +703,7 @@ impl AptBackend {
     /// stderr and a "Listing..." header to stdout, both of which are handled by the
     /// caller. The exit code is 0 on success.
     fn run_apt_cli(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "apt", args)
+        coordinator::run_command_timed(self.runner.as_ref(), "apt", args, QUICK_OP_TIMEOUT)
     }
 
     /// Run `apt-cache` for query operations like `policy` and `search`.
@@ -689,7 +711,7 @@ impl AptBackend {
     /// `apt-cache` is the scripting-safe tool for package queries. `apt-get` does not
     /// support `policy` — it's an `apt-cache` operation.
     fn run_apt_cache(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "apt-cache", args)
+        coordinator::run_command_timed(self.runner.as_ref(), "apt-cache", args, QUICK_OP_TIMEOUT)
     }
 
     /// Parse package list from `apt list` output.
@@ -1131,9 +1153,14 @@ impl ApkBackend {
         Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
-    /// Run apk command and capture output.
+    /// Run apk command and capture output with a package-op timeout.
     fn run_apk(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "apk", args)
+        let timeout = if !args.is_empty() && args[0] == "update" {
+            CACHE_REFRESH_TIMEOUT
+        } else {
+            PACKAGE_OP_TIMEOUT
+        };
+        coordinator::run_command_timed(self.runner.as_ref(), "apk", args, timeout)
     }
 
     /// Parse name and version from apk package identifier (name-version format).
@@ -1505,7 +1532,7 @@ impl PackageManagerBackend for ApkBackend {
         } else {
             // Alpine uses `reboot` command, not `systemctl reboot`
             info!("Initiating immediate system reboot");
-            coordinator::run_command(self.runner.as_ref(), "reboot", &[])?;
+            coordinator::run_command_timed(self.runner.as_ref(), "reboot", &[], QUICK_OP_TIMEOUT)?;
             info!("System reboot initiated");
             Ok(())
         }
@@ -1607,14 +1634,19 @@ impl DnfBackend {
         Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
-    /// Run dnf command and capture output.
+    /// Run dnf command and capture output with a package-op timeout.
     fn run_dnf(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "dnf", args)
+        let timeout = if !args.is_empty() && (args[0] == "check-update" || args[0] == "makecache") {
+            CACHE_REFRESH_TIMEOUT
+        } else {
+            PACKAGE_OP_TIMEOUT
+        };
+        coordinator::run_command_timed(self.runner.as_ref(), "dnf", args, timeout)
     }
 
-    /// Run rpm command and capture output.
+    /// Run rpm command and capture output with a quick-op timeout.
     fn run_rpm(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "rpm", args)
+        coordinator::run_command_timed(self.runner.as_ref(), "rpm", args, QUICK_OP_TIMEOUT)
     }
 
     /// Parse name and version from RPM package identifier (name-version-release.arch).
@@ -1735,7 +1767,9 @@ impl DnfBackend {
 
         // Check if upgradable via dnf check-update
         // dnf check-update returns exit code 100 when updates are available
-        let check_output = self.runner.run("dnf", &["check-update", "-q", name]);
+        let check_output =
+            self.runner
+                .run_with_timeout("dnf", &["check-update", "-q", name], QUICK_OP_TIMEOUT);
 
         let (upgradable, latest_version) = match check_output {
             Ok(ref o) if o.status_code == Some(100) => {
@@ -1821,7 +1855,9 @@ impl PackageManagerBackend for DnfBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via dnf
-            let search_output = self.runner.run("dnf", &["info", "-q", name]);
+            let search_output =
+                self.runner
+                    .run_with_timeout("dnf", &["info", "-q", name], QUICK_OP_TIMEOUT);
 
             if let Ok(output) = search_output {
                 if output.success() {
@@ -2024,11 +2060,12 @@ impl PackageManagerBackend for DnfBackend {
     fn refresh_package_cache(&self, cache_state: &cache::PackageCacheState) -> Result<()> {
         info!("Refreshing DNF package cache");
         // dnf check-update returns exit code 100 when updates are available (not an error).
-        match coordinator::run_command_with_acceptable_exit(
+        match coordinator::run_command_with_acceptable_exit_timed(
             self.runner.as_ref(),
             "dnf",
             &["check-update", "--refresh"],
             &[0, 100],
+            CACHE_REFRESH_TIMEOUT,
         ) {
             Ok(_) => {
                 cache_state.update_success();
@@ -2062,7 +2099,9 @@ impl PackageManagerBackend for DnfBackend {
     }
 
     fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
-        let output = self.runner.run("dnf", &["info", "-q", name]);
+        let output = self
+            .runner
+            .run_with_timeout("dnf", &["info", "-q", name], QUICK_OP_TIMEOUT);
         match output {
             Ok(o) if o.success() => {
                 let stdout = &o.stdout;
@@ -2118,14 +2157,19 @@ impl YumBackend {
         Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
-    /// Run yum command and capture output.
+    /// Run yum command and capture output with a package-op timeout.
     fn run_yum(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "yum", args)
+        let timeout = if !args.is_empty() && args[0] == "makecache" {
+            CACHE_REFRESH_TIMEOUT
+        } else {
+            PACKAGE_OP_TIMEOUT
+        };
+        coordinator::run_command_timed(self.runner.as_ref(), "yum", args, timeout)
     }
 
-    /// Run rpm command and capture output.
+    /// Run rpm command and capture output with a quick-op timeout.
     fn run_rpm(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "rpm", args)
+        coordinator::run_command_timed(self.runner.as_ref(), "rpm", args, QUICK_OP_TIMEOUT)
     }
 
     /// Parse name and version from RPM package identifier (name-version-release.arch).
@@ -2236,7 +2280,9 @@ impl YumBackend {
 
         // Check if upgradable via yum check-update
         // yum check-update returns exit code 100 when updates are available
-        let check_output = self.runner.run("yum", &["check-update", "-q", name]);
+        let check_output =
+            self.runner
+                .run_with_timeout("yum", &["check-update", "-q", name], QUICK_OP_TIMEOUT);
 
         let (upgradable, latest_version) = match check_output {
             Ok(ref o) if o.status_code == Some(100) => {
@@ -2315,7 +2361,9 @@ impl PackageManagerBackend for YumBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via yum
-            let search_output = self.runner.run("yum", &["info", "-q", name]);
+            let search_output =
+                self.runner
+                    .run_with_timeout("yum", &["info", "-q", name], QUICK_OP_TIMEOUT);
 
             if let Ok(output) = search_output {
                 if output.success() {
@@ -2537,7 +2585,9 @@ impl PackageManagerBackend for YumBackend {
     }
 
     fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
-        let output = self.runner.run("yum", &["info", "-q", name]);
+        let output = self
+            .runner
+            .run_with_timeout("yum", &["info", "-q", name], QUICK_OP_TIMEOUT);
         match output {
             Ok(o) if o.success() => {
                 let stdout = &o.stdout;
@@ -2593,9 +2643,15 @@ impl PacmanBackend {
         Self::new(Arc::new(coordinator::SystemCommandRunner))
     }
 
-    /// Run pacman command and capture output.
+    /// Run pacman command and capture output with a package-op timeout.
+    /// `-Sy` (cache refresh) uses the shorter CACHE_REFRESH_TIMEOUT.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
-        coordinator::run_command(self.runner.as_ref(), "pacman", args)
+        let timeout = if !args.is_empty() && (args[0] == "-Sy" || args[0] == "-Syu") {
+            CACHE_REFRESH_TIMEOUT
+        } else {
+            PACKAGE_OP_TIMEOUT
+        };
+        coordinator::run_command_timed(self.runner.as_ref(), "pacman", args, timeout)
     }
 
     /// Parse package list from `pacman -Q` output.
@@ -2737,7 +2793,9 @@ impl PackageManagerBackend for PacmanBackend {
 
         if query_result.is_err() {
             // Package not installed, check if available via pacman -Si
-            let search_output = self.runner.run("pacman", &["-Si", name]);
+            let search_output =
+                self.runner
+                    .run_with_timeout("pacman", &["-Si", name], QUICK_OP_TIMEOUT);
 
             if let Ok(output) = search_output {
                 if output.success() {
@@ -2936,7 +2994,9 @@ impl PackageManagerBackend for PacmanBackend {
     }
 
     fn get_candidate_version(&self, name: &str) -> Result<Option<String>> {
-        let output = self.runner.run("pacman", &["-Si", name]);
+        let output = self
+            .runner
+            .run_with_timeout("pacman", &["-Si", name], QUICK_OP_TIMEOUT);
         match output {
             Ok(o) if o.success() => {
                 let stdout = &o.stdout;

@@ -203,6 +203,7 @@ impl CommandRunner for MockCommandRunner {
                 stdout: String::new(),
                 stderr: String::new(),
                 spawn_error: Some(spawn_err.clone()),
+                timed_out: false,
             })
             .context(format!("Failed to execute {}", program)));
         }
@@ -217,6 +218,7 @@ impl CommandRunner for MockCommandRunner {
                 stdout: response.stdout.clone(),
                 stderr: response.stderr.clone(),
                 spawn_error: None,
+                timed_out: false,
             }));
         }
 
@@ -225,6 +227,7 @@ impl CommandRunner for MockCommandRunner {
             status_code: response.exit_code,
             stdout: response.stdout,
             stderr: response.stderr,
+            timed_out: false,
         })
     }
 }
