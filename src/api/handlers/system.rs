@@ -49,11 +49,13 @@ pub struct HealthData {
     pub status: String, // "healthy" or "degraded"
     pub uptime_seconds: u64,
     pub version: String,
-    pub last_cache_update: Option<String>, // RFC3339 timestamp
-    pub cache_status: String,              // "fresh", "stale", "unknown", "failed"
-    pub crl_status: Option<String>,        // "valid", "expired", "missing", "invalid", "degraded"
-    pub crl_age_seconds: Option<u64>,      // age of on-disk CRL file
-    pub crl_next_update: Option<String>,   // RFC3339 timestamp of CRL nextUpdate
+    pub last_cache_update: Option<String>,  // RFC3339 timestamp
+    pub cache_status: String,               // "fresh", "stale", "unknown", "failed"
+    pub crl_status: Option<String>,         // "valid", "expired", "missing", "invalid", "degraded"
+    pub crl_age_seconds: Option<u64>,       // age of on-disk CRL file
+    pub crl_next_update: Option<String>,    // RFC3339 timestamp of CRL nextUpdate
+    pub gpg_key_status: Option<String>,     // "valid", "expired", "missing", "revoked"
+    pub gpg_key_expires_at: Option<String>, // RFC3339 timestamp of GPG key expiry
 }
 
 /// Service status response data
@@ -249,6 +251,20 @@ pub async fn health_check(
         })
     });
 
+    // GPG key health — check the provisioned repo keyring.
+    // The manager uses this to determine whether the agent's repo is signed
+    // by a valid, non-expired GPG key (issue #126 HIGH-1).
+    let (gpg_key_status_enum, gpg_key_expires_at) = crate::enroll::check_gpg_key_health();
+    let gpg_key_status = Some(gpg_key_status_enum.as_str().to_string());
+
+    // Downgrade overall health if GPG key is missing or expired.
+    if gpg_key_status_enum == crate::enroll::GpgKeyStatus::Missing
+        || gpg_key_status_enum == crate::enroll::GpgKeyStatus::Expired
+        || gpg_key_status_enum == crate::enroll::GpgKeyStatus::Revoked
+    {
+        status = "degraded".to_string();
+    }
+
     let response = ApiResponse::success(HealthData {
         status,
         uptime_seconds,
@@ -258,6 +274,8 @@ pub async fn health_check(
         crl_status: Some(crl_status_str),
         crl_age_seconds: crl_age,
         crl_next_update,
+        gpg_key_status,
+        gpg_key_expires_at,
     });
 
     HttpResponse::Ok().json(response)
@@ -508,11 +526,15 @@ mod tests {
             crl_status: Some("valid".to_string()),
             crl_age_seconds: Some(3600),
             crl_next_update: Some("2026-05-28T14:00:00+00:00".to_string()),
+            gpg_key_status: Some("valid".to_string()),
+            gpg_key_expires_at: Some("2027-01-01T00:00:00+00:00".to_string()),
         };
         let json = serde_json::to_string(&health).unwrap();
         assert!(json.contains("healthy"));
         assert!(json.contains("12345"));
         assert!(json.contains("fresh"));
         assert!(json.contains("last_cache_update"));
+        assert!(json.contains("gpg_key_status"));
+        assert!(json.contains("gpg_key_expires_at"));
     }
 }

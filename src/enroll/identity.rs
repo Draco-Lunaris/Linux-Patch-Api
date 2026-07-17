@@ -382,6 +382,16 @@ pub fn get_os_details() -> Result<serde_json::Value> {
                             serde_json::Value::String(unquoted.to_string()),
                         );
                     }
+                    "ID" => {
+                        // The machine-parseable distro ID (e.g., "ubuntu", "debian",
+                        // "fedora"). Emitted as `name` per INTERFACE_CONTRACT §2.3
+                        // so the manager's detect_distro_id has a reliable second
+                        // signal (issue #126 MED-1).
+                        details.insert(
+                            "name".into(),
+                            serde_json::Value::String(unquoted.to_string()),
+                        );
+                    }
                     "VERSION_ID" => {
                         details.insert(
                             "version".into(),
@@ -506,6 +516,23 @@ mod tests {
         assert!(
             details.get("kernel").is_some(),
             "OS details must contain kernel version"
+        );
+    }
+
+    #[test]
+    fn os_details_contains_name_key() {
+        // Issue #126 MED-1: the agent must emit a `name` key in os_details
+        // (populated from /etc/os-release's ID field) so the manager's
+        // detect_distro_id has a reliable second signal.
+        let details = get_os_details().expect("Failed to get OS details");
+        assert!(
+            details.get("name").is_some(),
+            "OS details must contain 'name' key (from /etc/os-release ID field)"
+        );
+        let name = details.get("name").unwrap();
+        assert!(
+            !name.as_str().unwrap_or("").is_empty(),
+            "OS details 'name' key must not be empty"
         );
     }
 

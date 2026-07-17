@@ -1,6 +1,6 @@
 # Linux Patch API
 
-**Version:** 2.0.0  
+**Version:** 2.3.1  
 **Status:** Production Ready  
 **License:** [Apache 2.0](LICENSE)  
 
@@ -695,5 +695,5 @@ This project is licensed under the [Apache License 2.0](LICENSE).
 
 Copyright 2025-2026 Draco Lunaris
 
-**Version:** 1.0.0  
+**Version:** 2.3.1  
 **Release Date:** 2026-07-17

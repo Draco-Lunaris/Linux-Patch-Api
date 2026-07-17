@@ -33,7 +33,7 @@ pub enum RepoHealResult {
 ///
 /// Falls back to `ID_LIKE` if `ID` is absent, taking the first token.
 /// Returns `Err` if the distro cannot be determined.
-fn detect_distro_id() -> Result<String> {
+pub fn detect_distro_id() -> Result<String> {
     let content = std::fs::read_to_string("/etc/os-release").context(
         "Failed to read /etc/os-release — cannot determine distro for repo health check",
     )?;
@@ -75,7 +75,7 @@ fn detect_distro_id() -> Result<String> {
 ///
 /// These paths mirror the ones written by [`provision::provision_repo_config`].
 /// If the distro is unrecognized, returns `Err`.
-fn expected_repo_paths(distro_id: &str) -> Result<(String, String)> {
+pub fn expected_repo_paths(distro_id: &str) -> Result<(String, String)> {
     match distro_id {
         "ubuntu" | "debian" | "linuxmint" => Ok((
             "/etc/apt/sources.list.d/lpa.list".to_string(),
@@ -107,6 +107,126 @@ fn file_present_and_nonempty(path: &str) -> bool {
         .metadata()
         .map(|m| m.is_file() && m.len() > 0)
         .unwrap_or(false)
+}
+
+/// GPG key health status for the agent's `/health` endpoint.
+///
+/// The manager consumes these values to determine whether the agent's
+/// repo is signed by a valid, non-expired GPG key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpgKeyStatus {
+    Valid,
+    Expired,
+    Missing,
+    Revoked,
+}
+
+impl GpgKeyStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GpgKeyStatus::Valid => "valid",
+            GpgKeyStatus::Expired => "expired",
+            GpgKeyStatus::Missing => "missing",
+            GpgKeyStatus::Revoked => "revoked",
+        }
+    }
+}
+
+/// Check the health of the provisioned GPG keyring.
+///
+/// Returns `(GpgKeyStatus, Option<String>)` where the second element is the
+/// expiry timestamp in RFC3339 format (if available).
+///
+/// - If the keyring file doesn't exist → `(Missing, None)`
+/// - If the keyring exists but `gpg` is not installed → `(Valid, None)` (can't check expiry)
+/// - If `gpg --show-keys` succeeds and the key is not expired → `(Valid, Some(expiry))`
+/// - If the key is expired → `(Expired, Some(expiry))`
+/// - If the key is revoked → `(Revoked, Some(expiry))`
+pub fn check_gpg_key_health() -> (GpgKeyStatus, Option<String>) {
+    let distro_id = match detect_distro_id() {
+        Ok(id) => id,
+        Err(_) => return (GpgKeyStatus::Missing, None),
+    };
+
+    let (_sources_path, keyring_path) = match expected_repo_paths(&distro_id) {
+        Ok(paths) => paths,
+        Err(_) => return (GpgKeyStatus::Missing, None),
+    };
+
+    // Check if the keyring file exists and is non-empty.
+    if !file_present_and_nonempty(&keyring_path) {
+        return (GpgKeyStatus::Missing, None);
+    }
+
+    // Try to inspect the key with gpg for expiry information.
+    // If gpg is not installed, we can only report "valid" based on file existence.
+    let gpg_output = std::process::Command::new("gpg")
+        .args([
+            "--show-keys",
+            "--with-colons",
+            "--fingerprint",
+            &keyring_path,
+        ])
+        .output();
+
+    let output = match gpg_output {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            // gpg not installed or failed — report valid based on file existence.
+            tracing::debug!(
+                keyring = %keyring_path,
+                "gpg not available or failed — reporting key as valid based on file existence"
+            );
+            return (GpgKeyStatus::Valid, None);
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_gpg_key_status(&stdout)
+}
+
+/// Parse `gpg --show-keys --with-colons` output to determine key status and expiry.
+///
+/// The colon-separated format has fields like:
+/// `pub:-:2048:1A2B3C4D:1700000000:1800000000::-:KeyID::scESC::`
+/// Field indices: 0=type, 1=validity, 2=length, 3=keyid, 4=created, 5=expires, ...
+///
+/// Validity codes: `-`=unknown, `e`=expired, `r`=revoked, `f`=full, `u`=ultimate
+fn parse_gpg_key_status(gpg_output: &str) -> (GpgKeyStatus, Option<String>) {
+    let mut status = GpgKeyStatus::Valid;
+    let mut expiry_timestamp: Option<String> = None;
+
+    for line in gpg_output.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+
+        // Look at pub or sub key lines for validity and expiry.
+        if fields[0] == "pub" || fields[0] == "sub" {
+            let validity = fields[1];
+            let expires = fields[5];
+
+            // Parse expiry timestamp (Unix epoch seconds).
+            if !expires.is_empty() {
+                if let Ok(secs) = expires.parse::<i64>() {
+                    if secs > 0 {
+                        expiry_timestamp =
+                            chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339());
+                    }
+                }
+            }
+
+            // Check validity code.
+            if validity.contains('e') {
+                status = GpgKeyStatus::Expired;
+            } else if validity.contains('r') {
+                status = GpgKeyStatus::Revoked;
+            }
+        }
+    }
+
+    (status, expiry_timestamp)
 }
 
 /// Read file content as string, returning None if file doesn't exist or is empty.
@@ -317,5 +437,59 @@ mod tests {
         std::fs::write(&path, "   \n\t  ").unwrap();
         let path_str = path.to_str().unwrap();
         assert_eq!(read_file_content(path_str), Some("   \n\t  ".to_string()));
+    }
+
+    // --- GPG key health tests ---
+
+    #[test]
+    fn test_parse_gpg_key_status_valid() {
+        // Simulate gpg --with-colons output for a valid, non-expired key.
+        // Fields: type:validity:length:keyid:created:expires:...
+        let output = "pub:f:2048:ABCDEF1234567890:1700000000:1800000000::-:Test Key::scESC::\nsub:f:2048:ABCDEF1234567890:1700000000:1800000000::-:Test Sub::e::\n";
+        let (status, expiry) = parse_gpg_key_status(output);
+        assert_eq!(status, GpgKeyStatus::Valid);
+        assert!(expiry.is_some());
+        // 1800000000 = 2027-01-15T08:00:00Z
+        assert!(expiry.unwrap().starts_with("2027"));
+    }
+
+    #[test]
+    fn test_parse_gpg_key_status_expired() {
+        // Validity 'e' means expired.
+        let output = "pub:e:2048:ABCDEF1234567890:1600000000:1700000000::-:Expired Key::scESC::\n";
+        let (status, _expiry) = parse_gpg_key_status(output);
+        assert_eq!(status, GpgKeyStatus::Expired);
+    }
+
+    #[test]
+    fn test_parse_gpg_key_status_revoked() {
+        // Validity 'r' means revoked.
+        let output = "pub:r:2048:ABCDEF1234567890:1600000000:1800000000::-:Revoked Key::scESC::\n";
+        let (status, _expiry) = parse_gpg_key_status(output);
+        assert_eq!(status, GpgKeyStatus::Revoked);
+    }
+
+    #[test]
+    fn test_parse_gpg_key_status_empty_output() {
+        let (status, expiry) = parse_gpg_key_status("");
+        assert_eq!(status, GpgKeyStatus::Valid);
+        assert!(expiry.is_none());
+    }
+
+    #[test]
+    fn test_parse_gpg_key_status_no_expiry() {
+        // Key with no expiry (expires field empty).
+        let output = "pub:f:2048:ABCDEF1234567890:1700000000::::-:No Expiry Key::scESC::\n";
+        let (status, expiry) = parse_gpg_key_status(output);
+        assert_eq!(status, GpgKeyStatus::Valid);
+        assert!(expiry.is_none());
+    }
+
+    #[test]
+    fn test_gpg_key_status_as_str() {
+        assert_eq!(GpgKeyStatus::Valid.as_str(), "valid");
+        assert_eq!(GpgKeyStatus::Expired.as_str(), "expired");
+        assert_eq!(GpgKeyStatus::Missing.as_str(), "missing");
+        assert_eq!(GpgKeyStatus::Revoked.as_str(), "revoked");
     }
 }
