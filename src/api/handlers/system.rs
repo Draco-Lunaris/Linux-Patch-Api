@@ -17,6 +17,7 @@ use crate::jobs::scheduler::{AdmissionMode, Scheduler};
 
 use super::packages::ApiResponse;
 use crate::auth::crl::{CrlStatus, SharedCrlState};
+use crate::enroll::SharedRepoSyncState;
 use crate::packages::PackageManagerBackend;
 
 /// Normalize and validate file paths to prevent path traversal attacks (VULN-002)
@@ -56,6 +57,8 @@ pub struct HealthData {
     pub crl_next_update: Option<String>,    // RFC3339 timestamp of CRL nextUpdate
     pub gpg_key_status: Option<String>,     // "valid", "expired", "missing", "revoked"
     pub gpg_key_expires_at: Option<String>, // RFC3339 timestamp of GPG key expiry
+    pub repo_config_synced: Option<bool>,   // true if last sync matched manager
+    pub repo_config_last_sync: Option<String>, // RFC3339 timestamp of last sync
 }
 
 /// Service status response data
@@ -133,6 +136,7 @@ pub async fn health_check(
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     crl_state: web::Data<SharedCrlState>,
+    repo_sync_state: web::Data<SharedRepoSyncState>,
     scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
 ) -> impl Responder {
@@ -265,6 +269,23 @@ pub async fn health_check(
         status = "degraded".to_string();
     }
 
+    // Repo config sync status from the background reconciliation task.
+    // `synced=Some(false)` means the last sync attempt failed (network
+    // error or provisioning failure) — downgrade to degraded so the
+    // manager can see which agents are out of sync.
+    let repo_sync = repo_sync_state.load();
+    let repo_config_synced = repo_sync.synced;
+    let repo_config_last_sync = repo_sync.last_sync_at.and_then(|t| {
+        use std::time::UNIX_EPOCH;
+        t.duration_since(UNIX_EPOCH).ok().and_then(|d| {
+            let secs = d.as_secs() as i64;
+            chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
+        })
+    });
+    if repo_config_synced == Some(false) {
+        status = "degraded".to_string();
+    }
+
     let response = ApiResponse::success(HealthData {
         status,
         uptime_seconds,
@@ -276,6 +297,8 @@ pub async fn health_check(
         crl_next_update,
         gpg_key_status,
         gpg_key_expires_at,
+        repo_config_synced,
+        repo_config_last_sync,
     });
 
     HttpResponse::Ok().json(response)
@@ -528,6 +551,8 @@ mod tests {
             crl_next_update: Some("2026-05-28T14:00:00+00:00".to_string()),
             gpg_key_status: Some("valid".to_string()),
             gpg_key_expires_at: Some("2027-01-01T00:00:00+00:00".to_string()),
+            repo_config_synced: Some(true),
+            repo_config_last_sync: Some("2026-07-18T00:00:00+00:00".to_string()),
         };
         let json = serde_json::to_string(&health).unwrap();
         assert!(json.contains("healthy"));
@@ -536,5 +561,7 @@ mod tests {
         assert!(json.contains("last_cache_update"));
         assert!(json.contains("gpg_key_status"));
         assert!(json.contains("gpg_key_expires_at"));
+        assert!(json.contains("repo_config_synced"));
+        assert!(json.contains("repo_config_last_sync"));
     }
 }

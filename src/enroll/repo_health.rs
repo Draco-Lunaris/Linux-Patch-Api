@@ -14,8 +14,12 @@
 //! `RepoConfig` from the manager's fallback endpoint and provisions it.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
+use tracing::{debug, info, warn};
 
 use super::client::EnrollmentClient;
 use super::provision;
@@ -310,6 +314,120 @@ pub async fn check_and_provision_repo_config(manager_url: &str) -> Result<RepoHe
     Ok(RepoHealResult::Provisioned)
 }
 
+/// In-memory repo-config sync state, atomically swapped via ArcSwap.
+///
+/// Mirrors the `SharedCrlState` pattern: the background sync task updates
+/// this state after each reconciliation attempt, and the health handler
+/// reads it without blocking.
+#[derive(Debug, Clone, Default)]
+pub struct RepoSyncState {
+    /// `true` if the last sync confirmed on-disk config matches the manager.
+    /// `false` if a mismatch was detected and re-provisioning was attempted.
+    /// `None` if no sync has completed yet (initial state).
+    pub synced: Option<bool>,
+    /// When the last sync attempt completed (regardless of outcome).
+    pub last_sync_at: Option<SystemTime>,
+}
+
+/// Shared, atomically-swappable repo-sync handle.
+pub type SharedRepoSyncState = Arc<ArcSwap<RepoSyncState>>;
+
+/// Create a new shared repo-sync state (initially unsynced).
+pub fn new_shared_sync_state() -> SharedRepoSyncState {
+    Arc::new(ArcSwap::from_pointee(RepoSyncState::default()))
+}
+
+/// Spawn the repo-config periodic reconciliation background task.
+///
+/// Mirrors `crl::spawn_crl_refresh_task`: performs an immediate sync on
+/// startup, then runs on a 6-hour interval. On failure, retries with
+/// exponential backoff (1min → 5min → 15min → 1h) before resuming the
+/// normal interval.
+///
+/// The task calls `check_and_provision_repo_config`, which is idempotent:
+/// it fetches the manager's current `RepoConfig`, compares on-disk
+/// `sources.list` and keyring content byte-for-byte, and re-provisions
+/// only if they differ. This means manager-side changes (suite renames,
+/// URL changes, GPG key rotation) propagate to the agent automatically.
+///
+/// After each attempt (success or failure), the shared state is updated
+/// so the health endpoint can report `repo_config_synced` and
+/// `repo_config_last_sync`.
+pub fn spawn_repo_config_sync_task(manager_url: String, shared_state: SharedRepoSyncState) {
+    let interval = Duration::from_secs(6 * 60 * 60); // 6 hours
+    let backoff_schedule: [Duration; 4] = [
+        Duration::from_secs(60),   // 1 min
+        Duration::from_secs(300),  // 5 min
+        Duration::from_secs(900),  // 15 min
+        Duration::from_secs(3600), // 1 hour
+    ];
+
+    tokio::spawn(async move {
+        // Immediate sync on startup (no delay)
+        let result = check_and_provision_repo_config(&manager_url).await;
+        update_sync_state(&shared_state, &result);
+
+        let mut retry_idx: usize = 0;
+
+        loop {
+            tokio::time::sleep(interval).await;
+
+            let result = check_and_provision_repo_config(&manager_url).await;
+            update_sync_state(&shared_state, &result);
+
+            match result {
+                Ok(heal_result) => {
+                    match heal_result {
+                        RepoHealResult::AlreadyConfigured => {
+                            debug!("Repo config background sync: already configured");
+                        }
+                        RepoHealResult::Provisioned => {
+                            info!(
+                                "Repo config background sync: re-provisioned from manager \
+                                 (content had changed)"
+                            );
+                        }
+                    }
+                    retry_idx = 0;
+                }
+                Err(e) => {
+                    let delay = backoff_schedule[retry_idx.min(backoff_schedule.len() - 1)];
+                    warn!(
+                        error = %e,
+                        retry_in_secs = delay.as_secs(),
+                        retry_count = retry_idx + 1,
+                        "Repo config background sync failed -- retrying with backoff"
+                    );
+                    tokio::time::sleep(delay).await;
+                    if retry_idx < backoff_schedule.len() {
+                        retry_idx += 1;
+                    }
+                }
+            }
+        }
+    });
+
+    info!(
+        interval_secs = interval.as_secs(),
+        "Repo config sync background task spawned (immediate sync on startup, 6h interval, \
+         retry with backoff on failure)"
+    );
+}
+
+/// Update the shared sync state after a reconciliation attempt.
+fn update_sync_state(shared_state: &SharedRepoSyncState, result: &Result<RepoHealResult>) {
+    let now = SystemTime::now();
+    let synced = match result {
+        Ok(RepoHealResult::AlreadyConfigured) => Some(true),
+        Ok(RepoHealResult::Provisioned) => Some(true),
+        Err(_) => Some(false),
+    };
+    shared_state.store(Arc::new(RepoSyncState {
+        synced,
+        last_sync_at: Some(now),
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +609,60 @@ mod tests {
         assert_eq!(GpgKeyStatus::Expired.as_str(), "expired");
         assert_eq!(GpgKeyStatus::Missing.as_str(), "missing");
         assert_eq!(GpgKeyStatus::Revoked.as_str(), "revoked");
+    }
+
+    // --- RepoSyncState tests ---
+
+    #[test]
+    fn test_repo_sync_state_default_is_unsynced() {
+        let state = RepoSyncState::default();
+        assert!(state.synced.is_none());
+        assert!(state.last_sync_at.is_none());
+    }
+
+    #[test]
+    fn test_shared_repo_sync_state_swap() {
+        let shared = new_shared_sync_state();
+        let initial = shared.load();
+        assert!(initial.synced.is_none());
+
+        let new_state = RepoSyncState {
+            synced: Some(true),
+            last_sync_at: Some(SystemTime::now()),
+        };
+        shared.store(Arc::new(new_state));
+
+        let updated = shared.load();
+        assert_eq!(updated.synced, Some(true));
+        assert!(updated.last_sync_at.is_some());
+    }
+
+    #[test]
+    fn test_update_sync_state_on_ok_already_configured() {
+        let shared = new_shared_sync_state();
+        let result: Result<RepoHealResult> = Ok(RepoHealResult::AlreadyConfigured);
+        update_sync_state(&shared, &result);
+        let state = shared.load();
+        assert_eq!(state.synced, Some(true));
+        assert!(state.last_sync_at.is_some());
+    }
+
+    #[test]
+    fn test_update_sync_state_on_ok_provisioned() {
+        let shared = new_shared_sync_state();
+        let result: Result<RepoHealResult> = Ok(RepoHealResult::Provisioned);
+        update_sync_state(&shared, &result);
+        let state = shared.load();
+        assert_eq!(state.synced, Some(true));
+    }
+
+    #[test]
+    fn test_update_sync_state_on_err() {
+        let shared = new_shared_sync_state();
+        let result: Result<RepoHealResult> = Err(anyhow::anyhow!("network error"));
+        update_sync_state(&shared, &result);
+        let state = shared.load();
+        assert_eq!(state.synced, Some(false));
+        assert!(state.last_sync_at.is_some());
     }
 }
