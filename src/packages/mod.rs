@@ -549,6 +549,92 @@ impl AptBackend {
         APT_MUTEX.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    /// Check for and remove stale apt/dpkg lock files.
+    ///
+    /// APT and dpkg create lock files to prevent concurrent operations:
+    /// - /var/lib/dpkg/lock-frontend (apt frontend lock)
+    /// - /var/lib/dpkg/lock (dpkg lock)
+    /// - /var/cache/apt/archives/lock (apt archive lock)
+    /// - /var/lib/apt/lists/lock (apt lists lock)
+    ///
+    /// If a previous apt process was killed (SIGKILL, OOM, power loss) while
+    /// holding these locks, the lock files remain but the process is dead.
+    /// Subsequent apt/dpkg operations will block indefinitely waiting for the
+    /// lock. This function detects stale locks by checking if the PID in the
+    /// lock file (if present) corresponds to a living process, and removes
+    /// stale lock files.
+    ///
+    /// Called as a pre-flight check before every apt operation.
+    fn cleanup_stale_apt_locks(&self) -> Result<()> {
+        use std::fs;
+
+        let lock_files = [
+            "/var/lib/dpkg/lock-frontend",
+            "/var/lib/dpkg/lock",
+            "/var/cache/apt/archives/lock",
+            "/var/lib/apt/lists/lock",
+        ];
+
+        for lock_path in &lock_files {
+            let path = std::path::Path::new(lock_path);
+            if !path.exists() {
+                continue;
+            }
+
+            // Try to read the PID from the lock file (if it's a PID file format)
+            let mut stale = false;
+            if let Ok(content) = fs::read_to_string(path) {
+                let content = content.trim();
+                if let Ok(pid) = content.parse::<u32>() {
+                    // Check if process with this PID exists
+                    let proc_path = format!("/proc/{}", pid);
+                    if !std::path::Path::new(&proc_path).exists() {
+                        tracing::warn!(lock = %lock_path, pid = pid, "Found stale lock file with dead PID, removing");
+                        stale = true;
+                    } else {
+                        // Check if the process is actually apt/dpkg related
+                        if let Ok(cmdline) = fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
+                            let cmdline = cmdline.replace('\0', " ");
+                            if !cmdline.contains("apt")
+                                && !cmdline.contains("dpkg")
+                                && !cmdline.contains("apt-get")
+                            {
+                                tracing::warn!(lock = %lock_path, pid = pid, cmdline = %cmdline, "Lock held by non-apt/dpkg process, treating as stale");
+                                stale = true;
+                            }
+                        }
+                    }
+                } else {
+                    // Lock file exists but doesn't contain a valid PID - could be a flock-style lock
+                    // Check if any apt/dpkg process is holding a lock on this file
+                    // For flock-style locks, we can't easily detect the holder, so we check
+                    // if any apt/dpkg process is running
+                    let has_apt_process = std::process::Command::new("pgrep")
+                        .args(["-f", "(apt-get|apt-cache|dpkg|apt)"])
+                        .output()
+                        .map(|o| !o.stdout.is_empty())
+                        .unwrap_or(false);
+
+                    if !has_apt_process {
+                        tracing::warn!(lock = %lock_path, "Found lock file with no apt/dpkg processes running, removing stale lock");
+                        stale = true;
+                    }
+                }
+            }
+
+            if stale {
+                match fs::remove_file(path) {
+                    Ok(_) => tracing::info!(lock = %lock_path, "Removed stale lock file"),
+                    Err(e) => {
+                        tracing::warn!(lock = %lock_path, error = %e, "Failed to remove stale lock file")
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run `dpkg --configure -a` to clean up any half-configured packages from
     /// a prior interrupted transaction (agent crash, OOM kill, SIGKILL, power loss).
     ///
@@ -560,6 +646,9 @@ impl AptBackend {
     /// Returns Err if `dpkg --configure -a` itself fails (dpkg is broken beyond
     /// simple cleanup — requires manual intervention).
     fn ensure_dpkg_clean(&self) -> Result<()> {
+        // First, clean up any stale lock files that would block dpkg
+        self.cleanup_stale_apt_locks()?;
+
         tracing::info!("Running dpkg --configure -a (pre-flight cleanup)");
         match self.run_dpkg(&["--configure", "-a"]) {
             Ok(_) => {
