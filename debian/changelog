@@ -1,3 +1,12 @@
+linux-patch-api (2.4.4) unstable; urgency=low
+
+  * Release v2.4.4
+  * fix: add pre-flight stale apt/dpkg lock cleanup (#173)
+  * Detects and removes stale lock files from killed apt/dpkg processes
+  * Prevents self-upgrade failures caused by stuck apt-get update holding locks
+
+ -- Draco-Lunaris-Echo  Sat, 18 Jul 2026 22:55:00 +0000
+
 linux-patch-api (2.4.0) unstable; urgency=low
 
   * Release v2.4.0
