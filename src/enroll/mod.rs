@@ -29,7 +29,8 @@ pub use identity::{
 };
 /// Re-export repo self-heal entry point.
 pub use repo_health::{
-    check_and_provision_repo_config, check_gpg_key_health, GpgKeyStatus, RepoHealResult,
+    check_and_provision_repo_config, check_gpg_key_health, new_shared_sync_state,
+    spawn_repo_config_sync_task, GpgKeyStatus, RepoHealResult, RepoSyncState, SharedRepoSyncState,
 };
 
 /// Error type for enrollment conflict (HTTP 409).

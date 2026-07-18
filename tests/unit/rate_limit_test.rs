@@ -11,6 +11,7 @@ use linux_patch_api::api::rate_limit::RateLimitMiddleware;
 use linux_patch_api::api::routes::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::crl;
 use linux_patch_api::config::loader::RateLimitConfig;
+use linux_patch_api::enroll;
 use linux_patch_api::jobs::manager::{JobManager, JobOperation};
 use linux_patch_api::packages::cache::PackageCacheState;
 use linux_patch_api::Scheduler;
@@ -30,6 +31,7 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
+    let shared_repo_sync_state = web::Data::new(enroll::new_shared_sync_state());
     let rl_cfg = RateLimitConfig::default();
 
     let app = test::init_service(
@@ -40,6 +42,7 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
+            .app_data(shared_repo_sync_state.clone())
             .configure(|cfg| {
                 configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
@@ -66,6 +69,7 @@ async fn test_system_info_exempt_from_rate_limiting() {
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
+    let shared_repo_sync_state = web::Data::new(enroll::new_shared_sync_state());
     let rl_cfg = RateLimitConfig::default();
 
     let app = test::init_service(
@@ -76,6 +80,7 @@ async fn test_system_info_exempt_from_rate_limiting() {
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
+            .app_data(shared_repo_sync_state.clone())
             .configure(|cfg| {
                 configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
@@ -103,6 +108,7 @@ async fn test_read_rate_limiting_returns_429() {
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
+    let shared_repo_sync_state = web::Data::new(enroll::new_shared_sync_state());
     // Use very low limits so sequential test requests can reliably trigger 429
     let rl_cfg = RateLimitConfig {
         enabled: true,
@@ -120,6 +126,7 @@ async fn test_read_rate_limiting_returns_429() {
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
+            .app_data(shared_repo_sync_state.clone())
             .configure(|cfg| {
                 configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
@@ -151,6 +158,7 @@ async fn test_destructive_rate_limiting_returns_429() {
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
+    let shared_repo_sync_state = web::Data::new(enroll::new_shared_sync_state());
     // Use very low limits so sequential test requests can reliably trigger 429
     let rl_cfg = RateLimitConfig {
         enabled: true,
@@ -168,6 +176,7 @@ async fn test_destructive_rate_limiting_returns_429() {
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
+            .app_data(shared_repo_sync_state.clone())
             .configure(|cfg| {
                 configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })
@@ -204,6 +213,7 @@ async fn test_rate_limiting_disabled() {
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
     let shared_crl_state = web::Data::new(crl::new_shared_state());
+    let shared_repo_sync_state = web::Data::new(enroll::new_shared_sync_state());
     let rl_cfg = RateLimitConfig {
         enabled: false,
         ..RateLimitConfig::default()
@@ -217,6 +227,7 @@ async fn test_rate_limiting_disabled() {
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
             .app_data(shared_crl_state.clone())
+            .app_data(shared_repo_sync_state.clone())
             .configure(|cfg| {
                 configure_api_routes(cfg, scheduler.clone(), backend.clone(), cache_state.clone());
             })

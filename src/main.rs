@@ -331,6 +331,12 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Initialize shared repo-config sync state (updated by the background
+    // reconciliation task, read by the health endpoint). Created early so
+    // the startup self-heal and periodic task can both reference it.
+    let shared_repo_sync_state = enroll::new_shared_sync_state();
+    let repo_sync_state_data = web::Data::new(shared_repo_sync_state.clone());
+
     // Startup repo-config self-heal: ensure the manager-hosted package repo
     // is configured so self-update can actually find a newer package. This
     // catches hosts that were enrolled before repo_config was added to the
@@ -353,6 +359,20 @@ async fn main() -> Result<()> {
         }
     } else {
         info!("No manager URL configured — skipping repo config self-heal at startup");
+    }
+
+    // Spawn the periodic repo-config reconciliation task (6h interval).
+    // This mirrors the CRL refresh task: it keeps the agent's sources.list
+    // and GPG keyring in sync with manager-side changes (suite renames,
+    // URL changes, GPG key rotation) without requiring re-enrollment.
+    // See issue #170.
+    if let Some(manager_url) = config.enrollment_manager_url() {
+        enroll::spawn_repo_config_sync_task(
+            manager_url.to_string(),
+            shared_repo_sync_state.clone(),
+        );
+    } else {
+        info!("No manager URL configured — repo config periodic sync disabled");
     }
 
     // Initialize IP whitelist manager
@@ -482,6 +502,7 @@ async fn main() -> Result<()> {
             .app_data(backend_data.clone())
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
+            .app_data(repo_sync_state_data.clone())
             .app_data(manager_url_data.clone())
             .configure(|cfg| {
                 configure_api_routes(
