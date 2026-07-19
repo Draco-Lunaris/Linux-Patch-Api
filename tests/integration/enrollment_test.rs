@@ -668,6 +668,7 @@ fn sample_repo_config(distro_id: &str, keyring_path: &str) -> RepoConfig {
         sources_config: "deb [signed-by=/etc/apt/keyrings/lpa-repo.gpg] https://manager.example.com/repo stable main".to_string(),
         distro_id: distro_id.to_string(),
         keyring_path: keyring_path.to_string(),
+        apk_rsa_public_key: None,
     }
 }
 
@@ -718,6 +719,9 @@ async fn test_provision_repo_config_apk_append_behavior() {
         sources_config: "https://manager.example.com/repo/alpine/main".to_string(),
         distro_id: "alpine".to_string(),
         keyring_path: keyring_path.to_str().unwrap().to_string(),
+        apk_rsa_public_key: Some(
+            "-----BEGIN PUBLIC KEY-----\nFAKE_RSA_KEY_DATA\n-----END PUBLIC KEY-----".to_string(),
+        ),
     };
 
     // Save original state of /etc/apk/repositories (may not exist on non-Alpine)
@@ -734,11 +738,23 @@ async fn test_provision_repo_config_apk_append_behavior() {
         .await
         .expect("provision_repo_config should succeed for alpine");
 
-    // 1. Verify GPG key written
-    let key_content = std::fs::read_to_string(&keyring_path).expect("GPG key file should exist");
-    assert!(key_content.contains("FAKE_GPG_KEY"));
+    // 1. Verify RSA public key written to /etc/apk/keys/lpa-repo.rsa.pub
+    //    (apk uses RSA keys, not GPG — the GPG key is NOT written for Alpine)
+    let rsa_key_path = "/etc/apk/keys/lpa-repo.rsa.pub";
+    let rsa_key_content = std::fs::read_to_string(rsa_key_path)
+        .expect("RSA public key file should exist at /etc/apk/keys/lpa-repo.rsa.pub");
+    assert!(
+        rsa_key_content.contains("FAKE_RSA_KEY_DATA"),
+        "RSA key file should contain the key data"
+    );
 
-    // 2. Verify repo URL was appended to /etc/apk/repositories
+    // 2. Verify GPG key was NOT written (apk doesn't use GPG)
+    assert!(
+        !keyring_path.exists(),
+        "GPG key should NOT be written for Alpine — apk uses RSA keys"
+    );
+
+    // 3. Verify repo URL was appended to /etc/apk/repositories
     let apk_content = std::fs::read_to_string("/etc/apk/repositories")
         .expect("/etc/apk/repositories should exist after provisioning");
     assert!(
@@ -746,7 +762,7 @@ async fn test_provision_repo_config_apk_append_behavior() {
         "apk repositories should contain the appended repo URL"
     );
 
-    // 3. Test idempotency — calling again should not duplicate
+    // 4. Test idempotency — calling again should not duplicate
     provision_repo_config(&repo)
         .await
         .expect("Second provision_repo_config should succeed (idempotent)");
