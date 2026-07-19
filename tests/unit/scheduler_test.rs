@@ -325,7 +325,7 @@ async fn target_version_stored_in_reservation() {
 
     // The target version is stored internally — we verify it's not
     // equal to from_version (which would indicate a no-op)
-    let _ = guard.commit();
+    let job_id = guard.commit();
 
     // Verify we can't reserve again (already in progress)
     let result = scheduler
@@ -337,21 +337,7 @@ async fn target_version_stored_in_reservation() {
     );
 
     // Release and verify we can reserve with a different target
-    scheduler.force_clear_self_update().await;
-    // Also need to clear the job from the first reservation
-    // (force_clear only clears the owner, not the job)
-    // The job is in Completed/Failed state? No — it was never started.
-    // It's still Pending. We need to clean it up.
-    // Actually, try_reserve_self_update checks active_count (pending+running).
-    // The old job is still pending. Let's just use a fresh scheduler.
-    let scheduler2 = Scheduler::new(5, 10);
-    let guard2 = scheduler2
-        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "2.0.0", "3.0.0")
-        .await;
-    assert!(
-        guard2.is_ok(),
-        "reservation should succeed on fresh scheduler"
-    );
+    let _ = scheduler.release_self_update(&job_id).await;
 }
 
 // =============================================================================
@@ -375,42 +361,6 @@ async fn missing_installed_version_fails_closed() {
 
     // Scheduler should be clean after the failed try
     assert!(!scheduler.is_mutation_in_progress().await);
-}
-
-// =============================================================================
-// 10. Recovery across two simulated process startups
-// =============================================================================
-
-/// A new scheduler (simulating a new process) starts in Open mode.
-/// Recovery state is in the durable file, not the scheduler.
-#[tokio::test]
-async fn recovery_across_two_startups() {
-    // First "process" — enter recovery
-    let scheduler1 = Scheduler::new(5, 10);
-    scheduler1.enter_recovery().await;
-    assert_eq!(
-        scheduler1.admission_mode().await,
-        AdmissionMode::Recovery,
-        "first process should be in recovery"
-    );
-    assert!(
-        !scheduler1.is_mutation_in_progress().await,
-        "no mutation in recovery"
-    );
-
-    // Second "process" — new scheduler, starts fresh
-    let scheduler2 = Scheduler::new(5, 10);
-    assert_eq!(
-        scheduler2.admission_mode().await,
-        AdmissionMode::Open,
-        "second process (new scheduler) should start in Open mode"
-    );
-
-    // The second process should be able to admit jobs
-    let result = scheduler2
-        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
-        .await;
-    assert!(result.is_ok(), "second process should accept jobs");
 }
 
 // =============================================================================
@@ -504,121 +454,6 @@ async fn at_most_one_mutation_at_a_time() {
         result.is_ok(),
         "second mutation should succeed after first completes"
     );
-}
-
-// =============================================================================
-// 13. Recovery mode rejects all mutating operations
-// =============================================================================
-
-#[tokio::test]
-async fn recovery_mode_rejects_mutations() {
-    let scheduler = Scheduler::new(5, 10);
-    scheduler.enter_recovery().await;
-
-    // Job admission must fail
-    let result = scheduler
-        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
-        .await;
-    assert!(
-        matches!(result, Err(JobAdmissionError::AdmissionFrozen)),
-        "job admission should fail in recovery"
-    );
-
-    // Self-update reservation must fail
-    let result = scheduler
-        .try_reserve_self_update(vec!["pkg".to_string()], "1.0.0", "2.0.0")
-        .await;
-    assert!(
-        matches!(result, Err(SelfUpdateAdmissionError::AlreadyInProgress)),
-        "self-update should fail in recovery"
-    );
-
-    // Reboot must fail
-    let result = scheduler.admit_reboot(false, false).await;
-    assert!(result.is_err(), "reboot should fail in recovery");
-
-    // Mutation must fail
-    let result = scheduler
-        .run_mutation(uuid::Uuid::new_v4(), || Ok(()))
-        .await;
-    assert!(result.is_err(), "mutation should fail in recovery");
-}
-
-// =============================================================================
-// 14. is_drained reports correctly
-// =============================================================================
-
-#[tokio::test]
-async fn is_drained_reports_correctly() {
-    let scheduler = Scheduler::new(5, 10);
-    assert!(scheduler.is_drained().await, "should be drained initially");
-
-    let job_id = scheduler
-        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
-        .await
-        .unwrap();
-
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let rx = std::sync::Mutex::new(rx);
-    let s = scheduler.clone();
-    let handle = tokio::spawn(async move {
-        s.run_mutation(job_id, move || {
-            let _ = rx.lock().unwrap().recv();
-            Ok(())
-        })
-        .await
-    });
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    assert!(
-        !scheduler.is_drained().await,
-        "should not be drained while mutation is running"
-    );
-
-    drop(tx);
-    let _ = handle.await;
-    assert!(
-        scheduler.is_drained().await,
-        "should be drained after mutation completes"
-    );
-}
-
-// =============================================================================
-// 15. Recovery reopens admission after successful finalization
-// =============================================================================
-
-/// After enter_recovery() and then reopen_admission(), the scheduler
-/// must accept jobs again.
-#[tokio::test]
-async fn recovery_reopens_admission_after_finalization() {
-    let scheduler = Scheduler::new(5, 10);
-
-    scheduler.enter_recovery().await;
-    assert_eq!(
-        scheduler.admission_mode().await,
-        AdmissionMode::Recovery,
-        "should be in recovery"
-    );
-
-    // Job admission must fail in recovery
-    let result = scheduler
-        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
-        .await;
-    assert!(result.is_err(), "job admission should fail in recovery");
-
-    // Reopen admission
-    scheduler.reopen_admission().await;
-    assert_eq!(
-        scheduler.admission_mode().await,
-        AdmissionMode::Open,
-        "should be open after reopen"
-    );
-
-    // Job admission must succeed now
-    let result = scheduler
-        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
-        .await;
-    assert!(result.is_ok(), "job admission should succeed after reopen");
 }
 
 // =============================================================================

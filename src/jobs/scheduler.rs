@@ -312,14 +312,6 @@ impl Scheduler {
         false
     }
 
-    /// Force-clear the self-update lock regardless of ownership.
-    /// Used by the startup reconciliation path.
-    pub async fn force_clear_self_update(&self) {
-        let mut state = self.state.lock().await;
-        state.self_update = None;
-        state.notify.notify_one();
-    }
-
     // ------------------------------------------------------------------
     // Reboot reservation
     // ------------------------------------------------------------------
@@ -824,59 +816,6 @@ impl Scheduler {
     pub async fn freeze_admission(&self) {
         let mut state = self.state.lock().await;
         state.admission = AdmissionMode::Frozen;
-        state.notify.notify_one();
-    }
-
-    /// Enter recovery mode — no mutations accepted, health reports degraded.
-    pub async fn enter_recovery(&self) {
-        let mut state = self.state.lock().await;
-        state.admission = AdmissionMode::Recovery;
-        state.notify.notify_one();
-    }
-
-    /// Reopen admission to normal operation. Called after successful
-    /// startup finalization or recovery completion.
-    pub async fn reopen_admission(&self) {
-        let mut state = self.state.lock().await;
-        state.admission = AdmissionMode::Open;
-        state.notify.notify_one();
-    }
-
-    /// Check if the scheduler is drained (no active mutations, no running jobs).
-    pub async fn is_drained(&self) -> bool {
-        let state = self.state.lock().await;
-        state.active_mutation.is_none()
-            && !state.jobs.values().any(|j| j.status == JobStatus::Running)
-    }
-
-    /// Mark any pending jobs as Failed because admission is frozen.
-    /// Used by shutdown to drain the queue.
-    pub async fn fail_pending_queued_jobs(&self) {
-        let mut state = self.state.lock().await;
-        let mut to_fail = Vec::new();
-        for (id, job) in state.jobs.iter() {
-            if matches!(job.status, JobStatus::Pending) {
-                to_fail.push(*id);
-            }
-        }
-        for id in to_fail {
-            if let Some(job) = state.jobs.get_mut(&id) {
-                job.status = JobStatus::Failed;
-                job.error = Some("Cancelled: scheduler shut down while job was queued".to_string());
-                job.completed_at = Some(Utc::now());
-                job.updated_at = job.completed_at.unwrap();
-                job.add_log("Job cancelled by shutdown".to_string());
-                let event_data = (job.status.clone(), job.progress, job.message.clone());
-                emit_event(
-                    &state,
-                    "job_status",
-                    &id,
-                    &event_data.0,
-                    event_data.1,
-                    &event_data.2,
-                );
-            }
-        }
         state.notify.notify_one();
     }
 

@@ -1516,9 +1516,9 @@ mod repeated_failure_tests {
         );
     }
 
-    /// APT: coordinator op_in_progress is cleared after a failed install.
-    /// The coordinator's flag is the sole authority — the backend's
-    /// is_operation_in_progress() always returns false now.
+    /// APT: backend is_operation_in_progress is cleared after a failed install.
+    /// The scheduler tracks mutations — the backend's
+    /// is_operation_in_progress() always returns false (deprecated).
     #[test]
     fn apt_op_in_progress_cleared_after_failure() {
         let mock = MockCommandRunner::new();
@@ -1554,14 +1554,14 @@ mod repeated_failure_tests {
         );
 
         // The backend's is_operation_in_progress always returns false now.
-        // The coordinator is the sole authority for tracking mutations.
+        // The scheduler tracks mutations for tracking mutations.
         assert!(
             !backend.is_operation_in_progress(),
             "backend is_operation_in_progress should always be false (coordinator is sole authority)"
         );
     }
 
-    /// APT: coordinator op_in_progress is cleared after a successful install.
+    /// APT: backend is_operation_in_progress is cleared after a successful install.
     #[test]
     fn apt_op_in_progress_cleared_after_success() {
         let mock = MockCommandRunner::new();

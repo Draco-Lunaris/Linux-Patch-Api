@@ -227,54 +227,6 @@ fn test_second_operation_blocks_until_first_completes() {
     );
 }
 
-/// The coordinator's `op_in_progress` flag must be false when no mutation
-/// is running. The backend's `is_operation_in_progress()` always returns
-/// false now — the coordinator is the sole authority.
-#[test]
-#[serial_test::serial]
-fn test_is_operation_in_progress_false_at_rest() {
-    let backend = AptBackend::with_system_runner();
-    assert!(
-        !backend.is_operation_in_progress(),
-        "backend is_operation_in_progress should always be false (coordinator is sole authority)"
-    );
-}
-
-/// The coordinator's `op_in_progress` flag must be true while a mutation
-/// closure is running, and false after it completes.
-///
-/// This test uses the coordinator's `run_mutation` with a closure that
-/// observes the flag from inside the closure, deterministically proving
-/// the flag is set during the mutation.
-#[tokio::test]
-async fn test_coordinator_op_in_progress_true_during_mutation() {
-    use linux_patch_api::packages::coordinator::OperationCoordinator;
-    use std::sync::Arc;
-
-    let coord = Arc::new(OperationCoordinator::new(5));
-
-    // Before the mutation, flag should be false
-    assert!(!coord.is_operation_in_progress());
-
-    // Run a mutation that observes the flag from inside
-    let coord_inner = coord.clone();
-    let flag_seen_true = coord
-        .run_mutation(|| {
-            // From inside the closure, the flag should be true
-            Ok(coord_inner.is_operation_in_progress())
-        })
-        .await
-        .unwrap();
-
-    assert!(
-        flag_seen_true,
-        "coordinator op_in_progress should be true inside run_mutation closure"
-    );
-
-    // After the mutation, flag should be false again
-    assert!(!coord.is_operation_in_progress());
-}
-
 /// Three concurrent apt operations must also execute serially.
 ///
 /// Spawns three operations simultaneously and verifies that they complete

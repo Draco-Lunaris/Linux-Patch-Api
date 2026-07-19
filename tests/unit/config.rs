@@ -7,8 +7,12 @@ use linux_patch_api::config::loader::AppConfig;
 #[test]
 fn test_config_load_valid_yaml() {
     let result = AppConfig::load("tests/fixtures/valid_config.yaml");
-    assert!(result.is_ok(), "Failed to load valid config: {:?}", result.err());
-    
+    assert!(
+        result.is_ok(),
+        "Failed to load valid config: {:?}",
+        result.err()
+    );
+
     let config = result.unwrap();
     assert_eq!(config.server.port, 12443);
     assert_eq!(config.server.bind, "127.0.0.1");
@@ -30,10 +34,10 @@ fn test_config_load_invalid_yaml() {
     // Create a temporary invalid yaml file
     let invalid_path = "/tmp/invalid_config.yaml";
     std::fs::write(invalid_path, "invalid: yaml: content: [").unwrap();
-    
+
     let result = AppConfig::load(invalid_path);
     assert!(result.is_err(), "Should fail for invalid yaml");
-    
+
     // Cleanup
     std::fs::remove_file(invalid_path).unwrap();
 }
@@ -80,6 +84,10 @@ fn test_config_load_dev_config() {
     let dev_path = "configs/config.yaml.example";
     if std::path::Path::new(dev_path).exists() {
         let result = AppConfig::load(dev_path);
-        assert!(result.is_ok(), "Failed to load example config: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to load example config: {:?}",
+            result.err()
+        );
     }
 }

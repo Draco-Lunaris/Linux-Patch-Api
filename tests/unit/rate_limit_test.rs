@@ -12,7 +12,6 @@ use linux_patch_api::api::routes::{configure_api_routes, configure_health_route}
 use linux_patch_api::auth::crl;
 use linux_patch_api::config::loader::RateLimitConfig;
 use linux_patch_api::enroll;
-use linux_patch_api::jobs::manager::{JobManager, JobOperation};
 use linux_patch_api::packages::cache::PackageCacheState;
 use linux_patch_api::Scheduler;
 use std::net::SocketAddr;
@@ -26,7 +25,6 @@ fn test_request(method: actix_web::http::Method, uri: &str) -> test::TestRequest
 
 #[actix_web::test]
 async fn test_health_endpoint_exempt_from_rate_limiting() {
-    let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
@@ -37,7 +35,6 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
     let app = test::init_service(
         App::new()
             .wrap(RateLimitMiddleware::new(rl_cfg))
-            .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
@@ -64,7 +61,6 @@ async fn test_health_endpoint_exempt_from_rate_limiting() {
 
 #[actix_web::test]
 async fn test_system_info_exempt_from_rate_limiting() {
-    let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
@@ -75,7 +71,6 @@ async fn test_system_info_exempt_from_rate_limiting() {
     let app = test::init_service(
         App::new()
             .wrap(RateLimitMiddleware::new(rl_cfg))
-            .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
@@ -103,7 +98,6 @@ async fn test_system_info_exempt_from_rate_limiting() {
 
 #[actix_web::test]
 async fn test_read_rate_limiting_returns_429() {
-    let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
@@ -121,7 +115,6 @@ async fn test_read_rate_limiting_returns_429() {
     let app = test::init_service(
         App::new()
             .wrap(RateLimitMiddleware::new(rl_cfg))
-            .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
@@ -153,7 +146,6 @@ async fn test_read_rate_limiting_returns_429() {
 
 #[actix_web::test]
 async fn test_destructive_rate_limiting_returns_429() {
-    let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
@@ -171,7 +163,6 @@ async fn test_destructive_rate_limiting_returns_429() {
     let app = test::init_service(
         App::new()
             .wrap(RateLimitMiddleware::new(rl_cfg))
-            .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
@@ -208,7 +199,6 @@ async fn test_destructive_rate_limiting_returns_429() {
 
 #[actix_web::test]
 async fn test_rate_limiting_disabled() {
-    let job_manager = web::Data::new(JobManager::new(5, 30, 100).unwrap());
     let backend = web::Data::new(linux_patch_api::packages::create_backend().unwrap());
     let cache_state = web::Data::new(PackageCacheState::new());
     let scheduler = web::Data::new(Scheduler::new(5, 100));
@@ -222,7 +212,6 @@ async fn test_rate_limiting_disabled() {
     let app = test::init_service(
         App::new()
             .wrap(RateLimitMiddleware::new(rl_cfg))
-            .app_data(job_manager.clone())
             .app_data(backend.clone())
             .app_data(scheduler.clone())
             .app_data(cache_state.clone())
@@ -248,81 +237,6 @@ async fn test_rate_limiting_disabled() {
     assert!(
         !got_429,
         "Should not get 429 when rate limiting is disabled"
-    );
-}
-
-#[actix_web::test]
-async fn test_job_queue_depth_cap() {
-    // Create JobManager with very small queue depth (2)
-    let job_manager = JobManager::new(5, 30, 2).unwrap();
-
-    // Fill the queue with pending jobs
-    job_manager
-        .create_job_unchecked(JobOperation::Install, vec!["pkg1".to_string()])
-        .await
-        .unwrap();
-    job_manager
-        .create_job_unchecked(JobOperation::Install, vec!["pkg2".to_string()])
-        .await
-        .unwrap();
-
-    // Queue should now be at capacity
-    assert!(
-        !job_manager.can_accept_job().await,
-        "Queue should be at capacity after filling to max_queue_depth"
-    );
-}
-
-#[actix_web::test]
-async fn test_job_queue_depth_default() {
-    // Default max_queue_depth should be 100
-    let job_manager = JobManager::new(5, 30, 100).unwrap();
-    assert_eq!(
-        job_manager.max_queue_depth(),
-        100,
-        "Default max_queue_depth should be 100"
-    );
-}
-
-#[actix_web::test]
-async fn test_job_queue_depth_configurable() {
-    // Verify queue depth is configurable
-    let job_manager = JobManager::new(5, 30, 50).unwrap();
-    assert_eq!(
-        job_manager.max_queue_depth(),
-        50,
-        "max_queue_depth should be configurable"
-    );
-}
-
-#[actix_web::test]
-async fn test_can_accept_job_respects_queue_depth() {
-    let job_manager = JobManager::new(5, 30, 3).unwrap();
-
-    // Should accept when queue is empty
-    assert!(
-        job_manager.can_accept_job().await,
-        "Should accept job when queue is empty"
-    );
-
-    // Fill to capacity
-    job_manager
-        .create_job_unchecked(JobOperation::Install, vec!["a".to_string()])
-        .await
-        .unwrap();
-    job_manager
-        .create_job_unchecked(JobOperation::Install, vec!["b".to_string()])
-        .await
-        .unwrap();
-    job_manager
-        .create_job_unchecked(JobOperation::Install, vec!["c".to_string()])
-        .await
-        .unwrap();
-
-    // Should reject when at capacity
-    assert!(
-        !job_manager.can_accept_job().await,
-        "Should reject job when queue is at capacity"
     );
 }
 
