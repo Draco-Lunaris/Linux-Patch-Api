@@ -442,7 +442,10 @@ async fn shutdown_freezes_queued_jobs() {
 
     // Queued job is still pending — fail it and delete to clean up
     let _ = scheduler
-        .fail_job(&queued_id, "Cancelled: scheduler shut down while job was queued".to_string())
+        .fail_job(
+            &queued_id,
+            "Cancelled: scheduler shut down while job was queued".to_string(),
+        )
         .await;
     let _ = scheduler.delete_job(&queued_id).await;
 
