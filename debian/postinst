@@ -100,10 +100,11 @@ if [ "$1" = "configure" ]; then
         systemctl daemon-reload
         
         # Restart the service to pick up the new binary.
-        # The running process keeps serving on the old binary until this
-        # restart. systemctl restart is atomic — the old process gets
-        # SIGTERM, the new process starts immediately.
-        systemctl restart linux-patch-api.service
+        # Use --no-block so the postinst doesn't wait for the service to
+        # stop (which would deadlock with the agent's SIGTERM handler
+        # waiting for apt-get to finish). --no-block returns immediately;
+        # the agent process is killed by systemd shortly after.
+        systemctl restart --no-block linux-patch-api.service
     fi
 fi
 

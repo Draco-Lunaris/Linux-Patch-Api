@@ -385,37 +385,21 @@ pub async fn update_package(
         // atomicity. The postinst handles restart. The manager handles
         // version detection via its existing health poll.
 
-        // Check that no jobs are currently running. We use a simple
-        // active_count check — if jobs are running, reject and let the
-        // manager retry.
-        let active = scheduler.active_count().await;
-        if active > 0 {
-            warn!(
-                request_id = %request_id,
-                active_jobs = active,
-                "Self-update blocked — jobs in progress"
-            );
-            let response = ApiResponse::<()>::error(
-                "SELF_UPDATE_BLOCKED",
-                &format!(
-                    "Cannot self-update while {} jobs are in progress. Retry after jobs complete.",
-                    active
-                ),
-                Some(serde_json::json!({"running_jobs": active})),
-                true,
-            );
-            return HttpResponse::Conflict()
-                .insert_header(("Retry-After", "60"))
-                .json(response);
-        }
-
-        // Admit the job through the normal path (this also checks for
-        // existing self-update in progress via the admission block).
+        // Atomically reserve the self-update slot. This checks no running
+        // jobs, no existing self-update, and sets the self_update flag —
+        // all under a single lock. This prevents concurrent package
+        // operations from being admitted while the self-update is in
+        // progress, and makes the health endpoint report degraded.
         match scheduler
-            .admit_job(JobOperation::Update, vec![package_name.clone()])
+            .try_reserve_self_update(
+                vec![package_name.clone()],
+                "",
+                "", // from/target versions not needed — no version verification
+            )
             .await
         {
-            Ok(job_id) => {
+            Ok(reservation) => {
+                let job_id = reservation.commit();
                 let backend_clone = backend.clone();
                 let scheduler_clone = scheduler.clone();
                 let pkg_name = package_name.clone();
@@ -424,25 +408,26 @@ pub async fn update_package(
                 tokio::spawn(async move {
                     let job_id_clone = job_id;
 
-                    // Refresh the package cache so we see the latest
-                    // candidate version. Best-effort — if this fails,
-                    // proceed anyway (the cache may be fresh enough).
-                    if let Err(e) = backend_clone.refresh_package_cache(cache_state_clone.get_ref())
-                    {
-                        warn!(
-                            job_id = %job_id_clone,
-                            error = %e,
-                            "Pre-self-update cache refresh failed — proceeding with stale cache"
-                        );
-                    }
-
-                    // Execute the package upgrade through dispatch_mutation.
-                    // The package manager handles atomicity. The postinst
-                    // script handles the service restart.
+                    // Execute cache refresh + package upgrade through
+                    // dispatch_mutation — atomically acquires the
+                    // mutation slot so the SIGTERM handler knows a
+                    // mutation is in progress.
                     let backend_for_mutation = backend_clone.clone();
                     let pkg_name_for_mutation = pkg_name.clone();
+                    let cache_state_for_mutation = cache_state_clone.clone();
+
                     let update_result = scheduler_clone
                         .dispatch_mutation(job_id_clone, move || {
+                            // Refresh cache first, then upgrade
+                            if let Err(e) = backend_for_mutation
+                                .refresh_package_cache(cache_state_for_mutation.get_ref())
+                            {
+                                warn!(
+                                    package = %pkg_name_for_mutation,
+                                    error = %e,
+                                    "Pre-self-update cache refresh failed — proceeding with stale cache"
+                                );
+                            }
                             backend_for_mutation.update_package(&pkg_name_for_mutation)
                         })
                         .await;
@@ -455,6 +440,10 @@ pub async fn update_package(
                                 "Self-update install completed — postinst will restart the service"
                             );
                             let _ = scheduler_clone.complete_job(&job_id_clone).await;
+                            // Release the self-update flag so new jobs can
+                            // be admitted. The postinst's --no-block restart
+                            // will kill this process shortly.
+                            scheduler_clone.release_self_update(&job_id_clone).await;
                         }
                         Err(e) => {
                             error!(
@@ -466,6 +455,7 @@ pub async fn update_package(
                             let _ = scheduler_clone
                                 .fail_job_with_diagnostics(&job_id_clone, &e)
                                 .await;
+                            scheduler_clone.release_self_update(&job_id_clone).await;
                         }
                     }
                 });
@@ -480,9 +470,32 @@ pub async fn update_package(
 
                 return HttpResponse::Accepted().json(response);
             }
-            Err(ref admission_err) => {
-                warn!(request_id = %request_id, error = %admission_err, "Self-update job admission rejected");
-                return admission_error_response(admission_err);
+            Err(admission_err) => {
+                warn!(request_id = %request_id, error = %admission_err, "Self-update reservation rejected");
+                let (code, message, data, retry) = match admission_err {
+                    crate::jobs::scheduler::SelfUpdateAdmissionError::AlreadyInProgress => (
+                        "SELF_UPDATE_IN_PROGRESS",
+                        "A self-update is already in progress. Retry after it completes.".to_string(),
+                        None,
+                        true,
+                    ),
+                    crate::jobs::scheduler::SelfUpdateAdmissionError::JobsInProgress { count } => (
+                        "SELF_UPDATE_BLOCKED",
+                        format!("Cannot self-update while {} jobs are in progress. Retry after jobs complete.", count),
+                        Some(serde_json::json!({"running_jobs": count})),
+                        true,
+                    ),
+                    crate::jobs::scheduler::SelfUpdateAdmissionError::QueueFull => (
+                        "QUEUE_FULL",
+                        "Job queue is at capacity. Please retry later.".to_string(),
+                        None,
+                        true,
+                    ),
+                };
+                let response = ApiResponse::<()>::error(code, &message, data, retry);
+                return HttpResponse::Conflict()
+                    .insert_header(("Retry-After", "60"))
+                    .json(response);
             }
         }
     }

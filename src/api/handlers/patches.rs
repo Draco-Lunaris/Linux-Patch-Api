@@ -92,10 +92,14 @@ pub async fn list_patches(
                     match refresh_result {
                         Ok(_) => {
                             info!("Background cache refresh from patch-list succeeded");
+                            let _ = scheduler_clone.complete_job(&tracking_job_id).await;
                             let _ = scheduler_clone.delete_job(&tracking_job_id).await;
                         }
                         Err(e) => {
                             warn!(error = ?e, "Background cache refresh from patch-list failed (admission rejected or execution failed)");
+                            let _ = scheduler_clone
+                                .fail_job(&tracking_job_id, e.to_string())
+                                .await;
                             let _ = scheduler_clone.delete_job(&tracking_job_id).await;
                         }
                     }
