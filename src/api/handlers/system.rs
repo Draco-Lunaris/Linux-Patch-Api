@@ -189,9 +189,16 @@ pub async fn health_check(
                         })
                         .await;
                     match refresh_result {
-                        Ok(_) => info!("Background cache refresh from health check succeeded"),
+                        Ok(_) => {
+                            info!("Background cache refresh from health check succeeded");
+                            let _ = scheduler_clone.complete_job(&tracking_job_id).await;
+                            let _ = scheduler_clone.delete_job(&tracking_job_id).await;
+                        }
                         Err(e) => {
                             warn!(error = ?e, "Background cache refresh from health check failed");
+                            let _ = scheduler_clone
+                                .fail_job(&tracking_job_id, e.to_string())
+                                .await;
                             let _ = scheduler_clone.delete_job(&tracking_job_id).await;
                         }
                     }

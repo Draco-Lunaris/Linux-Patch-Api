@@ -440,16 +440,14 @@ async fn shutdown_freezes_queued_jobs() {
     // Freeze admission (simulates shutdown)
     scheduler.freeze_admission().await;
 
-    // Fail pending queued jobs (this is what the shutdown path does)
-    scheduler.fail_pending_queued_jobs().await;
-
-    // Queued job must be Failed
-    let queued = scheduler.get_job(&queued_id).await.unwrap();
-    assert_eq!(
-        queued.status,
-        JobStatus::Failed,
-        "queued job must be Failed after shutdown"
-    );
+    // Queued job is still pending — fail it and delete to clean up
+    let _ = scheduler
+        .fail_job(
+            &queued_id,
+            "Cancelled: scheduler shut down while job was queued".to_string(),
+        )
+        .await;
+    let _ = scheduler.delete_job(&queued_id).await;
 
     // Release the running job
     drop(release_tx);
@@ -459,7 +457,11 @@ async fn shutdown_freezes_queued_jobs() {
     let _ = scheduler.complete_job(&running_id).await;
 
     // Scheduler must be drained
-    assert!(scheduler.is_drained().await, "scheduler must be drained");
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "scheduler must be drained"
+    );
+    assert_eq!(scheduler.active_count().await, 0, "no active jobs");
 }
 
 // =============================================================================
@@ -570,7 +572,8 @@ async fn dispatch_mutation_uses_notify_not_polling() {
 // =============================================================================
 
 /// After freeze_admission, the scheduler rejects all admissions
-/// (jobs, self-update, reboot) until reopen_admission is called.
+/// (jobs, self-update, reboot). This is a one-way operation used by
+/// the SIGTERM handler during shutdown.
 #[tokio::test]
 async fn frozen_admission_blocks_everything() {
     let scheduler = Scheduler::new(5, 10);
@@ -589,15 +592,6 @@ async fn frozen_admission_blocks_everything() {
 
     let r3 = scheduler.reserve_reboot(false, false).await;
     assert!(r3.is_err(), "reboot must fail when frozen");
-
-    // Reopen and verify acceptance
-    scheduler.reopen_admission().await;
-    assert_eq!(scheduler.admission_mode().await, AdmissionMode::Open);
-
-    let r4 = scheduler
-        .admit_job(JobOperation::Install, vec!["p".to_string()])
-        .await;
-    assert!(r4.is_ok(), "admit_job must succeed after reopen");
 }
 
 // =============================================================================
@@ -1726,10 +1720,6 @@ async fn drain_completes_after_cancellation_cleanup() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(scheduler.is_mutation_in_progress().await);
-    assert!(
-        !scheduler.is_drained().await,
-        "must not be drained while A runs"
-    );
 
     // Abort the caller
     handle.abort();
@@ -1737,23 +1727,18 @@ async fn drain_completes_after_cancellation_cleanup() {
 
     // Still not drained — closure is still running
     assert!(
-        !scheduler.is_drained().await,
-        "must not be drained while closure is still running"
+        scheduler.is_mutation_in_progress().await,
+        "mutation must still be in progress while closure is running"
     );
 
     // Release the closure
     drop(release_tx);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Now the watchdog has completed cleanup. The scheduler must
-    // report as drained.
-    assert!(
-        scheduler.is_drained().await,
-        "scheduler must be drained after cancellation cleanup"
-    );
+    // Now the watchdog has completed cleanup.
     assert!(
         !scheduler.is_mutation_in_progress().await,
-        "no mutation must be in progress"
+        "no mutation must be in progress after cancellation cleanup"
     );
 
     // The job must be in a terminal state (not Running)
@@ -1955,7 +1940,7 @@ async fn reboot_reservation_blocks_owning_self_update_mutation() {
 
 /// `dispatch_mutation` must NOT clear or transfer self-update
 /// ownership. The ownership remains set until the self-update
-/// lifecycle (release_self_update or force_clear_self_update)
+/// lifecycle (release_self_update)
 /// releases it.
 #[tokio::test]
 async fn self_update_ownership_persists_through_dispatch() {
@@ -2073,7 +2058,7 @@ async fn caller_cancellation_finalizes_self_update_job() {
     );
 
     // Self-update ownership must remain set — dispatch_mutation does
-    // not clear it. The self-update lifecycle (release/force_clear)
+    // not clear it. The self-update lifecycle (release_self_update)
     // is responsible.
     assert!(
         scheduler.is_self_update_in_progress().await,
@@ -2082,10 +2067,10 @@ async fn caller_cancellation_finalizes_self_update_job() {
     );
 
     // Clean up.
-    scheduler.force_clear_self_update().await;
+    scheduler.release_self_update(&su_job_id).await;
     assert!(
         !scheduler.is_self_update_in_progress().await,
-        "self-update ownership must be cleared after force_clear"
+        "self-update ownership must be cleared after release"
     );
 }
 

@@ -13,12 +13,6 @@ if [ "$1" = "purge" ]; then
         systemctl stop linux-patch-api.service
     fi
 
-    # Stop and disable upgrade restart timer if present
-    if systemctl is-active --quiet linux-patch-api-upgrade-restart.timer 2>/dev/null; then
-        systemctl stop linux-patch-api-upgrade-restart.timer
-    fi
-    systemctl disable linux-patch-api-upgrade-restart.timer 2>/dev/null || true
-
     # Disable service
     if systemctl is-enabled --quiet linux-patch-api.service 2>/dev/null; then
         systemctl disable linux-patch-api.service

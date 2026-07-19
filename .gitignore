@@ -23,3 +23,4 @@ tests/e2e/certs/*.key
 
 # Agent Zero project data
 .a0proj/
+package-build/

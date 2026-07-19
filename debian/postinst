@@ -99,20 +99,12 @@ if [ "$1" = "configure" ]; then
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
         systemctl daemon-reload
         
-        # Schedule a 30s delayed restart as a FALLBACK safety net.
-        #
-        # The agent itself performs state-based draining after the package
-        # install completes: it waits for all active operations to finish,
-        # then triggers the restart immediately. This timer is a fallback
-        # in case the agent crashes before completing the drain.
-        #
-        # The upgrade-pending marker is NOT created here. It is created
-        # by the agent itself when it writes the RestartPending upgrade
-        # state, ensuring the marker and state file are always consistent.
-        # The fallback timer polls for the marker via ConditionPathExists
-        # and will fire when the agent creates it.
-        systemctl daemon-reload
-        systemctl restart linux-patch-api-upgrade-restart.timer
+        # Restart the service to pick up the new binary.
+        # Use --no-block so the postinst doesn't wait for the service to
+        # stop (which would deadlock with the agent's SIGTERM handler
+        # waiting for apt-get to finish). --no-block returns immediately;
+        # the agent process is killed by systemd shortly after.
+        systemctl restart --no-block linux-patch-api.service
     fi
 fi
 

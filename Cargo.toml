@@ -1,6 +1,6 @@
 [package]
 name = "linux-patch-api"
-version = "2.4.3"
+version = "2.5.0"
 edition = "2021"
 authors = ["Draco-Lunaris-Echo"]
 license = "MIT"
@@ -93,20 +93,8 @@ name = "apt_serialization_test"
 path = "tests/unit/apt_serialization_test.rs"
 
 [[test]]
-name = "self_update_guard_test"
-path = "tests/unit/self_update_guard_test.rs"
-
-[[test]]
-name = "concurrency_invariant_test"
-path = "tests/unit/concurrency_invariant_test.rs"
-
-[[test]]
 name = "backend_error_test"
 path = "tests/unit/backend_error_test.rs"
-
-[[test]]
-name = "production_wiring_test"
-path = "tests/unit/production_wiring_test.rs"
 
 [[test]]
 name = "scheduler_test"
@@ -115,10 +103,6 @@ path = "tests/unit/scheduler_test.rs"
 [[test]]
 name = "scheduler_production_path_test"
 path = "tests/unit/scheduler_production_path_test.rs"
-
-[[test]]
-name = "fallback_decision_test"
-path = "tests/unit/fallback_decision_test.rs"
 
 [[test]]
 name = "service_file_test"

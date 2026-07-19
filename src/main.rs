@@ -79,16 +79,6 @@ enum ExitCode {
 
 /// Normalize a version string for comparison by stripping a leading `v` prefix
 /// and any Debian revision suffix (e.g. `-1` in `2.3.0-1`).
-///
-/// This is necessary because `CARGO_PKG_VERSION` yields `"2.3.0"` while
-/// `dpkg -s` yields `"2.3.0-1"`. Without normalization, the startup
-/// version verification after a self-update always fails, putting the
-/// agent into permanent recovery mode.
-fn normalize_version(v: &str) -> String {
-    let v = v.strip_prefix('v').unwrap_or(v);
-    v.split('-').next().unwrap_or(v).to_string()
-}
-
 #[actix_web::main]
 async fn main() -> Result<()> {
     // Parse command line arguments
@@ -276,49 +266,6 @@ async fn main() -> Result<()> {
         "Unified scheduler initialized"
     );
 
-    // Reconcile persistent upgrade state on startup.
-    //
-    // The in-memory self-update flag is volatile — it disappears
-    // on crash or restart. The persistent state file at
-    // /var/lib/linux_patch_api/upgrade-state.json survives process restarts
-    // and allows the new process to know whether it's starting after a
-    // self-update restart.
-    //
-    // Fail-closed: corrupt/missing state with marker → recovery mode.
-    // No early clearing: state is only cleared in finalize_successful_restart,
-    // called AFTER listener bind + READY=1.
-    let startup_reconciliation = linux_patch_api::jobs::upgrade_state::reconcile_startup_state();
-    // Clean up any stale temp files from prior crashes
-    linux_patch_api::jobs::upgrade_state::cleanup_stale_temp_files();
-    let should_block_for_upgrade = match startup_reconciliation {
-        linux_patch_api::jobs::upgrade_state::StartupReconciliation::Clean => false,
-        linux_patch_api::jobs::upgrade_state::StartupReconciliation::RestartInProgress => true,
-        linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall => true,
-        linux_patch_api::jobs::upgrade_state::StartupReconciliation::OrphanedMarker => {
-            warn!(
-                "Orphaned upgrade marker detected — package may have been upgraded externally. \
-                 Running dpkg --configure -a via pre-flight, then verifying package health."
-            );
-            true
-        }
-        linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode => {
-            error!(
-                "Entering recovery mode — upgrade state is corrupt or inconsistent. \
-                 All package operations will be blocked. dpkg --configure -a will run via pre-flight. \
-                 Health endpoint will report degraded status."
-            );
-            // Write recovering state so a crash during recovery also enters recovery mode
-            linux_patch_api::jobs::upgrade_state::write_recovering_state();
-            true
-        }
-    };
-    if should_block_for_upgrade {
-        info!("Blocking package operations based on persistent upgrade state — entering recovery mode until initialization completes");
-        scheduler.enter_recovery().await;
-    }
-    let in_recovery_mode = startup_reconciliation
-        == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode;
-
     // Initialize package manager backend
     let package_backend = match create_backend() {
         Ok(backend) => {
@@ -400,57 +347,9 @@ async fn main() -> Result<()> {
     // If this process started after a self-update restart, we do NOT clear
     // the self-update flag yet. The state and marker are only cleared AFTER
     // the listener is bound, the server is started, and READY=1 is sent to
-    // systemd (see below).
-    //
-    // The scheduler's recovery mode (or self-update flag, once added) remains
-    // set, blocking all mutating API requests (admit_job and
-    // try_reserve_self_update both check admission mode) until we explicitly
-    // clear it after successful initialization. This is the fail-closed
-    // behavior: if the process crashes before clearing, the next startup
-    // will see the persistent state file and re-block.
-    let needs_state_finalize = should_block_for_upgrade;
-
-    // Run startup repair for interrupted installs or recovery mode.
-    // At startup the scheduler is in recovery mode (admission blocked) and
-    // the SIGTERM handler is not yet installed, so there's no concurrency
-    // concern — we call repair_package_database directly on the backend
-    // without routing through the scheduler's mutation slot (which would
-    // require moving the non-Clone Box into a Send + 'static closure).
-    let mut repair_failed = false;
-    if startup_reconciliation
-        == linux_patch_api::jobs::upgrade_state::StartupReconciliation::InterruptedInstall
-        || startup_reconciliation
-            == linux_patch_api::jobs::upgrade_state::StartupReconciliation::RecoveryMode
-        || startup_reconciliation
-            == linux_patch_api::jobs::upgrade_state::StartupReconciliation::OrphanedMarker
-    {
-        info!("Running startup package database repair");
-        match package_backend.repair_package_database() {
-            Ok(_) => {
-                info!("Startup package database repair succeeded");
-            }
-            Err(e) => {
-                error!(
-                    error = %e,
-                    "Startup package database repair FAILED — retaining recovery state. \
-                     All package operations will remain blocked. Manual intervention required."
-                );
-                linux_patch_api::jobs::upgrade_state::write_recovering_state();
-                repair_failed = true;
-                // The admission block stays set — mutations are blocked.
-                // The server will start in recovery mode (health reports degraded).
-                // Only health and read-only diagnostic endpoints are available.
-            }
-        }
-    }
-
     // Store scheduler and backend in web::Data for sharing
     let scheduler_data = web::Data::new(scheduler.clone());
     let backend_data = web::Data::new(package_backend);
-
-    // Manager URL for repo-config self-heal during self-update.
-    // Extracted from enrollment config; None when not configured.
-    let manager_url_data = web::Data::new(config.enrollment_manager_url().map(|s| s.to_string()));
 
     // Initialize package cache state with configured stale threshold
     let cache_state = web::Data::new(PackageCacheState::with_threshold(
@@ -480,10 +379,6 @@ async fn main() -> Result<()> {
     // Clone rate limit config for use inside the HttpServer closure
     let rate_limit_config = config.rate_limit.clone();
 
-    // Clone backend_data for use in the finalization code after server
-    // construction (the HttpServer::new closure moves the original).
-    let finalize_backend = backend_data.clone();
-
     // Create server builder
     // Security middleware stack (order matters):
     //   1. WhitelistMiddleware   — IP-based access control (deny-by-default)
@@ -503,7 +398,6 @@ async fn main() -> Result<()> {
             .app_data(cache_state.clone())
             .app_data(crl_state_data.clone())
             .app_data(repo_sync_state_data.clone())
-            .app_data(manager_url_data.clone())
             .configure(|cfg| {
                 configure_api_routes(
                     cfg,
@@ -703,130 +597,8 @@ async fn main() -> Result<()> {
         });
 
         // Finalize the self-update restart AFTER the server is constructed
-        // and the SIGTERM handler is installed, but BEFORE we start serving.
-        //
-        // Per Section 5 ordering:
-        // 1. Listener bound ✓
-        // 2. Server constructed ✓
-        // 3. SIGTERM handler installed ✓
-        // 4. Verify running version (TODO: Section 9 — for now, skip)
-        // 5. Transition persistent state to Ready
-        // 6. Send READY=1 to systemd
-        // 7. Clear upgrade state, marker, and admission block
-        if needs_state_finalize && !repair_failed {
-            info!("Server initialized — finalizing self-update restart");
-
-            // Section 9: Verify running binary version, installed package
-            // version, and expected target version all agree before
-            // clearing state. If they don't, enter recovery mode.
-            let running_version = env!("CARGO_PKG_VERSION").to_string();
-            let installed_version = finalize_backend
-                .get_installed_version(linux_patch_api::packages::SELF_PACKAGE_NAME)
-                .unwrap_or(None);
-
-            // Read the persistent state to get the expected target version
-            let state_result = linux_patch_api::jobs::upgrade_state::read_state();
-            let expected_target = match &state_result {
-                Ok(s) => s.target_version.clone(),
-                Err(_) => String::new(),
-            };
-
-            // Normalize versions for comparison. dpkg reports the full
-            // Debian version (e.g. "2.3.0-1") while CARGO_PKG_VERSION is
-            // just the upstream version ("2.3.0"). The manager's
-            // target_version may be either form. We compare the
-            // normalized upstream portion only.
-            let running_norm = normalize_version(&running_version);
-            let installed_norm = installed_version.as_deref().map(normalize_version);
-            let target_norm = if expected_target.is_empty() {
-                None
-            } else {
-                Some(normalize_version(&expected_target))
-            };
-
-            // If expected_target is empty, the state file was not
-            // written properly (e.g. the old process was killed before
-            // persisting the target version). Rather than entering
-            // permanent recovery mode, verify that the running version
-            // matches the installed version — if they agree, the
-            // upgrade succeeded and we can safely clear state.
-            let versions_match = if let Some(ref t) = target_norm {
-                // All three must agree (normalized): running == installed == target
-                installed_norm.as_deref() == Some(&running_norm)
-                    && installed_norm.as_deref() == Some(t)
-            } else {
-                // No target version in state — verify running == installed.
-                // If they match, the binary and package agree, so the
-                // upgrade is consistent. This avoids a permanent
-                // recovery-mode deadlock when the state file is missing
-                // the target version.
-                installed_norm.as_deref() == Some(&running_norm)
-            };
-
-            if !versions_match {
-                error!(
-                    running_version = %running_version,
-                    running_norm = %running_norm,
-                    installed_version = ?installed_version,
-                    installed_norm = ?installed_norm,
-                    expected_target = %expected_target,
-                    target_norm = ?target_norm,
-                    "Version mismatch on startup after self-update — entering recovery mode, NOT clearing state"
-                );
-                linux_patch_api::jobs::upgrade_state::write_recovering_state();
-                notify_systemd_ready();
-                notify_systemd_status(
-                    "Running in recovery mode — version mismatch after self-update",
-                );
-                // Keep admission block set — mutations blocked
-            } else {
-                // Versions agree (or no target to compare) — proceed
-                info!(
-                    running_version = %running_version,
-                    installed_version = ?installed_version,
-                    expected_target = %expected_target,
-                    "Version verification passed — clearing upgrade state"
-                );
-
-                // Transition persistent state to Ready
-                let mut ready_state =
-                    linux_patch_api::jobs::upgrade_state::UpgradeState::installing(
-                        "startup", "", "",
-                    );
-                ready_state.to_ready();
-                if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
-                    error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
-                } else {
-                    notify_systemd_ready();
-                    if in_recovery_mode {
-                        warn!("Notifying systemd of degraded status (recovery mode)");
-                        notify_systemd_status(
-                            "Running in recovery mode — package operations blocked",
-                        );
-                    }
-
-                    linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-                    scheduler.force_clear_self_update().await;
-                    scheduler.reopen_admission().await;
-                    info!("Admission reopened — server ready for mutations");
-                }
-            }
-        } else if needs_state_finalize && repair_failed {
-            // Repair failed — server starts but mutations remain blocked.
-            // Health reports degraded. Only read-only endpoints available.
-            info!("Server starting in recovery mode — repair failed, mutations blocked");
-            notify_systemd_ready();
-            notify_systemd_status(
-                "Running in recovery mode — package operations blocked (repair failed)",
-            );
-        } else {
-            // Normal startup — just send READY=1
-            notify_systemd_ready();
-            if in_recovery_mode {
-                warn!("Notifying systemd of degraded status (recovery mode)");
-                notify_systemd_status("Running in recovery mode — package operations blocked");
-            }
-        }
+        // Normal startup — send READY=1 to systemd
+        notify_systemd_ready();
 
         server.await?;
     } else {
@@ -868,86 +640,8 @@ async fn main() -> Result<()> {
             setup_sigterm_handler(server_handle, sigterm_scheduler.clone()).await;
         });
 
-        // Finalize the self-update restart (same ordering as TLS path)
-        if needs_state_finalize && !repair_failed {
-            info!("Server initialized — finalizing self-update restart");
-
-            // Section 9: Verify versions match before clearing state
-            let running_version = env!("CARGO_PKG_VERSION").to_string();
-            let installed_version = finalize_backend
-                .get_installed_version(linux_patch_api::packages::SELF_PACKAGE_NAME)
-                .unwrap_or(None);
-            let state_result = linux_patch_api::jobs::upgrade_state::read_state();
-            let expected_target = match &state_result {
-                Ok(s) => s.target_version.clone(),
-                Err(_) => String::new(),
-            };
-            // Normalize versions for comparison (see TLS path for details).
-            let running_norm = normalize_version(&running_version);
-            let installed_norm = installed_version.as_deref().map(normalize_version);
-            let target_norm = if expected_target.is_empty() {
-                None
-            } else {
-                Some(normalize_version(&expected_target))
-            };
-
-            let versions_match = if let Some(ref t) = target_norm {
-                installed_norm.as_deref() == Some(&running_norm)
-                    && installed_norm.as_deref() == Some(t)
-            } else {
-                installed_norm.as_deref() == Some(&running_norm)
-            };
-
-            if !versions_match {
-                error!(
-                    running_version = %running_version,
-                    running_norm = %running_norm,
-                    installed_version = ?installed_version,
-                    installed_norm = ?installed_norm,
-                    expected_target = %expected_target,
-                    target_norm = ?target_norm,
-                    "Version mismatch — entering recovery mode, NOT clearing state"
-                );
-                linux_patch_api::jobs::upgrade_state::write_recovering_state();
-                notify_systemd_ready();
-                notify_systemd_status(
-                    "Running in recovery mode — version mismatch after self-update",
-                );
-            } else {
-                let mut ready_state =
-                    linux_patch_api::jobs::upgrade_state::UpgradeState::installing(
-                        "startup", "", "",
-                    );
-                ready_state.to_ready();
-                if let Err(e) = linux_patch_api::jobs::upgrade_state::write_state(&ready_state) {
-                    error!(error = %e, "Failed to write Ready upgrade state — preserving admission block");
-                } else {
-                    notify_systemd_ready();
-                    if in_recovery_mode {
-                        warn!("Notifying systemd of degraded status (recovery mode)");
-                        notify_systemd_status(
-                            "Running in recovery mode — package operations blocked",
-                        );
-                    }
-                    linux_patch_api::jobs::upgrade_state::finalize_successful_restart();
-                    scheduler.force_clear_self_update().await;
-                    scheduler.reopen_admission().await;
-                    info!("Admission reopened — server ready for mutations");
-                }
-            }
-        } else if needs_state_finalize && repair_failed {
-            info!("Server starting in recovery mode — repair failed, mutations blocked");
-            notify_systemd_ready();
-            notify_systemd_status(
-                "Running in recovery mode — package operations blocked (repair failed)",
-            );
-        } else {
-            notify_systemd_ready();
-            if in_recovery_mode {
-                warn!("Notifying systemd of degraded status (recovery mode)");
-                notify_systemd_status("Running in recovery mode — package operations blocked");
-            }
-        }
+        // Normal startup — send READY=1 to systemd
+        notify_systemd_ready();
 
         server.await?;
     }
@@ -996,11 +690,6 @@ fn notify_systemd_ready() {
     if running_under_systemd {
         info!("Notified systemd: READY=1");
     }
-}
-
-/// Send a custom status message to systemd.
-fn notify_systemd_status(status: &str) {
-    sd_notify(&format!("STATUS={}", status));
 }
 
 /// Send STOPPING=1 to systemd's notification socket.
