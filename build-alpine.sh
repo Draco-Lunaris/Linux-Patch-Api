@@ -19,29 +19,10 @@ if ! command -v abuild &> /dev/null; then
     apk add --no-cache alpine-sdk rust cargo openssl-dev openrc git abuild gcc
 fi
 
-# Generate abuild signing keys
-echo "Generating abuild signing keys..."
+# Package signing is unnecessary — the APK is distributed via GitHub Releases
+# over HTTPS and installed with `apk add --allow-untrusted` on target hosts.
+# abuild -F builds an unsigned package without requiring a signing key.
 apk add --no-cache abuild
-
-# Force HOME to /root for consistent key generation location
-export HOME=/root
-mkdir -p "$HOME/.abuild"
-abuild-keygen -a -n 2>&1 | tee /tmp/keygen.log
-
-# Find the generated key using find (ls fails on dash-prefixed filenames)
-KEYFILE=$(find "$HOME/.abuild" -name "*.rsa" ! -name "*.pub" -type f 2>/dev/null | head -1)
-if [ -z "$KEYFILE" ]; then
-    # Fallback: check other common locations where keys might end up
-    KEYFILE=$(find /github/home/.abuild -name "*.rsa" ! -name "*.pub" -type f 2>/dev/null | head -1)
-fi
-if [ -z "$KEYFILE" ]; then
-    echo "ERROR: No abuild signing key found!"
-    echo "Searched: $HOME/.abuild, /github/home/.abuild"
-    exit 1
-fi
-echo "Found key: $KEYFILE"
-echo "PACKAGER_PRIVKEY=\"$KEYFILE\"" > /etc/abuild.conf
-cat /etc/abuild.conf
 
 # Setup build environment
 echo "Setting up build environment..."
@@ -140,10 +121,6 @@ EOF
 # Build APK package
 echo "Building APK package..."
 
-# Determine the directory where abuild keys were generated
-KEY_DIR=$(dirname "$KEYFILE" 2>/dev/null || echo "$HOME/.abuild")
-echo "Key directory: $KEY_DIR"
-
 # For CI environments where we may run as root or as a build user
 if [ "$(id -u)" = "0" ]; then
     echo "Running as root - creating build user for abuild..."
@@ -153,26 +130,8 @@ if [ "$(id -u)" = "0" ]; then
     # Set ownership of workspace
     chown -R builduser:builduser "$WORKSPACE_DIR"
     
-    # Set up builduser home directory for abuild
-    # Copy keys from wherever abuild-keygen put them (KEY_DIR)
-    mkdir -p /home/builduser/.abuild
-    cp "$KEY_DIR"/* /home/builduser/.abuild/ 2>/dev/null || true
-    chown -R builduser:builduser /home/builduser/.abuild
-    
-    BUILDUSER_KEYFILE=$(ls /home/builduser/.abuild/*.rsa 2>/dev/null | head -1)
-    if [ -z "$BUILDUSER_KEYFILE" ]; then
-        BUILDUSER_KEYFILE=$(ls /home/builduser/.abuild/-*.rsa 2>/dev/null | head -1)
-    fi
-    
-    echo "Builduser key file: $BUILDUSER_KEYFILE"
-    echo "PACKAGER_PRIVKEY=\"$BUILDUSER_KEYFILE\"" > /home/builduser/.abuild/abuild.conf
-    chown builduser:builduser /home/builduser/.abuild/abuild.conf
-    
-    # Install public key BEFORE abuild (fixes UNTRUSTED signature)
-    cp /home/builduser/.abuild/*.rsa.pub /etc/apk/keys/ 2>/dev/null || true
-    
-    # Run abuild as builduser in workspace directory
-    su - builduser -c "cd $WORKSPACE_DIR && abuild checksum && abuild -d"
+    # Run abuild as builduser in workspace directory (-F = unsigned build)
+    su - builduser -c "cd $WORKSPACE_DIR && abuild -F checksum && abuild -F -d"
     
     # Copy APK from builduser packages to releases
     # Note: abuild outputs to /home/builduser/packages/builduser/x86_64/ not /home/builduser/packages/home/x86_64/
@@ -180,8 +139,8 @@ if [ "$(id -u)" = "0" ]; then
     cp /home/builduser/packages/builduser/x86_64/*.apk releases/ 2>/dev/null || find /home/builduser/packages -name "*.apk" -exec cp {} releases/ \; 2>/dev/null || true
 else
     cd "$WORKSPACE_DIR"
-    abuild checksum
-    abuild -r
+    abuild -F checksum
+    abuild -F -r
     cd -
     mkdir -p releases
     cp ~/packages/x86_64/*.apk releases/ 2>/dev/null || cp ~/packages/*.apk releases/ 2>/dev/null || true
