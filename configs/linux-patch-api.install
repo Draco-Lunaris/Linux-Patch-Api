@@ -53,24 +53,8 @@ post_upgrade() {
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
-
-    # The upgrade-pending marker is NOT created here. It is created by
-    # the agent itself when it writes the RestartPending upgrade state,
-    # ensuring the marker and state file are always consistent.
-    # The fallback timer polls for the marker via ConditionPathExists
-    # and will fire when the agent creates it.
-
-    # Schedule a 30s delayed restart as a FALLBACK safety net.
-    #
-    # The agent itself performs state-based draining after the package
-    # install completes: it waits for all active operations to finish,
-    # then triggers the restart immediately. This timer is a fallback
-    # in case the agent crashes before completing the drain.
-    #
-    # Using `systemctl restart` on the timer (not `systemd-run`) ensures
-    # idempotency: if a previous timer is still running, it is reset rather
-    # than duplicated.
-    systemctl restart linux-patch-api-upgrade-restart.timer
+    # Schedule delayed restart via systemd-run (300s)
+    systemd-run --no-block --on-active=300 --unit=linux-patch-api-restart systemctl restart linux-patch-api.service
 }
 
 pre_remove() {
