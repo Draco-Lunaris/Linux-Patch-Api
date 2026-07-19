@@ -213,6 +213,12 @@ pub async fn provision_pki_bundle(
 /// enrollment bundle. If the enrollment is compromised, package trust is compromised.
 /// This transitive trust chain is documented in THREAT_MODEL_VALIDATION.md.
 pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<()> {
+    // Alpine uses RSA keys (not GPG) for repo index signing. The GPG key
+    // is not used by apk, so we handle Alpine entirely separately.
+    if repo.distro_id == "alpine" {
+        return provision_alpine_repo_config(repo).await;
+    }
+
     // 1. Write GPG public key to keyring path (mode 0644)
     let keyring_dir = std::path::Path::new(&repo.keyring_path)
         .parent()
@@ -312,22 +318,6 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
             fs::create_dir_all("/etc/yum.repos.d").ok();
             "/etc/yum.repos.d/lpa.repo".to_string()
         }
-        "alpine" => {
-            // apk: append to /etc/apk/repositories (don't overwrite)
-            let existing = fs::read_to_string("/etc/apk/repositories").unwrap_or_default();
-            if existing.contains(&repo.sources_config) {
-                tracing::info!("Repo URL already in /etc/apk/repositories — skipping");
-                return Ok(());
-            }
-            let new_content = format!("{}\n{}\n", existing.trim_end(), repo.sources_config);
-            // Atomic write: temp file + rename
-            let tmp = "/etc/apk/repositories.tmp";
-            fs::write(tmp, &new_content).context("Failed to write temp /etc/apk/repositories")?;
-            fs::rename(tmp, "/etc/apk/repositories")
-                .context("Failed to rename /etc/apk/repositories")?;
-            tracing::info!("Repo URL appended to /etc/apk/repositories");
-            return Ok(());
-        }
         "arch" | "manjaro" | "endeavouros" => {
             // pacman: write include file
             fs::create_dir_all("/etc/pacman.d").ok();
@@ -353,6 +343,64 @@ pub async fn provision_repo_config(repo: &super::client::RepoConfig) -> Result<(
         keyring = %repo.keyring_path,
         "Package repository configured from enrollment bundle"
     );
+
+    Ok(())
+}
+
+/// Provision the Alpine apk repo config.
+///
+/// Alpine's `apk` uses RSA keys (not GPG) for verifying the repo index
+/// (APKINDEX.tar.gz). The RSA public key is written to `/etc/apk/keys/`
+/// so apk can verify the manager's repo index signature. The repo URL
+/// is appended to `/etc/apk/repositories`.
+///
+/// The GPG key in `repo.gpg_public_key` is not used by apk and is ignored.
+async fn provision_alpine_repo_config(repo: &super::client::RepoConfig) -> Result<()> {
+    // 1. Write RSA public key to /etc/apk/keys/ (if provided)
+    if let Some(ref rsa_key) = repo.apk_rsa_public_key {
+        let keys_dir = "/etc/apk/keys";
+        if !std::path::Path::new(keys_dir).exists() {
+            fs::create_dir_all(keys_dir).context("Failed to create /etc/apk/keys directory")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(keys_dir, fs::Permissions::from_mode(0o755))?;
+            }
+        }
+
+        let rsa_key_path = format!("{}/lpa-repo.rsa.pub", keys_dir);
+        let tmp_path = format!("{}.tmp", rsa_key_path);
+        fs::write(&tmp_path, rsa_key)
+            .with_context(|| format!("Failed to write temp RSA key file: {}", tmp_path))?;
+        fs::rename(&tmp_path, &rsa_key_path)
+            .with_context(|| format!("Failed to rename temp RSA key to {}", rsa_key_path))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&rsa_key_path, fs::Permissions::from_mode(0o644))?;
+        }
+        tracing::info!(
+            key_path = %rsa_key_path,
+            "Alpine RSA public key written to /etc/apk/keys/"
+        );
+    } else {
+        tracing::warn!(
+            "No apk_rsa_public_key in enrollment bundle — apk repo index \
+             signature verification will fail until the key is provisioned"
+        );
+    }
+
+    // 2. Append repo URL to /etc/apk/repositories (don't overwrite)
+    let existing = fs::read_to_string("/etc/apk/repositories").unwrap_or_default();
+    if existing.contains(&repo.sources_config) {
+        tracing::info!("Repo URL already in /etc/apk/repositories — skipping");
+        return Ok(());
+    }
+    let new_content = format!("{}\n{}\n", existing.trim_end(), repo.sources_config);
+    let tmp = "/etc/apk/repositories.tmp";
+    fs::write(tmp, &new_content).context("Failed to write temp /etc/apk/repositories")?;
+    fs::rename(tmp, "/etc/apk/repositories").context("Failed to rename /etc/apk/repositories")?;
+    tracing::info!("Repo URL appended to /etc/apk/repositories");
 
     Ok(())
 }

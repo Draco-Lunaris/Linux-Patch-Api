@@ -112,6 +112,8 @@ pub enum EnrollmentStatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoConfig {
     /// ASCII-armored GPG public key for verifying repo metadata and package signatures.
+    /// Used by apt, dnf, and pacman. Not used by apk (Alpine uses RSA keys — see
+    /// `apk_rsa_public_key`).
     pub gpg_public_key: String,
     /// Distro-specific repository configuration text.
     /// For apt: contents of /etc/apt/sources.list.d/lpa.list
@@ -123,6 +125,12 @@ pub struct RepoConfig {
     pub distro_id: String,
     /// Target path where the GPG key should be written (e.g., /etc/apt/keyrings/lpa-repo.gpg)
     pub keyring_path: String,
+    /// RSA public key for Alpine apk repo signing.
+    /// Alpine's `apk` uses RSA keys (not GPG) for verifying the repo index
+    /// (APKINDEX.tar.gz). This key is written to `/etc/apk/keys/` during
+    /// enrollment on Alpine hosts. Absent for non-Alpine distros.
+    #[serde(default)]
+    pub apk_rsa_public_key: Option<String>,
 }
 
 /// PEM-encoded PKI bundle extracted from an `Approved` status response.

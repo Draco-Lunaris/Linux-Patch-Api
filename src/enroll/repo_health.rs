@@ -91,7 +91,7 @@ pub fn expected_repo_paths(distro_id: &str) -> Result<(String, String)> {
         )),
         "alpine" => Ok((
             "/etc/apk/repositories".to_string(),
-            "/etc/apk/keys/lpa-repo.gpg".to_string(),
+            "/etc/apk/keys/lpa-repo.rsa.pub".to_string(),
         )),
         "arch" | "manjaro" | "endeavouros" => Ok((
             "/etc/pacman.d/lpa-repo".to_string(),
@@ -279,8 +279,19 @@ pub async fn check_and_provision_repo_config(manager_url: &str) -> Result<RepoHe
 
     let sources_match =
         read_file_content(&sources_path).as_deref() == Some(expected_repo.sources_config.as_str());
-    let keyring_match =
-        read_file_content(&keyring_path).as_deref() == Some(expected_repo.gpg_public_key.as_str());
+
+    // For Alpine, the keyring is an RSA key (not GPG). Compare against
+    // apk_rsa_public_key if present, otherwise fall back to gpg_public_key
+    // for backward compatibility with older managers.
+    let expected_key = if distro_id == "alpine" {
+        expected_repo
+            .apk_rsa_public_key
+            .as_deref()
+            .unwrap_or(&expected_repo.gpg_public_key)
+    } else {
+        &expected_repo.gpg_public_key
+    };
+    let keyring_match = read_file_content(&keyring_path).as_deref() == Some(expected_key);
 
     if sources_match && keyring_match {
         tracing::info!(
