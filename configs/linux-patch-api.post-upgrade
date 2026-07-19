@@ -2,22 +2,16 @@
 # Alpine Linux post-upgrade script for linux-patch-api
 # Runs after the new package version is installed during an upgrade.
 #
-# Schedules a 30s delayed restart as a FALLBACK safety net.
+# Schedules a 300s delayed restart as a FALLBACK safety net.
 #
 # The agent itself performs state-based draining after the package
 # install completes: it waits for all active operations to finish,
 # then triggers the restart immediately. This timer is a fallback
 # in case the agent crashes before completing the drain.
 
-# The upgrade-pending marker is NOT created here. It is created by
-# the agent itself when it writes the RestartPending upgrade state,
-# ensuring the marker and state file are always consistent.
-# The delayed-restart.sh helper polls for the marker and will fire
-# when the agent creates it.
-
-# Schedule a 30s fallback restart using the deduplication helper script.
-# The helper uses a PID file to ensure only one restart is pending at a
-# time — if a previous restart is still waiting, it is killed and replaced.
+# Schedule a 300s fallback restart using systemd-run.
+# Uses a named unit to ensure idempotency: if a previous restart is
+# still waiting, it is replaced rather than duplicated.
 mkdir -p /var/run
-nohup /usr/lib/linux-patch-api/delayed-restart.sh >/dev/null 2>&1 &
-echo "Upgrade complete — scheduled 30s fallback restart via supervised helper"
+systemd-run --no-block --on-active=300 --unit=linux-patch-api-restart systemctl restart linux-patch-api.service
+echo "Upgrade complete — scheduled 300s fallback restart via systemd-run"
