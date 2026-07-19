@@ -67,12 +67,6 @@ chmod 755 %{buildroot}/usr/bin/linux-patch-api
 cp configs/linux-patch-api.service %{buildroot}/lib/systemd/system/
 chmod 644 %{buildroot}/lib/systemd/system/linux-patch-api.service
 
-# Install upgrade-restart service and timer (same as Debian)
-cp configs/linux-patch-api-upgrade-restart.service %{buildroot}/lib/systemd/system/
-cp configs/linux-patch-api-upgrade-restart.timer %{buildroot}/lib/systemd/system/
-chmod 644 %{buildroot}/lib/systemd/system/linux-patch-api-upgrade-restart.service
-chmod 644 %{buildroot}/lib/systemd/system/linux-patch-api-upgrade-restart.timer
-
 mkdir -p %{buildroot}/usr/lib/linux-patch-api
 mkdir -p %{buildroot}/usr/lib/systemd/system
 
@@ -139,14 +133,8 @@ elif [ $1 -gt 1 ]; then
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
-    # Create upgrade-pending marker so the new process knows it's starting
-    # after a self-update restart. The state-aware timer will check the
-    # upgrade state file and restart when safe.
-    mkdir -p /var/lib/linux_patch_api
-    touch /var/lib/linux_patch_api/upgrade-pending
-    # Enable and start the state-aware restart timer
-    systemctl enable linux-patch-api-upgrade-restart.timer
-    systemctl start linux-patch-api-upgrade-restart.timer
+    # Schedule delayed restart via systemd-run (300s)
+    systemd-run --no-block --on-active=300 --unit=linux-patch-api-restart systemctl restart linux-patch-api.service
 fi
 
 # Pre-uninstallation script
@@ -180,8 +168,6 @@ fi
 %defattr(-,root,root,-)
 /usr/bin/linux-patch-api
 /lib/systemd/system/linux-patch-api.service
-/lib/systemd/system/linux-patch-api-upgrade-restart.service
-/lib/systemd/system/linux-patch-api-upgrade-restart.timer
 %config(noreplace) /etc/linux_patch_api/config.yaml.example
 %config(noreplace) /etc/linux_patch_api/whitelist.yaml.example
 %ghost %config(noreplace) /etc/linux_patch_api/config.yaml
@@ -193,6 +179,13 @@ fi
 
 # Changelog
 %changelog
+* Sat Jul 19 2026 Draco-Lunaris-Echo - 2.5.0-1
+- Simplify self-update: remove state machine, marker file, drain logic, recovery mode, repo self-heal
+- Fix tracking job leak that blocked self-updates
+- Add stale apt/dpkg lock cleanup before package operations
+- Remove upgrade-restart timer/service, fallback-decision script, normalize_version()
+- Bump version to 2.5.0
+
 * Thu Jul 16 2026 Draco-Lunaris-Echo - 2.4.0-1
 - Add command timeouts to prevent apt mutex deadlock (#158, #156)
 - Force cache refresh before self-update candidate lookup (#157)
