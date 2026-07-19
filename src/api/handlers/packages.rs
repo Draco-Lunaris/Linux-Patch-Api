@@ -14,21 +14,12 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::enroll::{check_and_provision_repo_config, RepoHealResult};
-use crate::jobs::manager::{JobOperation, JobStatus};
+use crate::jobs::manager::JobOperation;
 use crate::jobs::scheduler::Scheduler;
 use crate::packages::{
     validate_package_name, validate_version_string, InstallOptions, Package, PackageManagerBackend,
     PackageSpec, SELF_PACKAGE_NAME,
 };
-
-/// Normalize a version string for comparison by stripping a leading `v`
-/// prefix and any Debian revision suffix (e.g. `-1` in `2.3.0-1`).
-/// This ensures `2.3.0` (CARGO_PKG_VERSION) matches `2.3.0-1` (dpkg).
-fn normalize_version(v: &str) -> String {
-    let v = v.strip_prefix('v').unwrap_or(v);
-    v.split('-').next().unwrap_or(v).to_string()
-}
 
 /// Validate all package names and versions in a request
 fn validate_package_names(packages: &[PackageSpec]) -> Result<(), String> {
@@ -357,7 +348,6 @@ pub async fn update_package(
     path: web::Path<String>,
     backend: web::Data<Box<dyn PackageManagerBackend>>,
     scheduler: web::Data<Arc<Scheduler>>,
-    manager_url: web::Data<Option<String>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     _req: HttpRequest,
 ) -> impl Responder {
@@ -381,254 +371,74 @@ pub async fn update_package(
     let is_self_update = package_name == SELF_PACKAGE_NAME;
 
     if is_self_update {
-        // Pre-self-update repo-config self-heal: ensure the manager-hosted
-        // package repo is configured before attempting the upgrade. Without
-        // this, `apt-get install --only-upgrade linux-patch-api` silently finds
-        // "already newest version" and reports success without upgrading.
-        // This catches hosts that were enrolled before repo_config was added
-        // to the enrollment bundle, or where the repo files were lost.
+        // ── Simplified self-update ─────────────────────────────────────────
         //
-        // This runs BEFORE the atomic reservation (try_reserve_self_update)
-        // because it's a network call that should not hold the job-manager
-        // lock. If the repo config is missing, we reject before reserving.
-        let mut repo_config_provisioned = false;
-        match manager_url.as_ref() {
-            Some(url) => {
-                info!(request_id = %request_id, "Pre-self-update repo config check");
-                match check_and_provision_repo_config(url).await {
-                    Ok(RepoHealResult::AlreadyConfigured) => {
-                        info!(request_id = %request_id, "Repo config already present");
-                    }
-                    Ok(RepoHealResult::Provisioned) => {
-                        info!(request_id = %request_id, "Repo config provisioned via self-heal");
-                        repo_config_provisioned = true;
-                    }
-                    Err(e) => {
-                        error!(request_id = %request_id, error = %e, "Repo config self-heal failed — aborting self-update to prevent silent no-op");
-                        let response = ApiResponse::<()>::error(
-                            "REPO_CONFIG_MISSING",
-                            "Cannot self-update: manager-hosted repo is not configured and self-heal failed. The upgrade would be a silent no-op.",
-                            Some(serde_json::json!({"error": e.to_string()})),
-                            true,
-                        );
-                        return HttpResponse::Conflict()
-                            .insert_header(("Retry-After", "60"))
-                            .json(response);
-                    }
-                }
-            }
-            None => {
-                warn!(request_id = %request_id, "No manager URL configured — cannot run repo config self-heal. Self-update may be a no-op if repo is not configured.");
-            }
-        }
+        // The self-update is just a package upgrade. The flow is:
+        //   1. Check no jobs are running (simple boolean)
+        //   2. Refresh the package cache (apt-get update)
+        //   3. Install the package (apt-get install -y linux-patch-api)
+        //   4. The postinst script restarts the service
+        //   5. The manager's health poll sees the new version
+        //
+        // No state machine, no marker file, no drain logic, no version
+        // verification, no repo self-heal. The package manager handles
+        // atomicity. The postinst handles restart. The manager handles
+        // version detection via its existing health poll.
 
-        // Force a package cache refresh before querying the candidate version.
-        // Without this, `apt-cache policy` (or dnf/yum/pacman equivalent) reads
-        // the stale local index and returns the OLD candidate version, causing
-        // the self-update to silently no-op with NO_UPDATE_AVAILABLE (issue #157).
-        // This is always done for self-updates regardless of is_stale() because:
-        //   1. The manager may have published a new version seconds ago
-        //   2. If repo_config was just provisioned, the cache is definitely stale
-        //   3. The 900s staleness threshold is too long for self-updates
-        // Best-effort: if the refresh fails, we log and proceed anyway — the
-        // candidate version lookup may still succeed with a slightly stale cache,
-        // and a failed refresh is better than blocking the self-update entirely.
-        if repo_config_provisioned {
-            info!(
-                request_id = %request_id,
-                "Forcing cache refresh after repo config provisioning"
-            );
-        } else {
-            info!(
-                request_id = %request_id,
-                "Forcing pre-self-update cache refresh to ensure fresh candidate version"
-            );
-        }
-        // Retry the cache refresh up to 3 times with short delays.
-        // The apt-get update may fail if another apt-get process (e.g.
-        // the health check poller or patch poller running inside this
-        // same agent) holds /var/lib/apt/lists/lock. Without a retry,
-        // the candidate version lookup reads a stale cache and the
-        // self-update silently no-ops with NO_UPDATE_AVAILABLE.
-        let mut cache_refreshed = false;
-        for attempt in 1..=3u8 {
-            match backend.refresh_package_cache(cache_state.get_ref()) {
-                Ok(_) => {
-                    info!(
-                        request_id = %request_id,
-                        attempt = attempt,
-                        "Pre-self-update cache refresh completed"
-                    );
-                    cache_refreshed = true;
-                    break;
-                }
-                Err(e) => {
-                    warn!(
-                        request_id = %request_id,
-                        attempt = attempt,
-                        error = %e,
-                        "Pre-self-update cache refresh failed — will retry"
-                    );
-                    if attempt < 3 {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2u64 * attempt as u64))
-                            .await;
-                    }
-                }
-            }
-        }
-        if !cache_refreshed {
+        // Check that no jobs are currently running. We use a simple
+        // active_count check — if jobs are running, reject and let the
+        // manager retry.
+        let active = scheduler.active_count().await;
+        if active > 0 {
             warn!(
                 request_id = %request_id,
-                "Pre-self-update cache refresh failed after 3 attempts — proceeding with potentially stale candidate version"
-            );
-        }
-
-        // Resolve from/target versions BEFORE the atomic reservation. These
-        // are needed by try_reserve_self_update and the persistent state write.
-        // FAIL-CLOSED: If we cannot determine the installed version or the
-        // candidate version, we must NOT proceed with the self-update.
-        let from_version = match backend.get_installed_version(&package_name) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                error!(request_id = %request_id, "Cannot determine installed version — aborting self-update");
-                let response = ApiResponse::<()>::error(
-                    "VERSION_LOOKUP_FAILED",
-                    "Cannot determine the currently installed version. Self-update aborted for safety.",
-                    None,
-                    true,
-                );
-                return HttpResponse::Conflict().json(response);
-            }
-            Err(e) => {
-                error!(request_id = %request_id, error = %e, "Failed to query installed version — aborting self-update");
-                let response = ApiResponse::<()>::error(
-                    "VERSION_LOOKUP_FAILED",
-                    "Failed to query the installed version from the package manager. Self-update aborted for safety.",
-                    Some(serde_json::json!({"error": e.to_string()})),
-                    true,
-                );
-                return HttpResponse::Conflict().json(response);
-            }
-        };
-        let target_version = match backend.get_candidate_version(&package_name) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                error!(request_id = %request_id, "Cannot determine candidate version — aborting self-update");
-                let response = ApiResponse::<()>::error(
-                    "VERSION_LOOKUP_FAILED",
-                    "Cannot determine the candidate (target) version. Self-update aborted for safety.",
-                    None,
-                    true,
-                );
-                return HttpResponse::Conflict().json(response);
-            }
-            Err(e) => {
-                error!(request_id = %request_id, error = %e, "Failed to query candidate version — aborting self-update");
-                let response = ApiResponse::<()>::error(
-                    "VERSION_LOOKUP_FAILED",
-                    "Failed to query the candidate version from the package manager. Self-update aborted for safety.",
-                    Some(serde_json::json!({"error": e.to_string()})),
-                    true,
-                );
-                return HttpResponse::Conflict().json(response);
-            }
-        };
-        if normalize_version(&target_version) == normalize_version(&from_version) {
-            info!(
-                from_version = %from_version,
-                "Target version equals installed version — no update available"
+                active_jobs = active,
+                "Self-update blocked — jobs in progress"
             );
             let response = ApiResponse::<()>::error(
-                "NO_UPDATE_AVAILABLE",
-                "The candidate version matches the installed version — no update is available.",
-                None,
-                false,
+                "SELF_UPDATE_BLOCKED",
+                &format!(
+                    "Cannot self-update while {} jobs are in progress. Retry after jobs complete.",
+                    active
+                ),
+                Some(serde_json::json!({"running_jobs": active})),
+                true,
             );
-            return HttpResponse::Ok().json(response);
+            return HttpResponse::Conflict()
+                .insert_header(("Retry-After", "60"))
+                .json(response);
         }
-        info!(
-            from_version = %from_version,
-            target_version = %target_version,
-            "Resolved target version for self-update"
-        );
 
-        // Atomically reserve the self-update slot. This performs all checks
-        // (no running jobs, no existing self-update, queue capacity) and
-        // state changes (set flag, create job) under a single lock
-        // acquisition, preventing the check-then-set race where a competing
-        // patch/install/remove request interleaves between the running-count
-        // check and the flag set.
+        // Admit the job through the normal path (this also checks for
+        // existing self-update in progress via the admission block).
         match scheduler
-            .try_reserve_self_update(vec![package_name.clone()], &from_version, &target_version)
+            .admit_job(JobOperation::Update, vec![package_name.clone()])
             .await
         {
-            Ok(reservation) => {
-                let job_id = reservation.job_id;
-                info!(
-                    request_id = %request_id,
-                    job_id = %job_id,
-                    "Self-update reserved atomically — flag set, job created, other endpoints rejecting new jobs"
-                );
-
-                // Write persistent upgrade state — start in Reserving phase.
-                // The state file survives process restarts, unlike the in-memory flag.
-                // FAIL-CLOSED: If we cannot persist the Reserving state, we MUST
-                // abort the self-update before invoking the package manager.
-                let upgrade_state = crate::jobs::upgrade_state::UpgradeState::reserving(
-                    &job_id.to_string(),
-                    &from_version,
-                    &target_version,
-                );
-                if let Err(e) = crate::jobs::upgrade_state::write_state(&upgrade_state) {
-                    // FAIL-CLOSED: abort the self-update
-                    // The reservation will be dropped here, rolling back
-                    // the owner and job automatically.
-                    error!(error = %e, "Failed to write persistent Reserving state — aborting self-update before invoking package manager");
-                    scheduler.release_self_update(&job_id).await;
-                    let response = ApiResponse::<()>::error(
-                        "PERSISTENCE_FAILED",
-                        "Failed to persist upgrade state — self-update aborted for safety. Retry after resolving the disk issue.",
-                        Some(serde_json::json!({"error": e.to_string()})),
-                        true,
-                    );
-                    return HttpResponse::InternalServerError().json(response);
-                }
-
-                // Commit the reservation — transfer ownership to the spawned task.
-                // If we don't reach this point (cancellation/panic), the
-                // reservation guard will roll back the owner and job on drop.
-                let job_id = reservation.commit();
-
-                // Spawn background task to execute the update
+            Ok(job_id) => {
                 let backend_clone = backend.clone();
                 let scheduler_clone = scheduler.clone();
                 let pkg_name = package_name.clone();
+                let cache_state_clone = cache_state.clone();
 
                 tokio::spawn(async move {
                     let job_id_clone = job_id;
 
-                    // Transition from Reserving to Installing before invoking
-                    // the package manager. FAIL-CLOSED: if this persistence
-                    // fails, abort the self-update.
-                    let installing_state = crate::jobs::upgrade_state::UpgradeState::installing(
-                        &job_id_clone.to_string(),
-                        &from_version,
-                        &target_version,
-                    );
-                    if let Err(e) = crate::jobs::upgrade_state::write_state(&installing_state) {
-                        error!(error = %e, "Failed to write Installing state — aborting self-update before invoking package manager");
-                        crate::jobs::upgrade_state::write_recovering_state();
-                        let _ = scheduler_clone
-                            .fail_job(
-                                &job_id_clone,
-                                format!("Failed to persist Installing state: {}", e),
-                            )
-                            .await;
-                        return;
+                    // Refresh the package cache so we see the latest
+                    // candidate version. Best-effort — if this fails,
+                    // proceed anyway (the cache may be fresh enough).
+                    if let Err(e) = backend_clone.refresh_package_cache(cache_state_clone.get_ref())
+                    {
+                        warn!(
+                            job_id = %job_id_clone,
+                            error = %e,
+                            "Pre-self-update cache refresh failed — proceeding with stale cache"
+                        );
                     }
 
-                    // Execute update through dispatch_mutation — atomically
-                    // starts the job and acquires the mutation slot.
+                    // Execute the package upgrade through dispatch_mutation.
+                    // The package manager handles atomicity. The postinst
+                    // script handles the service restart.
                     let backend_for_mutation = backend_clone.clone();
                     let pkg_name_for_mutation = pkg_name.clone();
                     let update_result = scheduler_clone
@@ -639,293 +449,23 @@ pub async fn update_package(
 
                     match update_result {
                         Ok(_) => {
-                            info!(job_id = %job_id_clone, package = %pkg_name, "Self-update install completed");
-
-                            // Transition to Verifying phase — check that the
-                            // installed version actually changed.
-                            // FAIL-CLOSED: If we cannot persist the Verifying state,
-                            // do NOT restart and do NOT clear the admission block.
-                            // Enter Recovering state instead.
-                            let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
-                                &job_id_clone.to_string(),
-                                &from_version,
-                                &target_version,
+                            info!(
+                                job_id = %job_id_clone,
+                                package = %pkg_name,
+                                "Self-update install completed — postinst will restart the service"
                             );
-                            state.to_verifying();
-                            if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
-                                error!(
-                                    error = %e,
-                                    "Failed to write Verifying upgrade state — entering recovery mode, NOT restarting"
-                                );
-                                crate::jobs::upgrade_state::write_recovering_state();
-                                let _ = scheduler_clone
-                                    .fail_job(&job_id_clone, format!(
-                                        "Failed to persist Verifying state: {}. Entered recovery mode — manual intervention required.", e
-                                    ))
-                                    .await;
-                                return;
-                            }
-
-                            // Verify the installed version matches the target.
-                            // FAIL-CLOSED: If we cannot read the installed version,
-                            // or it doesn't match the target, enter recovery.
-                            // Use normalized comparison to handle Debian revision
-                            // suffix differences (e.g. "2.4.0-1" vs "2.4.0").
-                            let installed_version = backend_clone.get_installed_version(&pkg_name);
-                            let target_norm = normalize_version(&target_version);
-                            let from_norm = normalize_version(&from_version);
-
-                            match &installed_version {
-                                Ok(Some(v)) if normalize_version(v) == target_norm => {
-                                    info!(
-                                        job_id = %job_id_clone,
-                                        from_version = %from_version,
-                                        installed_version = %v,
-                                        target_version = %target_version,
-                                        "Self-update verified — installed version matches target"
-                                    );
-                                    let _ = scheduler_clone
-                                        .add_job_log(
-                                            &job_id_clone,
-                                            format!("Updated from {} to {}", from_version, v),
-                                        )
-                                        .await;
-                                }
-                                Ok(Some(v)) if normalize_version(v) == from_norm => {
-                                    warn!(
-                                        job_id = %job_id_clone,
-                                        installed_version = %v,
-                                        "Self-update was a no-op — installed version unchanged. Not restarting."
-                                    );
-                                    let _ = scheduler_clone
-                                        .add_job_log(
-                                            &job_id_clone,
-                                            "No update available — installed version unchanged"
-                                                .to_string(),
-                                        )
-                                        .await;
-                                    // Fail the job (not complete) so the manager
-                                    // does not interpret a no-op as success. The
-                                    // manager's reconnect-confirm logic would
-                                    // otherwise see "succeeded" but an unchanged
-                                    // version and mark it failed with a confusing
-                                    // message. Failing here is more honest.
-                                    let _ = scheduler_clone
-                                        .fail_job(
-                                            &job_id_clone,
-                                            "Self-update was a no-op — installed version unchanged. \
-                                             The candidate version may have been stale; retry with a \
-                                             fresh cache refresh."
-                                                .to_string(),
-                                        )
-                                        .await;
-                                    scheduler_clone.release_self_update(&job_id_clone).await;
-                                    crate::jobs::upgrade_state::clear_state();
-                                    crate::jobs::upgrade_state::clear_marker();
-                                    return;
-                                }
-                                Ok(Some(v)) => {
-                                    error!(
-                                        job_id = %job_id_clone,
-                                        from_version = %from_version,
-                                        installed_version = %v,
-                                        target_version = %target_version,
-                                        "Self-update installed unexpected version — entering recovery, NOT restarting"
-                                    );
-                                    crate::jobs::upgrade_state::write_recovering_state();
-                                    let _ = scheduler_clone
-                                        .fail_job(&job_id_clone, format!(
-                                            "Installed version {} does not match target {}. Entered recovery mode.",
-                                            v, target_version
-                                        ))
-                                        .await;
-                                    return;
-                                }
-                                Ok(None) => {
-                                    error!(
-                                        job_id = %job_id_clone,
-                                        "Cannot determine installed version after update — entering recovery, NOT restarting"
-                                    );
-                                    crate::jobs::upgrade_state::write_recovering_state();
-                                    let _ = scheduler_clone
-                                        .fail_job(&job_id_clone,
-                                            "Cannot determine installed version after update. Entered recovery mode.".to_string()
-                                        )
-                                        .await;
-                                    return;
-                                }
-                                Err(e) => {
-                                    error!(
-                                        job_id = %job_id_clone,
-                                        error = %e,
-                                        "Failed to query installed version after update — entering recovery, NOT restarting"
-                                    );
-                                    crate::jobs::upgrade_state::write_recovering_state();
-                                    let _ = scheduler_clone
-                                        .fail_job(&job_id_clone, format!(
-                                            "Failed to query installed version: {}. Entered recovery mode.", e
-                                        ))
-                                        .await;
-                                    return;
-                                }
-                            }
-
                             let _ = scheduler_clone.complete_job(&job_id_clone).await;
-
-                            // Transition to RestartPending
-                            // FAIL-CLOSED: If we cannot persist the RestartPending
-                            // state, do NOT restart. Enter Recovering state.
-                            let mut state = crate::jobs::upgrade_state::UpgradeState::installing(
-                                &job_id_clone.to_string(),
-                                &from_version,
-                                &target_version,
-                            );
-                            state.to_restart_pending();
-                            if let Err(e) = crate::jobs::upgrade_state::write_state(&state) {
-                                error!(
-                                    error = %e,
-                                    "Failed to write RestartPending upgrade state — entering recovery mode, NOT restarting"
-                                );
-                                crate::jobs::upgrade_state::write_recovering_state();
-                                // Keep the admission block set — do not clear
-                                return;
-                            }
-
-                            // Create the upgrade-pending marker AFTER successfully
-                            // writing the RestartPending state. This ensures the
-                            // marker and state file are always consistent — the
-                            // marker only exists when the agent's state machine is
-                            // actively tracking a self-update. The postinst no longer
-                            // creates the marker.
-                            crate::jobs::upgrade_state::create_marker();
                         }
                         Err(e) => {
+                            error!(
+                                job_id = %job_id_clone,
+                                package = %pkg_name,
+                                error = ?e,
+                                "Self-update failed"
+                            );
                             let _ = scheduler_clone
                                 .fail_job_with_diagnostics(&job_id_clone, &e)
                                 .await;
-                            error!(job_id = %job_id_clone, package = %pkg_name, error = ?e, "Self-update failed");
-                        }
-                    }
-
-                    // Self-update flag lifecycle:
-                    //
-                    // On SUCCESS: Do NOT clear the flag. The self-update has
-                    // installed a new binary and the postinst has scheduled a
-                    // 30s fallback timer. Instead of relying on the timer,
-                    // we actively drain the system and trigger the restart
-                    // immediately once all operations have completed.
-                    //
-                    // State-based drain (replaces the fixed 30s timer as the
-                    // primary synchronization mechanism):
-                    // 1. The self_update_in_progress flag is already set,
-                    //    so no new mutable operations can start.
-                    // 2. Wait for running_count() == 0 (no active jobs).
-                    // 3. Wait for is_mutation_in_progress() == false (no
-                    //    apt/dpkg child process running).
-                    // 4. Call restart_own_service() to restart immediately.
-                    //
-                    // The 30s timer in the postinst remains as a fallback
-                    // safety net — if this process crashes before completing
-                    // the drain, the timer ensures the restart still happens.
-                    //
-                    // On FAILURE: Clear the flag and persistent state so the
-                    // system can recover.
-                    let job = scheduler_clone.get_job(&job_id_clone).await;
-                    let is_failed = job
-                        .as_ref()
-                        .map(|j| j.status == JobStatus::Failed)
-                        .unwrap_or(true);
-                    if is_failed {
-                        // Release the self-update lock using the job_id as
-                        // the ownership permit. This only clears the lock if
-                        // this job still owns it — if a second self-update
-                        // somehow took over, this is a no-op.
-                        scheduler_clone.release_self_update(&job_id_clone).await;
-                        crate::jobs::upgrade_state::clear_state();
-                        // Also clear the marker in case the postinst already
-                        // created it (e.g. package was already at target version).
-                        // Without this, the next startup would see marker-without-
-                        // state and enter RecoveryMode unnecessarily.
-                        crate::jobs::upgrade_state::clear_marker();
-                        info!(package = %pkg_name, "Self-update failed — lock, state, and marker cleared, job endpoints accepting new jobs");
-                    } else {
-                        info!(package = %pkg_name, "Self-update succeeded — beginning state-based drain before restart");
-
-                        // State-based drain: wait for all active operations to complete.
-                        // The self_update_in_progress flag prevents new operations from
-                        // starting, so we only need to wait for existing ones to finish.
-                        // We check active_count() (running + pending) because a pending
-                        // job could transition to running after the check — both must
-                        // be zero before restarting.
-                        let drain_deadline =
-                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
-                        let mut drain_log_interval =
-                            tokio::time::interval(tokio::time::Duration::from_secs(10));
-                        drain_log_interval.tick().await; // skip first immediate tick
-
-                        loop {
-                            let active = scheduler_clone.active_count().await;
-                            let mutation_busy = scheduler_clone.is_mutation_in_progress().await;
-
-                            if active == 0 && !mutation_busy {
-                                info!(
-                                    job_id = %job_id_clone,
-                                    active_jobs = active,
-                                    mutation_in_progress = mutation_busy,
-                                    "Drain complete — all operations finished, triggering restart"
-                                );
-                                break;
-                            }
-
-                            if tokio::time::Instant::now() >= drain_deadline {
-                                warn!(
-                                    job_id = %job_id_clone,
-                                    active_jobs = active,
-                                    mutation_in_progress = mutation_busy,
-                                    "Drain timeout (120s) reached — restarting with {} active operations (postinst timer is fallback)",
-                                    active
-                                );
-                                break;
-                            }
-
-                            drain_log_interval.tick().await;
-                            info!(
-                                job_id = %job_id_clone,
-                                active_jobs = active,
-                                mutation_in_progress = mutation_busy,
-                                "Waiting for operations to drain before restart..."
-                            );
-                        }
-
-                        // Trigger the restart immediately. restart_own_service
-                        // is fire-and-forget (spawn, not output) so it doesn't
-                        // block a tokio worker thread. The process will be
-                        // killed by the restart.
-                        //
-                        // Do NOT transition to StartingNewProcess or clear the
-                        // marker here. The restart command is merely spawned —
-                        // it may fail, and the new process hasn't reached
-                        // readiness yet. The fallback timer must remain
-                        // eligible (state stays RestartPending, marker stays).
-                        // The new process clears the marker after successful
-                        // readiness (READY=1 + version verification).
-                        info!(job_id = %job_id_clone, "Initiating service restart after self-update drain");
-                        match backend_clone.restart_own_service() {
-                            Ok(_) => {
-                                info!(job_id = %job_id_clone, "Service restart command spawned — process will be replaced");
-                                // Do NOT clear the marker. The fallback timer
-                                // remains armed. The new process will clear it
-                                // after successful readiness.
-                            }
-                            Err(e) => {
-                                error!(
-                                    job_id = %job_id_clone,
-                                    error = ?e,
-                                    "Failed to trigger service restart — keeping fallback timer armed (marker preserved)"
-                                );
-                                // Do NOT clear the marker — the fallback
-                                // timer is still armed and will retry.
-                            }
                         }
                     }
                 });
@@ -940,32 +480,9 @@ pub async fn update_package(
 
                 return HttpResponse::Accepted().json(response);
             }
-            Err(admission_err) => {
-                warn!(request_id = %request_id, error = %admission_err, "Self-update reservation rejected");
-                let (code, message, data, retry) = match admission_err {
-                    crate::jobs::scheduler::SelfUpdateAdmissionError::AlreadyInProgress => (
-                        "SELF_UPDATE_IN_PROGRESS",
-                        "A self-update is already in progress. Retry after it completes.".to_string(),
-                        None,
-                        true,
-                    ),
-                    crate::jobs::scheduler::SelfUpdateAdmissionError::JobsInProgress { count } => (
-                        "SELF_UPDATE_BLOCKED",
-                        format!("Cannot self-update while {} jobs are in progress. Retry after jobs complete.", count),
-                        Some(serde_json::json!({"running_jobs": count})),
-                        true,
-                    ),
-                    crate::jobs::scheduler::SelfUpdateAdmissionError::QueueFull => (
-                        "QUEUE_FULL",
-                        "Job queue is at capacity. Please retry later.".to_string(),
-                        None,
-                        true,
-                    ),
-                };
-                let response = ApiResponse::<()>::error(code, &message, data, retry);
-                return HttpResponse::Conflict()
-                    .insert_header(("Retry-After", "60"))
-                    .json(response);
+            Err(ref admission_err) => {
+                warn!(request_id = %request_id, error = %admission_err, "Self-update job admission rejected");
+                return admission_error_response(admission_err);
             }
         }
     }

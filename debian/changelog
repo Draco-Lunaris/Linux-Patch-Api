@@ -1,3 +1,15 @@
+linux-patch-api (2.5.0) unstable; urgency=medium
+
+  * Major simplification: remove self-update state machine
+  * Self-update is now just: refresh cache, install package, postinst restarts service
+  * Remove upgrade-state.json, upgrade-pending marker, fallback timer, drain logic
+  * Remove startup recovery mode and version verification
+  * Remove repo config self-heal from self-update path (was breaking repo configs)
+  * Fix tracking job leak in health check and patch list handlers
+  * Fix stale apt/dpkg lock cleanup (#173)
+
+ -- Draco-Lunaris-Echo  Sat, 18 Jul 2026 23:30:00 +0000
+
 linux-patch-api (2.4.4) unstable; urgency=low
 
   * Release v2.4.4

@@ -76,16 +76,6 @@ chmod 755 "${BUILD_DIR}/usr/bin/linux-patch-api"
 
 # Systemd service
 cp "${PROJECT_ROOT}/configs/linux-patch-api.service" "${BUILD_DIR}/lib/systemd/system/"
-cp "${PROJECT_ROOT}/configs/linux-patch-api-upgrade-restart.service" "${BUILD_DIR}/lib/systemd/system/"
-cp "${PROJECT_ROOT}/configs/linux-patch-api-upgrade-restart.timer" "${BUILD_DIR}/lib/systemd/system/"
-
-mkdir -p "${BUILD_DIR}/usr/lib/linux-patch-api"
-
-# Fallback restart decision script — sole authority for the
-# upgrade-restart service's restart decision. Must be executable so
-# ExecStartPre can invoke it directly.
-cp "${PROJECT_ROOT}/configs/linux-patch-api-fallback-decision.sh" "${BUILD_DIR}/usr/lib/linux-patch-api/linux-patch-api-fallback-decision.sh"
-chmod 755 "${BUILD_DIR}/usr/lib/linux-patch-api/linux-patch-api-fallback-decision.sh"
 
 # Configuration files (live configs for admin editing)
 cp "${PROJECT_ROOT}/configs/config.yaml.example" "${BUILD_DIR}/etc/linux_patch_api/config.yaml"
