@@ -18,6 +18,7 @@ Version: VERSION_PLACEHOLDER
 Installed-Size: 0
 Depends: systemd,
          libsystemd0,
+         gpg,
          ${shlibs:Depends},
          ${misc:Depends}
 Description: Secure remote package management API for Linux systems
