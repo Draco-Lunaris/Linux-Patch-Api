@@ -4,6 +4,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::os::unix::process::CommandExt;
 use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -221,14 +222,19 @@ where
 pub fn run_command_with_timeout(program: &str, args: &[&str]) -> Result<String> {
     let timeout = Duration::from_secs(CACHE_REFRESH_TIMEOUT_SECS);
 
-    // Build a tokio command with piped stdio and kill_on_drop so a timeout
-    // never orphans the child.
+    // Build a tokio command with piped stdio.
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .env("DEBIAN_FRONTEND", "noninteractive")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(std::process::Stdio::piped());
+
+    // Isolate package-manager processes into their own process group so
+    // they survive an agent service stop/restart. See coordinator.rs for
+    // the full rationale. We do NOT use kill_on_drop here — if the agent
+    // is stopped mid-cache-refresh, the child must be allowed to exit on
+    // its own (the timeout below still applies).
+    cmd.as_std_mut().process_group(0);
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -239,6 +245,10 @@ pub fn run_command_with_timeout(program: &str, args: &[&str]) -> Result<String> 
             );
         }
     };
+
+    // Capture the PID before the child is moved into wait_with_output.
+    // The PID is also the process-group ID (set via process_group(0)).
+    let child_pid = child.id();
 
     // Block on the async wait-with-timeout. This function is called from
     // synchronous backend code that already holds the mutation semaphore.
@@ -253,8 +263,16 @@ pub fn run_command_with_timeout(program: &str, args: &[&str]) -> Result<String> 
                     ))
                     .context("Cache refresh command failed to wait")),
                     Err(_) => {
-                        // Timeout elapsed — the child will be killed by kill_on_drop
-                        // when the handle is dropped. Construct a timeout error.
+                        // Timeout elapsed — explicitly kill the child process group.
+                        // We use kill_on_drop=false so package operations survive
+                        // agent restarts, but a timeout means WE chose to abort.
+                        // Send SIGKILL to the child's process group (negative PID
+                        // targets the entire group, including dpkg/rpm children).
+                        if let Some(pid) = child_pid {
+                            unsafe {
+                                libc::kill(-(pid as i32), libc::SIGKILL);
+                            }
+                        }
                         Err(anyhow::Error::new(CommandError::from_timeout(
                             program,
                             args,

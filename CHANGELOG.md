@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.3] - 2026-07-20
+
+### Fixed
+- **Self-update restart race condition:** Package-manager processes (apt-get, dnf, apk,
+  pacman) were spawned in the agent's process group, so systemd's `KillMode=control-group`
+  killed them mid-transaction when the postinst triggered a service restart. This caused
+  self-update jobs to fail with `apt-get failed (signal)` even though the package installed
+  successfully. Now spawns all package-manager commands with `process_group(0)`, isolating
+  them into their own process group so they survive an agent service stop/restart.
+- **Removed `kill_on_drop(true)` from package-manager spawns:** If the agent was stopped
+  mid-operation, the dropped child handle would SIGKILL the package transaction. Now uses
+  `kill_on_drop(false)` (the default) and relies on process-group isolation + explicit
+  timeout kills instead.
+- **Timeout kills now target the process group:** `kill_child()` and the cache-refresh
+  timeout path now send SIGTERM/SIGKILL to the negative PID (process group), ensuring
+  subprocesses (dpkg, rpm, postinst hooks) are cleaned up on timeout.
+
+### Changed
+- **All distro postinst/post-upgrade scripts now do an immediate `systemctl restart
+  --no-block`** (or `rc-service restart` on OpenRC) instead of the 300s delayed restart
+  timer. Process-group isolation makes the immediate restart safe — no delay needed.
+  Affected: Debian `postinst`, RPM `spec %post`, Arch `.install`, Alpine `.post-upgrade`.
+- **Added `libc` as a direct dependency** for process-group signal handling.
+
+---
+
 ## [2.4.0] - 2026-07-16
 
 ### Added

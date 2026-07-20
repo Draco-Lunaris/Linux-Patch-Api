@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "linux-patch-api"
-version = "2.5.2"
+version = "2.5.3"
 dependencies = [
  "actix",
  "actix-governor",
@@ -1866,6 +1866,7 @@ dependencies = [
  "futures-util",
  "hex",
  "if-addrs",
+ "libc",
  "linux-patch-api",
  "mockall",
  "notify",

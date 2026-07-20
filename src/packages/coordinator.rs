@@ -9,6 +9,7 @@
 //!   `QUICK_OP_TIMEOUT` — conservative upper bounds for package operations.
 
 use anyhow::Result;
+use std::os::unix::process::CommandExt;
 use std::time::Duration;
 use tokio::process::Command as TokioCommand;
 use tracing::{debug, warn};
@@ -168,10 +169,30 @@ impl SystemCommandRunner {
         cmd.args(args)
             .env("DEBIAN_FRONTEND", "noninteractive")
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            // Ensure the child is killed when the handle is dropped so a
-            // cancelled future never orphans the process.
-            .kill_on_drop(true);
+            .stderr(std::process::Stdio::piped());
+
+        // Isolate package-manager processes into their own process group.
+        //
+        // `process_group(0)` calls `setpgid(0, 0)` in the child before exec,
+        // putting apt-get/dnf/apk/pacman (and their children — dpkg, rpm, etc.)
+        // into a new process group outside the agent's service cgroup.
+        //
+        // This is critical for self-updates: when the package's postinst calls
+        // `systemctl restart` (or the OpenRC equivalent), the init system sends
+        // SIGTERM/SIGKILL to the agent's cgroup. Without process-group isolation,
+        // this kills apt-get/dpkg mid-transaction — leaving the package
+        // half-installed and the self-update job marked as failed.
+        //
+        // With isolation, the package-manager process survives the agent restart
+        // and completes the upgrade. The new agent binary detects the completed
+        // upgrade on startup.
+        //
+        // We intentionally do NOT use `kill_on_drop(true)`: if the agent is
+        // stopped/restarted while a package operation is in flight, the child
+        // handle is dropped, and `kill_on_drop` would SIGKILL the very process
+        // we're trying to protect. Package-manager processes must be allowed to
+        // run to completion independently of the agent's lifecycle.
+        cmd.as_std_mut().process_group(0);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -291,15 +312,35 @@ impl SystemCommandRunner {
 
     /// Best-effort child kill: SIGTERM, short grace, then SIGKILL.
     async fn kill_child(child: &mut tokio::process::Child) {
-        // Try SIGTERM first for graceful shutdown.
-        if let Err(e) = child.start_kill() {
+        // The child is in its own process group (process_group(0) was set
+        // before spawn). To kill the entire group — the child plus any
+        // subprocesses it spawned (dpkg, rpm, postinst hooks, etc.) — we
+        // send signals to the negative PID (the process group ID).
+        let pgid = child.id().map(|p| p as i32);
+
+        // Try SIGTERM first for graceful shutdown of the whole group.
+        if let Some(pgid) = pgid {
+            let ret = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+            if ret != 0 {
+                warn!(
+                    error = ret,
+                    "failed to SIGTERM process group during timeout"
+                );
+            }
+        } else if let Err(e) = child.start_kill() {
             warn!(error = %e, "failed to SIGTERM child during timeout");
         }
+
         // Give the child a 5-second grace period to exit cleanly.
         let grace = Duration::from_secs(5);
         if tokio::time::timeout(grace, child.wait()).await.is_err() {
-            // Still alive — escalate to SIGKILL.
+            // Still alive — escalate to SIGKILL the whole group.
             warn!("child did not exit after SIGTERM, escalating to SIGKILL");
+            if let Some(pgid) = pgid {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
             let _ = child.kill().await;
         }
     }

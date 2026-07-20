@@ -99,7 +99,15 @@ if [ "$1" = "configure" ]; then
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
         systemctl daemon-reload
         
-        # Restart the service to pick up the new binary.
+        # Restart the service immediately to pick up the new binary.
+        #
+        # This is safe because the agent spawns package-manager processes
+        # (apt-get, dpkg) in their own process group (process_group(0)),
+        # so systemd's KillMode=control-group only kills the agent process —
+        # not the apt-get/dpkg transaction that invoked this postinst.
+        # The package operation completes in its own process group while
+        # the new agent binary starts fresh.
+        #
         # Use --no-block so the postinst doesn't wait for the service to
         # stop (which would deadlock with the agent's SIGTERM handler
         # waiting for apt-get to finish). --no-block returns immediately;

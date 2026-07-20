@@ -2,33 +2,24 @@
 # Alpine Linux post-upgrade script for linux-patch-api
 # Runs after the new package version is installed during an upgrade.
 #
-# Schedules a 300s delayed restart as a FALLBACK safety net.
+# Restarts the service immediately to pick up the new binary.
 #
-# The agent itself performs state-based draining after the package
-# install completes: it waits for all active operations to finish,
-# then triggers the restart immediately. This timer is a fallback
-# in case the agent crashes before completing the drain.
-#
-# Detects the init system: uses systemd-run on systemd hosts, and
-# a background `sleep && rc-service` on OpenRC hosts (Alpine). The
-# previous version unconditionally called systemd-run, which does not
-# exist on Alpine — so the delayed restart never fired and the old
-# binary kept running with a deleted executable.
+# This is safe because the agent spawns package-manager processes (apk,
+# and any subprocesses they create) in their own process group
+# (process_group(0) in the Rust code). When OpenRC or systemd stops the
+# agent process, the package-manager transaction continues in its own
+# process group and completes the upgrade. The new agent binary starts
+# fresh and detects the completed upgrade on startup.
 
 if [ -d /run/systemd/system ]; then
-    # systemd host — schedule via systemd-run (idempotent named unit).
-    mkdir -p /var/run
-    systemd-run --no-block --on-active=300 --unit=linux-patch-api-restart \
-        systemctl restart linux-patch-api.service
-    echo "Upgrade complete — scheduled 300s fallback restart via systemd-run"
+    # systemd host — restart immediately (no-block to avoid deadlock
+    # with the agent's SIGTERM handler).
+    systemctl restart --no-block linux-patch-api.service
+    echo "Upgrade complete — service restart triggered (systemd)"
 else
-    # OpenRC host (Alpine) — no systemd-run. Schedule a background
-    # sleep+restart. Kill any prior pending scheduler first to avoid
-    # stacking multiple delayed restarts across repeated upgrades.
-    pkill -f 'sleep 300; rc-service linux-patch-api restart' 2>/dev/null
-    (
-        sleep 300
-        rc-service linux-patch-api restart
-    ) >/dev/null 2>&1 &
-    echo "Upgrade complete — scheduled 300s fallback restart via rc-service (OpenRC)"
+    # OpenRC host (Alpine) — restart immediately. rc-service sends
+    # SIGTERM to the agent process only; the apk transaction in its own
+    # process group is unaffected.
+    rc-service linux-patch-api restart >/dev/null 2>&1 &
+    echo "Upgrade complete — service restart triggered (OpenRC)"
 fi
