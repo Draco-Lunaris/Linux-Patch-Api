@@ -8,10 +8,27 @@
 # install completes: it waits for all active operations to finish,
 # then triggers the restart immediately. This timer is a fallback
 # in case the agent crashes before completing the drain.
+#
+# Detects the init system: uses systemd-run on systemd hosts, and
+# a background `sleep && rc-service` on OpenRC hosts (Alpine). The
+# previous version unconditionally called systemd-run, which does not
+# exist on Alpine — so the delayed restart never fired and the old
+# binary kept running with a deleted executable.
 
-# Schedule a 300s fallback restart using systemd-run.
-# Uses a named unit to ensure idempotency: if a previous restart is
-# still waiting, it is replaced rather than duplicated.
-mkdir -p /var/run
-systemd-run --no-block --on-active=300 --unit=linux-patch-api-restart systemctl restart linux-patch-api.service
-echo "Upgrade complete — scheduled 300s fallback restart via systemd-run"
+if [ -d /run/systemd/system ]; then
+    # systemd host — schedule via systemd-run (idempotent named unit).
+    mkdir -p /var/run
+    systemd-run --no-block --on-active=300 --unit=linux-patch-api-restart \
+        systemctl restart linux-patch-api.service
+    echo "Upgrade complete — scheduled 300s fallback restart via systemd-run"
+else
+    # OpenRC host (Alpine) — no systemd-run. Schedule a background
+    # sleep+restart. Kill any prior pending scheduler first to avoid
+    # stacking multiple delayed restarts across repeated upgrades.
+    pkill -f 'sleep 300; rc-service linux-patch-api restart' 2>/dev/null
+    (
+        sleep 300
+        rc-service linux-patch-api restart
+    ) >/dev/null 2>&1 &
+    echo "Upgrade complete — scheduled 300s fallback restart via rc-service (OpenRC)"
+fi

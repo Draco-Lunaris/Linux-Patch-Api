@@ -24,6 +24,11 @@ BuildArch:      x86_64
 Requires:       systemd-libs
 Requires:       openssl-libs
 Requires:       ca-certificates
+# gpgme is required by dnf for repo_gpgcheck=1 (repomd.xml signature
+# verification). Without it, dnf reports "Signing key not found" even
+# when the GPG key is imported into the RPM keyring.
+Requires:       gpgme
+Requires:       gnupg2
 
 %description
 Linux Patch API provides a secure, mTLS-authenticated REST API for

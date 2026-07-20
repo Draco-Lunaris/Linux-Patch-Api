@@ -97,7 +97,7 @@ Version: ${VERSION}-${RELEASE}
 Architecture: amd64
 Maintainer: Draco-Lunaris-Echo
 Installed-Size: ${INSTALLED_SIZE}
-Depends: systemd, libsystemd0
+Depends: systemd, libsystemd0, gpg
 Section: admin
 Priority: optional
 Homepage: https://github.com/Draco-Lunaris/Linux-Patch-Api
