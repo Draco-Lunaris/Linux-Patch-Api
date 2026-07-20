@@ -69,11 +69,17 @@ Each manager has its own unique GPG signing key. The agent receives the public k
 
 This is an open-source project. Agents may number in the thousands. **NEVER embed credentials, tokens, or secrets in code or configuration.** The agent uses mTLS certificates received during enrollment for all manager communication.
 
-### 4. Self-Update via Native Package Manager
+### 4. Self-Update via Native Package Manager with Process-Group Isolation
 
-The agent self-updates using the host's native package manager (apt, dnf, apk, pacman). Self-updating is a standard package update — the prerm does NOT stop the service on upgrade, and the postinst schedules a 300s delayed restart. No custom scripts, detached systemd units, or marker files are needed.
+The agent self-updates using the host's native package manager (apt, dnf, apk, pacman). Self-updating is a standard package update — the prerm does NOT stop the service on upgrade, and the postinst does an **immediate** `systemctl restart --no-block` (or `rc-service restart` on OpenRC).
 
-**NEVER stop the service during package upgrade.** The running process keeps serving on the old binary; the postinst schedules a delayed restart.
+This is safe because the agent spawns all package-manager processes (apt-get, dnf, apk, pacman, and their children — dpkg, rpm, postinst hooks) in their **own process group** via `process_group(0)` (see `src/packages/coordinator.rs`). When the init system stops the agent service, the cgroup kill only affects the agent process — the package-manager transaction continues in its own process group and completes the upgrade. The new agent binary starts fresh and detects the completed upgrade on startup.
+
+No delayed restart timers, detached systemd units, or marker files are needed.
+
+**NEVER use `kill_on_drop(true)` for package-manager processes.** If the agent is stopped mid-operation, the child handle is dropped, and `kill_on_drop` would SIGKILL the very process we're trying to protect. Package-manager processes must be allowed to run to completion independently of the agent's lifecycle.
+
+**NEVER use delayed restart timers (e.g. `systemd-run --on-active=300`).** The 300s delay was a workaround for a race condition that process-group isolation eliminates. It is unreliable (too short for slow hosts, wasteful for fast ones) and leaves the old binary running unnecessarily.
 
 ### 5. Enrollment Protocol
 
@@ -114,5 +120,6 @@ Agent health endpoint (`GET /health`) reports:
 ## Lessons Learned
 
 1. **CI push hallucination:** Design docs described a CI push model that referenced non-existent servers. Removed and replaced with Manager Pull model.
-2. **Self-update cgroup isolation:** The detached systemd unit MUST have no coupling to the agent service (no `Requires=`, `BindsTo=`, `PartOf=`). This is what allows the update to survive the agent being killed by dpkg prerm.
+2. **Self-update process-group isolation:** Package-manager processes (apt-get, dnf, apk, pacman) MUST be spawned in their own process group (`process_group(0)`) so they survive an agent service stop/restart. Without this, systemd's `KillMode=control-group` kills apt-get mid-transaction when the postinst triggers a service restart, leaving the package half-installed and the self-update job marked as failed. The 300s delayed restart timer was a workaround for this race — process-group isolation eliminates it entirely.
+3. **No `kill_on_drop` for package operations:** `kill_on_drop(true)` on package-manager child processes is dangerous — if the agent is stopped mid-operation, the dropped child handle would SIGKILL the package transaction. Always use `kill_on_drop(false)` (the default) and rely on process-group isolation + explicit timeout kills instead.
 4. **Marker file is authoritative:** After self-update, the marker file (`/var/lib/linux_patch_api/last_self_update.json`) is the source of truth, not the in-memory job state.

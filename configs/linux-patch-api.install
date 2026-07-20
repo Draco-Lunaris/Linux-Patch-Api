@@ -53,8 +53,10 @@ post_upgrade() {
     # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
     echo "Upgrading linux-patch-api ..."
     systemctl daemon-reload
-    # Schedule delayed restart via systemd-run (300s)
-    systemd-run --no-block --on-active=300 --unit=linux-patch-api-restart systemctl restart linux-patch-api.service
+    # Restart immediately — safe because the agent spawns package-manager
+    # processes in their own process group, so systemd's cgroup kill only
+    # affects the agent, not the pacman transaction running this script.
+    systemctl restart --no-block linux-patch-api.service
 }
 
 pre_remove() {

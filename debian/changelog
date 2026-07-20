@@ -1,3 +1,13 @@
+linux-patch-api (2.5.3) unstable; urgency=medium
+
+  * Fix self-update restart race: spawn package-manager processes in own process group
+  * Remove kill_on_drop(true) from package-manager spawns to prevent SIGKILL on agent stop
+  * Timeout kills now target the process group (negative PID) to clean up subprocesses
+  * All distro postinst scripts: immediate systemctl restart instead of 300s delayed timer
+  * Add libc as direct dependency for process-group signal handling
+
+ -- Kelly Slavens <kwslavens@gmail.com>  Sun, 20 Jul 2026 20:45:00 +0000
+
 linux-patch-api (2.5.0) unstable; urgency=medium
 
   * Major simplification: remove self-update state machine

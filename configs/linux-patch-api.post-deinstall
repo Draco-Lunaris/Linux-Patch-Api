@@ -13,5 +13,5 @@ if [ ! -f /usr/bin/linux-patch-api ]; then
     echo "Service stopped and disabled for removal"
 else
     # Upgrade — new binary already installed, service still running old binary
-    echo "Upgrade in progress — service left running (delayed restart scheduled by post-install)"
+    echo "Upgrade in progress — service left running (immediate restart triggered by post-upgrade)"
 fi
