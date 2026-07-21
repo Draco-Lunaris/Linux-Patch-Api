@@ -376,12 +376,6 @@ jobs:
         run: |
           chmod +x build-alpine.sh
           SKIP_CARGO_BUILD=1 ./build-alpine.sh
-      - name: Rename APK to strip release number
-        run: |
-          cd releases
-          for f in linux-patch-api-*.apk; do
-            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-r[0-9]\+\.apk/.apk/')"
-          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
