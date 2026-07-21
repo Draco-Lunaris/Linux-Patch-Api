@@ -338,8 +338,7 @@ fn get_system_info_via_runner(runner: &dyn CommandRunner) -> Result<SystemInfo> 
         .map(|o| o.stdout.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let pending_reboot = std::path::Path::new("/var/run/reboot-required").exists()
-        || std::path::Path::new("/boot/.reboot-required").exists();
+    let pending_reboot = check_pending_reboot_via_runner(runner);
 
     Ok(SystemInfo {
         hostname,
@@ -351,6 +350,216 @@ fn get_system_info_via_runner(runner: &dyn CommandRunner) -> Result<SystemInfo> 
         last_update_apply: None,
         pending_reboot,
     })
+}
+
+/// Packages whose installation or update requires a system reboot.
+///
+/// This is a conservative list of package name prefixes that, when updated,
+/// typically require a reboot to take effect. This is used as a fallback
+/// heuristic when the package manager doesn't provide a definitive
+/// reboot-required signal.
+///
+/// The list is intentionally broad — false positives (rebooting when not
+/// strictly needed) are safe; false negatives (not rebooting when needed)
+/// leave the system running a vulnerable kernel or library.
+const REBOOT_REQUIRED_PACKAGE_PREFIXES: &[&str] = &[
+    "kernel",
+    "linux-image",
+    "linux-headers",
+    "linux-generic",
+    "linux-base",
+    "linux-firmware",
+    "glibc",
+    "libc6",
+    "systemd",
+    "dbus",
+    "openssl",
+    "libssl",
+    "grub",
+    "shim",
+    "initramfs",
+    "kmod",
+    "microcode",
+    "intel-microcode",
+    "amd64-microcode",
+];
+
+/// Check if a package name suggests a reboot is required after update.
+///
+/// This is a name-based heuristic used as a fallback when the package
+/// manager doesn't provide a definitive reboot-required signal. It checks
+/// the package name against a list of known reboot-triggering packages
+/// (kernel, glibc, systemd, dbus, openssl, bootloader, microcode, etc.).
+pub fn package_requires_reboot(package_name: &str) -> bool {
+    let name_lower = package_name.to_lowercase();
+    REBOOT_REQUIRED_PACKAGE_PREFIXES
+        .iter()
+        .any(|prefix| name_lower.starts_with(prefix) || name_lower.contains(prefix))
+}
+
+/// Check if a command is available in PATH.
+fn command_available(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check if the system needs a reboot after package updates, using
+/// distro-specific detection.
+///
+/// - **Debian/Ubuntu**: checks `/var/run/reboot-required` and
+///   `/boot/.reboot-required` marker files.
+/// - **RHEL/AlmaLinux/Fedora**: runs `dnf needs-restarting -r` (exit
+///   code 1 = reboot needed) or falls back to comparing running kernel
+///   vs installed kernel.
+/// - **Alpine**: compares running kernel vs installed kernel (Alpine
+///   has no standard reboot-required marker).
+/// - **Arch**: compares running kernel vs installed kernel.
+fn check_pending_reboot_via_runner(runner: &dyn CommandRunner) -> bool {
+    // Debian/Ubuntu: check reboot-required marker files.
+    if std::path::Path::new("/var/run/reboot-required").exists()
+        || std::path::Path::new("/boot/.reboot-required").exists()
+    {
+        return true;
+    }
+
+    // RHEL/AlmaLinux/Fedora: use `dnf needs-restarting -r` if available.
+    // Exit code 0 = no reboot needed, 1 = reboot needed, other = error
+    // (treat as "no reboot needed" to avoid false positives).
+    if command_available("dnf") {
+        if let Ok(output) =
+            runner.run_with_timeout("dnf", &["needs-restarting", "-r"], QUICK_OP_TIMEOUT)
+        {
+            // needs-restarting -r returns exit code 1 when reboot is needed
+            if output.status_code == Some(1) {
+                return true;
+            }
+        }
+    }
+
+    // Fallback for all distros: compare running kernel vs installed kernel.
+    // This catches kernel updates on distros without a reboot-required marker
+    // (Alpine, Arch) and on RHEL when dnf needs-restarting is unavailable.
+    if let Some(installed_kernel) = get_installed_kernel_version(runner) {
+        if let Some(running_kernel) = get_running_kernel_version() {
+            if installed_kernel != running_kernel {
+                tracing::debug!(
+                    running = %running_kernel,
+                    installed = %installed_kernel,
+                    "Pending reboot: running kernel differs from installed kernel"
+                );
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Get the currently running kernel version (`uname -r`).
+fn get_running_kernel_version() -> Option<String> {
+    std::process::Command::new("uname")
+        .arg("-r")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Get the installed kernel version, distro-specific.
+///
+/// - **Debian/Ubuntu**: reads the latest installed kernel from dpkg.
+/// - **RHEL/AlmaLinux/Fedora**: reads the latest installed kernel from rpm.
+/// - **Alpine**: reads the latest installed kernel from apk.
+/// - **Arch**: reads the latest installed kernel from pacman.
+fn get_installed_kernel_version(runner: &dyn CommandRunner) -> Option<String> {
+    // Debian/Ubuntu: dpkg -l 'linux-image-*' | grep '^ii'
+    if command_available("dpkg") {
+        if let Ok(output) = runner.run_with_timeout("dpkg", &["-l"], QUICK_OP_TIMEOUT) {
+            // Find the highest-version installed kernel
+            let mut best: Option<String> = None;
+            for line in output.stdout.lines() {
+                if !line.starts_with("ii  ") {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 2 {
+                    continue;
+                }
+                let name = parts[1];
+                if name.starts_with("linux-image-") {
+                    let ver = name.trim_start_matches("linux-image-");
+                    // Skip virtual/meta packages
+                    if ver.contains("generic") || ver.contains("virtual") || ver.contains("meta") {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|b: &String| ver > b.as_str()) {
+                        best = Some(ver.to_string());
+                    }
+                }
+            }
+            if best.is_some() {
+                return best;
+            }
+        }
+    }
+
+    // RHEL/AlmaLinux/Fedora: rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n'
+    if command_available("rpm") {
+        if let Ok(output) = runner.run_with_timeout(
+            "rpm",
+            &["-q", "kernel", "--qf", "%{VERSION}-%{RELEASE}.%{ARCH}\n"],
+            QUICK_OP_TIMEOUT,
+        ) {
+            // Return the highest version
+            let mut best: Option<String> = None;
+            for line in output.stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.contains("not installed") {
+                    continue;
+                }
+                if best.as_ref().is_none_or(|b: &String| line > b.as_str()) {
+                    best = Some(line.to_string());
+                }
+            }
+            if best.is_some() {
+                return best;
+            }
+        }
+    }
+
+    // Alpine: apk info -d linux-virt / linux-lts
+    if command_available("apk") {
+        for pkg in &["linux-virt", "linux-lts", "linux-hardened", "linux-rpi"] {
+            if let Ok(output) = runner.run_with_timeout("apk", &["info", pkg], QUICK_OP_TIMEOUT) {
+                // apk info outputs version on first line
+                if let Some(line) = output.stdout.lines().next() {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        return Some(line.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Arch: pacman -Q linux
+    if command_available("pacman") {
+        if let Ok(output) = runner.run_with_timeout("pacman", &["-Q", "linux"], QUICK_OP_TIMEOUT) {
+            // pacman -Q linux outputs: "linux 6.1.0.arch1-1"
+            if let Some(line) = output.stdout.lines().next() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    return Some(parts[1].to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Shared helper: reboot the system via a command runner.
@@ -1056,6 +1265,7 @@ impl PackageManagerBackend for AptBackend {
                         "medium".to_string()
                     };
 
+                let requires_reboot = package_requires_reboot(&name);
                 patches.push(Patch {
                     name,
                     current_version,
@@ -1063,7 +1273,7 @@ impl PackageManagerBackend for AptBackend {
                     severity,
                     description: String::from("Package update available"),
                     cve_ids: Vec::new(),
-                    requires_reboot: false,
+                    requires_reboot,
                 });
             }
         }
@@ -1578,6 +1788,7 @@ impl PackageManagerBackend for ApkBackend {
                     "medium".to_string()
                 };
 
+            let requires_reboot = package_requires_reboot(&name);
             patches.push(Patch {
                 name,
                 current_version,
@@ -1585,7 +1796,7 @@ impl PackageManagerBackend for ApkBackend {
                 severity,
                 description: String::from("Package update available"),
                 cve_ids: Vec::new(),
-                requires_reboot: false,
+                requires_reboot,
             });
         }
 
@@ -1617,7 +1828,25 @@ impl PackageManagerBackend for ApkBackend {
 
     fn reboot_system(&self, delay_seconds: u64) -> Result<()> {
         if delay_seconds > 0 {
-            reboot_system_via_runner(self.runner.as_ref(), delay_seconds)
+            // BusyBox shutdown supports -r and +m syntax. If shutdown
+            // is not available, fall back to an immediate reboot.
+            if command_available("shutdown") {
+                reboot_system_via_runner(self.runner.as_ref(), delay_seconds)
+            } else {
+                tracing::warn!(
+                    delay_seconds,
+                    "shutdown command not found on Alpine — performing immediate reboot instead of delayed"
+                );
+                info!("Initiating immediate system reboot (delayed reboot unavailable)");
+                coordinator::run_command_timed(
+                    self.runner.as_ref(),
+                    "reboot",
+                    &[],
+                    QUICK_OP_TIMEOUT,
+                )?;
+                info!("System reboot initiated");
+                Ok(())
+            }
         } else {
             // Alpine uses `reboot` command, not `systemctl reboot`
             info!("Initiating immediate system reboot");
@@ -2105,6 +2334,7 @@ impl PackageManagerBackend for DnfBackend {
                         "medium".to_string()
                     };
 
+                let requires_reboot = package_requires_reboot(&name);
                 patches.push(Patch {
                     name,
                     current_version,
@@ -2112,7 +2342,7 @@ impl PackageManagerBackend for DnfBackend {
                     severity,
                     description: format!("Package update available from {}", repo),
                     cve_ids: Vec::new(),
-                    requires_reboot: false,
+                    requires_reboot,
                 });
             }
         }
@@ -2599,6 +2829,7 @@ impl PackageManagerBackend for YumBackend {
                         "medium".to_string()
                     };
 
+                let requires_reboot = package_requires_reboot(&name);
                 patches.push(Patch {
                     name,
                     current_version,
@@ -2606,7 +2837,7 @@ impl PackageManagerBackend for YumBackend {
                     severity,
                     description: format!("Package update available from {}", repo),
                     cve_ids: Vec::new(),
-                    requires_reboot: false,
+                    requires_reboot,
                 });
             }
         }
@@ -3004,6 +3235,7 @@ impl PackageManagerBackend for PacmanBackend {
                         "medium".to_string()
                     };
 
+                let requires_reboot = package_requires_reboot(&name);
                 patches.push(Patch {
                     name,
                     current_version,
@@ -3011,7 +3243,7 @@ impl PackageManagerBackend for PacmanBackend {
                     severity,
                     description: String::from("Package update available"),
                     cve_ids: Vec::new(),
-                    requires_reboot: false,
+                    requires_reboot,
                 });
             }
         }
