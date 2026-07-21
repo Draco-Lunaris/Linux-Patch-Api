@@ -60,6 +60,51 @@ fn detect_distro_id_for_repo_config() -> Result<String> {
     Ok(distro_id.to_string())
 }
 
+/// Detect the apt suite token (e.g. `u2404`, `u2204`, `debian12`) from
+/// `/etc/os-release` `VERSION_ID`, matching the manager's `detect_apt_suite`
+/// logic. This is sent as the `codename` query parameter to the fallback
+/// `GET /api/v1/pki/repo-config` endpoint so the manager generates the
+/// correct suite-specific sources.list line.
+///
+/// Without this, the manager defaults to `u2404` for all Ubuntu hosts,
+/// causing Ubuntu 22.04 hosts to receive a binary built against a newer
+/// glibc than they have.
+fn detect_apt_suite_for_repo_config() -> Option<String> {
+    let content = std::fs::read_to_string("/etc/os-release").ok()?;
+    let mut version_id = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some((key, value)) = line.split_once('=') {
+            if key == "VERSION_ID" {
+                version_id = Some(
+                    value
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let ver = version_id?.to_ascii_lowercase();
+
+    if ver == "24.04" || ver.contains("24.04") {
+        Some("u2404".to_string())
+    } else if ver == "22.04" || ver.contains("22.04") {
+        Some("u2204".to_string())
+    } else if ver == "26.04" || ver.contains("26.04") {
+        Some("u2604".to_string())
+    } else if ver == "12" || ver.starts_with("12.") {
+        Some("debian12".to_string())
+    } else if ver == "13" || ver.starts_with("13.") {
+        Some("debian13".to_string())
+    } else {
+        None
+    }
+}
+
 /// Payload sent to `POST /api/v1/enroll`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentRequest {
@@ -622,11 +667,24 @@ impl EnrollmentClient {
     pub async fn fetch_repo_config(&self) -> Result<RepoConfig> {
         let distro_id = detect_distro_id_for_repo_config()?;
 
-        let url = format!(
-            "{}/api/v1/pki/repo-config?distro_id={}",
-            self.manager_url, distro_id
-        );
-        tracing::info!(url = %url, distro_id = %distro_id, "Fetching repo config from manager fallback endpoint");
+        // Detect the apt suite token (e.g. u2404, u2204) and include it as
+        // the `codename` query parameter. Without this, the manager defaults
+        // to u2404 for all Ubuntu hosts, causing version mismatches (e.g.
+        // Ubuntu 22.04 hosts receiving a u2404 binary built against a newer
+        // glibc than they have).
+        let codename = detect_apt_suite_for_repo_config();
+
+        let url = match &codename {
+            Some(cn) => format!(
+                "{}/api/v1/pki/repo-config?distro_id={}&codename={}",
+                self.manager_url, distro_id, cn
+            ),
+            None => format!(
+                "{}/api/v1/pki/repo-config?distro_id={}",
+                self.manager_url, distro_id
+            ),
+        };
+        tracing::info!(url = %url, distro_id = %distro_id, codename = ?codename, "Fetching repo config from manager fallback endpoint");
 
         let response = self
             .http_client
