@@ -1,3 +1,11 @@
+linux-patch-api (2.5.4) unstable; urgency=medium
+
+  * Fix repo-config fallback endpoint missing codename parameter
+  * Agent now detects apt suite from VERSION_ID and sends codename query param
+  * Fixes Ubuntu 22.04 hosts receiving u2404 binary (GLIBC 2.38+) instead of u2204
+
+ -- Kelly Slavens <kwslavens@gmail.com>  Mon, 21 Jul 2026 01:15:00 +0000
+
 linux-patch-api (2.5.3) unstable; urgency=medium
 
   * Fix self-update restart race: spawn package-manager processes in own process group
