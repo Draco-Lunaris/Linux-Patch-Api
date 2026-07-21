@@ -1,3 +1,14 @@
+linux-patch-api (2.5.5) unstable; urgency=medium
+
+  * Fix reboot field name mismatch: agent expected "reboot" but manager sent "allow_reboot"
+  * Agent now auto-reboots when allow_reboot=true AND a patch requires reboot or system pending_reboot is set
+  * Per-patch requires_reboot detection (kernel, glibc, systemd, dbus, openssl, bootloader, microcode)
+  * Distro-specific pending_reboot detection: Debian marker, dnf needs-restarting, kernel version comparison
+  * Alpine delayed reboot: check shutdown availability, fall back to immediate reboot
+  * list_patches aggregate requires_reboot now uses per-patch field instead of name.contains("kernel")
+
+ -- Kelly Slavens <kwslavens@gmail.com>  Tue, 21 Jul 2026 10:00:00 +0000
+
 linux-patch-api (2.5.4) unstable; urgency=medium
 
   * Fix repo-config fallback endpoint missing codename parameter
