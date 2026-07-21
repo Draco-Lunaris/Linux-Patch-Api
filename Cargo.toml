@@ -1,6 +1,6 @@
 [package]
 name = "linux-patch-api"
-version = "2.5.5"
+version = "2.5.6"
 edition = "2021"
 authors = ["Draco-Lunaris-Echo"]
 license = "MIT"
