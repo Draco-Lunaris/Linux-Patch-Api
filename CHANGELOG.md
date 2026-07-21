@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.4] - 2026-07-21
+
+### Fixed
+- **Repo-config fallback endpoint missing codename:** The agent's
+  `fetch_repo_config()` called `GET /api/v1/pki/repo-config?distro_id=ubuntu`
+  without a `codename` parameter. The manager defaulted to `u2404` for all
+  Ubuntu hosts, causing Ubuntu 22.04 hosts to receive the u2404 binary (built
+  against GLIBC 2.38+) instead of the u2204 binary (GLIBC 2.34). The 2.5.3
+  binary then failed to start with `GLIBC_2.38 not found`. Now detects the
+  apt suite from `VERSION_ID` in `/etc/os-release` and sends it as the
+  `codename` query parameter.
+
+---
+
 ## [2.5.3] - 2026-07-20
 
 ### Fixed
