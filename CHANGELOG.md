@@ -11,6 +11,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.5] - 2026-07-21
+
+### Fixed
+- **Reboot field name mismatch (critical):** The manager sent
+  `allow_reboot: true` in `ApplyPatchesRequest` but the agent expected
+  `reboot: true`. Serde silently dropped the unknown field, so reboots
+  never happened on any OS. Renamed `PatchApplyRequest.reboot` to
+  `allow_reboot` with `#[serde(alias = "reboot")]` for backward compat.
+- **No agent-side auto-reboot:** The agent only rebooted if `reboot: true`
+  was explicitly set. Now reboots when `allow_reboot` is true AND a reboot
+  is actually needed (any applied patch `requires_reboot` OR the system's
+  `pending_reboot` marker is set after applying).
+- **`requires_reboot` hardcoded false (all 5 backends):** All backends
+  (apt, apk, dnf, yum, pacman) hardcoded `requires_reboot: false` on every
+  patch. Now uses `package_requires_reboot()` checking against a
+  conservative list of reboot-triggering packages (kernel, glibc, systemd,
+  dbus, openssl, bootloader, microcode, etc.).
+- **`pending_reboot` Debian-only:** `get_system_info()` only checked
+  `/var/run/reboot-required` (Debian). Now uses distro-specific detection:
+  Debian/Ubuntu marker file, `dnf needs-restarting -r` for RHEL, and
+  running-vs-installed kernel version comparison fallback for all distros.
+- **Alpine delayed reboot:** Alpine's `reboot_system()` now checks if
+  `shutdown` exists before attempting a delayed reboot; falls back to
+  immediate `reboot` if unavailable.
+- **`list_patches` aggregate heuristic:** Updated aggregate
+  `requires_reboot` to use the per-patch field instead of the crude
+  `name.contains("kernel")` heuristic that missed glibc, systemd, dbus,
+  openssl, etc.
+
+---
+
 ## [2.5.4] - 2026-07-21
 
 ### Fixed
