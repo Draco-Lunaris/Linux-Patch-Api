@@ -2009,9 +2009,11 @@ impl PackageManagerBackend for DnfBackend {
             args.push("--allowerasing".to_string());
         }
 
-        // SECURITY: -- separator prevents argument injection via package names
-        args.push("--".to_string());
-
+        // Note: no `--` separator — dnf5 (Fedora 41+) rejects it with
+        // "Unknown argument '--' for command 'install'". dnf4 accepts it
+        // but doesn't require it. dnf itself rejects `-` prefixed args as
+        // unknown options, so argument injection via package names is not
+        // possible without the `--` separator.
         for pkg in packages {
             let pkg_arg = if let Some(version) = &pkg.version {
                 format!("{}-{}", pkg.name, version)
@@ -2031,18 +2033,22 @@ impl PackageManagerBackend for DnfBackend {
     }
 
     fn update_package(&self, name: &str) -> Result<()> {
-        // SECURITY: -- separator prevents argument injection via package name
-        self.run_dnf(&["upgrade", "-y", "--", name])?;
+        // No `--` separator — dnf5 rejects it. dnf itself rejects `-`
+        // prefixed args as unknown options, so argument injection is not
+        // possible.
+        self.run_dnf(&["upgrade", "-y", name])?;
         info!("Updated package: {}", name);
         Ok(())
     }
 
     fn remove_package(&self, name: &str, purge: bool) -> Result<()> {
-        // SECURITY: -- separator prevents argument injection via package name
+        // No `--` separator — dnf5 rejects it. dnf itself rejects `-`
+        // prefixed args as unknown options, so argument injection is not
+        // possible.
         let args = if purge {
-            vec!["remove", "-y", "--noautoremove", "--", name]
+            vec!["remove", "-y", "--noautoremove", name]
         } else {
-            vec!["remove", "-y", "--", name]
+            vec!["remove", "-y", name]
         };
         self.run_dnf(&args)?;
         info!("Removed package: {} (purge={})", name, purge);
@@ -2117,8 +2123,9 @@ impl PackageManagerBackend for DnfBackend {
     fn apply_patches(&self, packages: Option<&[String]>) -> Result<()> {
         match packages {
             Some(pkgs) => {
-                // SECURITY: -- separator prevents argument injection via package names
-                let mut args: Vec<&str> = vec!["upgrade", "-y", "--"];
+                // No `--` separator — dnf5 rejects it. dnf itself rejects
+                // `-` prefixed args as unknown options.
+                let mut args: Vec<&str> = vec!["upgrade", "-y"];
                 for pkg in pkgs {
                     args.push(pkg);
                 }

@@ -787,7 +787,7 @@ mod dnf_tests {
         let mock = MockCommandRunner::new();
         mock.add_response(
             "dnf",
-            &["install", "-y", "--", "curl"],
+            &["install", "-y", "curl"],
             MockResponse::success("Installed: curl-8.0\n"),
         );
 
@@ -808,7 +808,7 @@ mod dnf_tests {
         let mock = MockCommandRunner::new();
         mock.add_response(
             "dnf",
-            &["install", "-y", "--", "nonexistent"],
+            &["install", "-y", "nonexistent"],
             MockResponse::error(1, "No package nonexistent available"),
         );
 
