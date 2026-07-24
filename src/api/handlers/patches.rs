@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::jobs::manager::JobOperation;
 use crate::jobs::scheduler::Scheduler;
-use crate::packages::{validate_package_name, PackageManagerBackend};
+use crate::packages::validate_package_name;
 
 use super::packages::{ApiResponse, JobResponseData};
 
@@ -56,7 +56,7 @@ pub struct PatchApplyRequest {
 
 /// List available patches
 pub async fn list_patches(
-    backend: web::Data<Arc<dyn PackageManagerBackend>>,
+    backend: web::Data<Box<dyn crate::packages::PackageManagerBackend>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     scheduler: web::Data<Arc<Scheduler>>,
     _req: HttpRequest,
@@ -161,7 +161,7 @@ pub async fn list_patches(
 /// for the full sequence, so no other package job can interleave.
 pub async fn apply_patches(
     body: web::Json<PatchApplyRequest>,
-    backend: web::Data<Arc<dyn PackageManagerBackend>>,
+    backend: web::Data<Box<dyn crate::packages::PackageManagerBackend>>,
     scheduler: web::Data<Arc<Scheduler>>,
     cache_state: web::Data<crate::packages::cache::PackageCacheState>,
     _req: HttpRequest,
