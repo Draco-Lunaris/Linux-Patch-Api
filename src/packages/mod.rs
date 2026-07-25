@@ -1734,8 +1734,11 @@ impl PackageManagerBackend for ApkBackend {
     }
 
     fn update_package(&self, name: &str) -> Result<()> {
-        // SECURITY: -- separator prevents argument injection via package name
-        self.run_apk(&["upgrade", "--", name])?;
+        // apk upgrade -- <name> does not reliably upgrade a single package.
+        // apk add --upgrade -- <name> is the correct way to upgrade one
+        // package. The -- separator is preserved to prevent argument
+        // injection via the package name.
+        self.run_apk(&["add", "--upgrade", "--", name])?;
         info!("Updated package: {}", name);
         Ok(())
     }
