@@ -2975,13 +2975,29 @@ impl PacmanBackend {
 
     /// Run pacman command and capture output with a package-op timeout.
     /// `-Sy` (cache refresh) uses the shorter CACHE_REFRESH_TIMEOUT.
+    /// On timeout, removes the stale pacman database lock that pacman
+    /// leaves behind when killed mid-operation.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
         let timeout = if !args.is_empty() && (args[0] == "-Sy" || args[0] == "-Syu") {
             CACHE_REFRESH_TIMEOUT
         } else {
             PACKAGE_OP_TIMEOUT
         };
-        coordinator::run_command_timed(self.runner.as_ref(), "pacman", args, timeout)
+        match coordinator::run_command_timed(self.runner.as_ref(), "pacman", args, timeout) {
+            Ok(output) => Ok(output),
+            Err(e) => {
+                // If pacman was killed (timeout or signal), it leaves
+                // /var/lib/pacman/db.lck behind. Remove it so subsequent
+                // pacman invocations don't fail with "unable to lock
+                // database". This is the agent's responsibility — it
+                // spawned and killed pacman, so it must clean up.
+                if e.to_string().contains("timed out") {
+                    let _ = std::fs::remove_file("/var/lib/pacman/db.lck");
+                    tracing::warn!("Removed stale pacman lock after timeout");
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Parse package list from `pacman -Q` output.
