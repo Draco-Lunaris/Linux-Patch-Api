@@ -2975,9 +2975,20 @@ impl PacmanBackend {
 
     /// Run pacman command and capture output with a package-op timeout.
     /// `-Sy` (cache refresh) uses the shorter CACHE_REFRESH_TIMEOUT.
-    /// On timeout, removes the stale pacman database lock that pacman
-    /// leaves behind when killed mid-operation.
+    /// If `/var/lib/pacman/db.lck` exists, returns an error immediately
+    /// rather than waiting for pacman to fail — another pacman process
+    /// is already running (CI build, manual admin, etc.).
+    /// On timeout, removes the stale lock that pacman leaves behind.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
+        // Check for existing pacman lock — another pacman process is
+        // running (CI build, manual admin, etc.). Don't compete for the
+        // lock; let the existing operation finish.
+        if std::path::Path::new("/var/lib/pacman/db.lck").exists() {
+            return Err(anyhow::anyhow!(
+                "pacman database is locked by another process — skipping"
+            ));
+        }
+
         let timeout = if !args.is_empty() && (args[0] == "-Sy" || args[0] == "-Syu") {
             CACHE_REFRESH_TIMEOUT
         } else {
