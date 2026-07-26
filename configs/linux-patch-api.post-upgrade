@@ -2,7 +2,7 @@
 # Alpine Linux post-upgrade script for linux-patch-api
 # Runs after the new package version is installed during an upgrade.
 #
-# Restarts the service immediately to pick up the new binary.
+# Restarts the service to pick up the new binary.
 #
 # This is safe because the agent spawns package-manager processes (apk,
 # and any subprocesses they create) in their own process group
@@ -17,9 +17,31 @@ if [ -d /run/systemd/system ]; then
     systemctl restart --no-block linux-patch-api.service
     echo "Upgrade complete — service restart triggered (systemd)"
 else
-    # OpenRC host (Alpine) — restart immediately. rc-service sends
-    # SIGTERM to the agent process only; the apk transaction in its own
-    # process group is unaffected.
-    rc-service linux-patch-api restart >/dev/null 2>&1 &
+    # OpenRC host (Alpine) — stop the service, wait for the process to
+    # fully exit, then start the new binary. rc-service restart does
+    # stop+start back-to-back without waiting for the process to die,
+    # which causes "already running" errors when the agent's SIGTERM
+    # handler takes time to drain active operations.
+    rc-service linux-patch-api stop >/dev/null 2>&1
+
+    # Wait for the old process to fully exit (up to 10 seconds).
+    PIDFILE="/run/linux-patch-api/linux-patch-api.pid"
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        pid=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+
+    # Force kill if still running after 10 seconds
+    pid=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null
+        sleep 1
+    fi
+
+    rm -f "$PIDFILE" 2>/dev/null
+    rc-service linux-patch-api start >/dev/null 2>&1 &
     echo "Upgrade complete — service restart triggered (OpenRC)"
 fi
