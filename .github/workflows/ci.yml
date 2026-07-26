@@ -330,6 +330,12 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
+      - name: Stop agent service (runner is also a production agent)
+        run: |
+          sudo systemctl stop linux-patch-api.service 2>/dev/null || true
+          sudo rc-service linux-patch-api stop 2>/dev/null || true
+          # Remove stale pacman lock if present
+          sudo rm -f /var/lib/pacman/db.lck
       - name: Install system dependencies
         run: sudo pacman -Syu --noconfirm systemd openssl pkg-config gcc
       - name: Add Rust to PATH
@@ -348,6 +354,11 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: releases/*.pkg.tar.zst
+      - name: Restart agent service
+        if: always()
+        run: |
+          sudo systemctl start linux-patch-api.service 2>/dev/null || true
+          sudo rc-service linux-patch-api start 2>/dev/null || true
 
   build-alpine:
     name: Build .apk (Alpine)

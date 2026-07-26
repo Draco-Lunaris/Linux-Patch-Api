@@ -2975,13 +2975,40 @@ impl PacmanBackend {
 
     /// Run pacman command and capture output with a package-op timeout.
     /// `-Sy` (cache refresh) uses the shorter CACHE_REFRESH_TIMEOUT.
+    /// If `/var/lib/pacman/db.lck` exists, returns an error immediately
+    /// rather than waiting for pacman to fail — another pacman process
+    /// is already running (CI build, manual admin, etc.).
+    /// On timeout, removes the stale lock that pacman leaves behind.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
+        // Check for existing pacman lock — another pacman process is
+        // running (CI build, manual admin, etc.). Don't compete for the
+        // lock; let the existing operation finish.
+        if std::path::Path::new("/var/lib/pacman/db.lck").exists() {
+            return Err(anyhow::anyhow!(
+                "pacman database is locked by another process — skipping"
+            ));
+        }
+
         let timeout = if !args.is_empty() && (args[0] == "-Sy" || args[0] == "-Syu") {
             CACHE_REFRESH_TIMEOUT
         } else {
             PACKAGE_OP_TIMEOUT
         };
-        coordinator::run_command_timed(self.runner.as_ref(), "pacman", args, timeout)
+        match coordinator::run_command_timed(self.runner.as_ref(), "pacman", args, timeout) {
+            Ok(output) => Ok(output),
+            Err(e) => {
+                // If pacman was killed (timeout or signal), it leaves
+                // /var/lib/pacman/db.lck behind. Remove it so subsequent
+                // pacman invocations don't fail with "unable to lock
+                // database". This is the agent's responsibility — it
+                // spawned and killed pacman, so it must clean up.
+                if e.to_string().contains("timed out") {
+                    let _ = std::fs::remove_file("/var/lib/pacman/db.lck");
+                    tracing::warn!("Removed stale pacman lock after timeout");
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Parse package list from `pacman -Q` output.
