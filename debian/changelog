@@ -1,3 +1,13 @@
+linux-patch-api (2.6.6) unstable; urgency=medium
+
+  * Fix OpenRC health-check race condition that orphaned agent process (PR #198)
+  * Replace curl health check with /proc/net/tcp port check (mTLS-compatible)
+  * Add 30s retry loop for port readiness
+  * Do not return 1 from start_post when process is alive (prevents orphaning)
+  * Add pgrep fallback in post-upgrade to kill orphaned processes
+
+ -- Echo AI Agent <echo@moon-dragon.us>  Sun, 26 Jul 2026 00:00:00 -0500
+
 linux-patch-api (2.6.5) unstable; urgency=medium
 
   * Fix Alpine pending_reboot false positive in LXC containers (PR #196)
