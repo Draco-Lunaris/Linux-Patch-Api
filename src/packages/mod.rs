@@ -442,17 +442,60 @@ fn check_pending_reboot_via_runner(runner: &dyn CommandRunner) -> bool {
     // Fallback for all distros: compare running kernel vs installed kernel.
     // This catches kernel updates on distros without a reboot-required marker
     // (Alpine, Arch) and on RHEL when dnf needs-restarting is unavailable.
-    if let Some(installed_kernel) = get_installed_kernel_version(runner) {
-        if let Some(running_kernel) = get_running_kernel_version() {
-            if installed_kernel != running_kernel {
-                tracing::debug!(
-                    running = %running_kernel,
-                    installed = %installed_kernel,
-                    "Pending reboot: running kernel differs from installed kernel"
-                );
-                return true;
+    //
+    // Skip this check in LXC containers — the kernel comes from the host,
+    // not from an in-container package, so the comparison would always
+    // produce a false positive.
+    if !is_lxc_container() {
+        if let Some(installed_kernel) = get_installed_kernel_version(runner) {
+            if let Some(running_kernel) = get_running_kernel_version() {
+                if installed_kernel != running_kernel {
+                    tracing::debug!(
+                        running = %running_kernel,
+                        installed = %installed_kernel,
+                        "Pending reboot: running kernel differs from installed kernel"
+                    );
+                    return true;
+                }
             }
         }
+    }
+
+    false
+}
+
+/// Detect whether we're running inside an LXC container.
+///
+/// In LXC containers the kernel is provided by the host, not by a package
+/// inside the container.  Kernel-version comparison for reboot detection
+/// is meaningless in this context and produces permanent false positives.
+///
+/// Detection methods (any one is sufficient):
+/// - `/proc/1/environ` contains `container=lxc`
+/// - `/proc/1/cgroup` contains `lxc`
+/// - hostname ends in `lxc` (moon-dragon convention, not reliable in general)
+fn is_lxc_container() -> bool {
+    // Check /proc/1/environ for container=lxc
+    if let Ok(environ) = std::fs::read_to_string("/proc/1/environ") {
+        if environ.contains("container=lxc") {
+            return true;
+        }
+    }
+
+    // Check /proc/1/cgroup for lxc substring
+    if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
+        if cgroup.contains("lxc") {
+            return true;
+        }
+    }
+
+    // Check /.dockerenv or /run/.containerenv (Docker/Podman — also shared
+    // kernel, same issue).  These are not LXC per se but have the same
+    // kernel-from-host semantics.
+    if std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+    {
+        return true;
     }
 
     false
@@ -531,15 +574,38 @@ fn get_installed_kernel_version(runner: &dyn CommandRunner) -> Option<String> {
         }
     }
 
-    // Alpine: apk info -d linux-virt / linux-lts
+    // Alpine: apk info -e (installed only) linux-virt / linux-lts
+    //
+    // Use `-e` to only match installed packages.  Without `-e`, `apk info`
+    // returns info about available packages from the repo index even when
+    // the package is not installed — which causes false positive reboots
+    // in LXC containers where the kernel comes from the host, not from an
+    // in-container package.
+    //
+    // The output format is:
+    //   linux-virt-6.18.39-r0 description:
+    //   Linux lts kernel
+    //
+    // We extract the version from the first line (the package name + version
+    // prefix before " description:").
     if command_available("apk") {
         for pkg in &["linux-virt", "linux-lts", "linux-hardened", "linux-rpi"] {
-            if let Ok(output) = runner.run_with_timeout("apk", &["info", pkg], QUICK_OP_TIMEOUT) {
-                // apk info outputs version on first line
+            if let Ok(output) =
+                runner.run_with_timeout("apk", &["info", "-e", pkg], QUICK_OP_TIMEOUT)
+            {
+                // apk info -e outputs nothing (exit 1) if the package is not
+                // installed.  Only parse when we have output.
                 if let Some(line) = output.stdout.lines().next() {
                     let line = line.trim();
-                    if !line.is_empty() {
-                        return Some(line.to_string());
+                    // Extract version from "linux-virt-6.18.39-r0 description:"
+                    // by stripping the known package name prefix and the
+                    // " description:" suffix.
+                    if let Some(rest) = line.strip_prefix(&format!("{}-", pkg)) {
+                        if let Some(ver) = rest.strip_suffix(" description:") {
+                            if !ver.is_empty() {
+                                return Some(ver.to_string());
+                            }
+                        }
                     }
                 }
             }
