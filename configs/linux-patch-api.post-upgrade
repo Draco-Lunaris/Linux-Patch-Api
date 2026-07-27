@@ -41,6 +41,17 @@ else
         sleep 1
     fi
 
+    # Also check for orphaned processes that OpenRC lost track of.
+    # This happens when start_post's health check returned 1 (marking
+    # the service as "stopped" in OpenRC) while supervise-daemon kept
+    # the process alive.  OpenRC's stop does nothing because it thinks
+    # the service is already stopped, leaving an orphan holding port
+    # 12443.  Find and kill any lingering linux-patch-api processes.
+    for orphan_pid in $(pgrep -f '/usr/bin/linux-patch-api' 2>/dev/null); do
+        kill -9 "$orphan_pid" 2>/dev/null
+    done
+    sleep 1
+
     rm -f "$PIDFILE" 2>/dev/null
     rc-service linux-patch-api start >/dev/null 2>&1 &
     echo "Upgrade complete — service restart triggered (OpenRC)"
