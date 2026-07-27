@@ -1,3 +1,11 @@
+linux-patch-api (2.6.5) unstable; urgency=medium
+
+  * Fix Alpine pending_reboot false positive in LXC containers (PR #196)
+  * Use apk info -e (installed only) instead of apk info (available packages)
+  * Skip kernel-version comparison in LXC/Docker/Podman containers
+
+ -- Echo AI Agent <echo@moon-dragon.us>  Sun, 26 Jul 2026 00:00:00 -0500
+
 linux-patch-api (2.5.5) unstable; urgency=medium
 
   * Fix reboot field name mismatch: agent expected "reboot" but manager sent "allow_reboot"
