@@ -3041,18 +3041,31 @@ impl PacmanBackend {
 
     /// Run pacman command and capture output with a package-op timeout.
     /// `-Sy` (cache refresh) uses the shorter CACHE_REFRESH_TIMEOUT.
-    /// If `/var/lib/pacman/db.lck` exists, returns an error immediately
-    /// rather than waiting for pacman to fail — another pacman process
-    /// is already running (CI build, manual admin, etc.).
-    /// On timeout, removes the stale lock that pacman leaves behind.
+    /// If `/var/lib/pacman/db.lck` exists, waits up to 60 seconds for the
+    /// lock to be released (another pacman process may be running from CI
+    /// or manual admin). On timeout, removes the stale lock and retries.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
-        // Check for existing pacman lock — another pacman process is
-        // running (CI build, manual admin, etc.). Don't compete for the
-        // lock; let the existing operation finish.
-        if std::path::Path::new("/var/lib/pacman/db.lck").exists() {
-            return Err(anyhow::anyhow!(
-                "pacman database is locked by another process — skipping"
-            ));
+        // Wait for an existing pacman lock to be released. Another pacman
+        // process may be running (CI build, manual admin, etc.). Wait up
+        // to 60 seconds with 5-second intervals before giving up.
+        let lock_path = std::path::Path::new("/var/lib/pacman/db.lck");
+        if lock_path.exists() {
+            tracing::info!("pacman database is locked — waiting for lock release (up to 60s)");
+            let waited = std::time::Instant::now();
+            let max_wait = std::time::Duration::from_secs(60);
+            while lock_path.exists() {
+                if waited.elapsed() >= max_wait {
+                    // Lock held for too long — likely stale. Remove it.
+                    tracing::warn!("pacman lock held for >60s — removing stale lock");
+                    let _ = std::fs::remove_file(lock_path);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                tracing::debug!(
+                    elapsed_secs = waited.elapsed().as_secs(),
+                    "Waiting for pacman lock release..."
+                );
+            }
         }
 
         let timeout = if !args.is_empty() && (args[0] == "-Sy" || args[0] == "-Syu") {

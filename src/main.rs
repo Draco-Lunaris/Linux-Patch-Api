@@ -24,7 +24,7 @@ use actix_web::{web, App, HttpServer};
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use linux_patch_api::api::{configure_api_routes, configure_health_route};
 use linux_patch_api::auth::crl::{self, CrlStatus};
@@ -265,6 +265,21 @@ async fn main() -> Result<()> {
         max_queue_depth = config.jobs.max_queue_depth,
         "Unified scheduler initialized"
     );
+
+    // Recover orphaned jobs from a previous boot.
+    // If the agent rebooted (e.g. after auto-reboot from patching), any
+    // jobs that were running are lost from memory. Load them from disk
+    // and mark them as failed so the manager sees the terminal status.
+    let orphaned_jobs = linux_patch_api::jobs::persistence::load_orphaned_jobs().await;
+    if !orphaned_jobs.is_empty() {
+        info!(
+            count = orphaned_jobs.len(),
+            "Recovered orphaned jobs from previous boot — marking as failed"
+        );
+        scheduler.recover_orphaned_jobs(&orphaned_jobs).await;
+    } else {
+        debug!("No orphaned jobs found from previous boot");
+    }
 
     // Initialize package manager backend
     let package_backend = match create_backend() {
