@@ -3045,6 +3045,13 @@ impl PacmanBackend {
     /// lock to be released (another pacman process may be running from CI
     /// or manual admin). On timeout, removes the stale lock and retries.
     fn run_pacman(&self, args: &[&str]) -> Result<String> {
+        self.run_pacman_with_acceptable_exit(args, &[0])
+    }
+
+    /// Same as run_pacman but accepts a list of acceptable exit codes.
+    /// Used for commands like `pacman -Qu` which returns exit 1 when
+    /// there are no updates (not an error).
+    fn run_pacman_with_acceptable_exit(&self, args: &[&str], acceptable: &[i32]) -> Result<String> {
         // Wait for an existing pacman lock to be released. Another pacman
         // process may be running (CI build, manual admin, etc.). Wait up
         // to 60 seconds with 5-second intervals before giving up.
@@ -3073,7 +3080,13 @@ impl PacmanBackend {
         } else {
             PACKAGE_OP_TIMEOUT
         };
-        match coordinator::run_command_timed(self.runner.as_ref(), "pacman", args, timeout) {
+        match coordinator::run_command_with_acceptable_exit_timed(
+            self.runner.as_ref(),
+            "pacman",
+            args,
+            acceptable,
+            timeout,
+        ) {
             Ok(output) => Ok(output),
             Err(e) => {
                 // If pacman was killed (timeout or signal), it leaves
@@ -3317,7 +3330,10 @@ impl PackageManagerBackend for PacmanBackend {
     }
 
     fn list_patches(&self) -> Result<Vec<Patch>> {
-        let output = self.run_pacman(&["-Qu"])?;
+        // pacman -Qu returns exit code 1 when there are no updates — this is
+        // not an error. Use run_pacman_with_acceptable_exit to treat it as
+        // success (empty output = no patches).
+        let output = self.run_pacman_with_acceptable_exit(&["-Qu"], &[0, 1])?;
         let mut patches = Vec::new();
 
         for line in output.lines() {
