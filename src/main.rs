@@ -760,6 +760,23 @@ async fn setup_sigterm_handler(
     // we drain in-flight operations.
     scheduler.freeze_admission().await;
 
+    // If a self-update is in progress, the SIGTERM was sent by the
+    // postinst script (rc-service restart / systemctl restart) during
+    // the package upgrade. The apk/dnf/dpkg transaction is running in
+    // its own process group and will complete independently of the
+    // agent process. We must NOT wait for the mutation to "complete"
+    // because the mutation's stdout/stderr pipes are held open by the
+    // postinst process, which is waiting for US to exit — creating a
+    // deadlock. Exit immediately and let the process-group isolation
+    // protect the package transaction.
+    if scheduler.is_self_update_in_progress().await {
+        info!(
+            "Self-update in progress — exiting immediately to avoid deadlock with postinst restart (package transaction protected by process-group isolation)"
+        );
+        let _ = server_handle.stop(true).await;
+        return;
+    }
+
     // Check if a package mutation is in progress via the scheduler
     if scheduler.is_mutation_in_progress().await {
         info!("Package mutation in progress — waiting up to 100s for it to complete before shutting down");
