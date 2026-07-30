@@ -686,6 +686,10 @@ impl Scheduler {
             // section short. The blocking task runs outside the lock.
             drop(state);
 
+            // Persist job state to disk — the job is now running.
+            // If the agent reboots, this file is used to recover orphaned jobs.
+            self.persist_jobs().await;
+
             tokio::spawn(async move {
                 let join_handle = tokio::task::spawn_blocking(f);
                 let result = match join_handle.await {
@@ -904,6 +908,9 @@ impl Scheduler {
             emit_event(&state, "job_status", job_id, &status, progress, &message);
         }
         state.notify.notify_one();
+        drop(state);
+        // Persist job state — completed jobs are removed from the file.
+        self.persist_jobs().await;
         Ok(())
     }
 
@@ -920,6 +927,9 @@ impl Scheduler {
             emit_event(&state, "job_status", job_id, &status, progress, &message);
         }
         state.notify.notify_one();
+        drop(state);
+        // Persist job state — failed jobs are removed from the file.
+        self.persist_jobs().await;
         Ok(())
     }
 
@@ -956,6 +966,9 @@ impl Scheduler {
             );
         }
         state.notify.notify_one();
+        drop(state);
+        // Persist job state — failed jobs are removed from the file.
+        self.persist_jobs().await;
         Ok(())
     }
 
@@ -985,6 +998,64 @@ impl Scheduler {
             }
         }
         Ok(false)
+    }
+
+    /// Get all jobs that are currently running or pending — for persistence.
+    pub async fn get_active_jobs(&self) -> Vec<Job> {
+        let state = self.state.lock().await;
+        state
+            .jobs
+            .values()
+            .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
+            .cloned()
+            .collect()
+    }
+
+    /// Mark orphaned jobs (from a previous boot) as failed.
+    ///
+    /// Called on startup with job IDs loaded from the persistence file.
+    /// Each orphaned job is inserted into the scheduler as a failed job
+    /// so the manager can see the terminal status when it polls.
+    pub async fn recover_orphaned_jobs(&self, orphaned_ids: &[Uuid]) {
+        if orphaned_ids.is_empty() {
+            return;
+        }
+
+        let mut state = self.state.lock().await;
+        for id in orphaned_ids {
+            let now = Utc::now();
+            let job = Job {
+                id: *id,
+                status: JobStatus::Failed,
+                operation: JobOperation::Update, // Best guess — the manager knows the real type
+                created_at: now,
+                updated_at: now,
+                completed_at: Some(now),
+                packages: Vec::new(),
+                progress: 0,
+                message: "Job failed: agent rebooted during execution".to_string(),
+                logs: vec!["Agent rebooted — in-memory job state was lost".to_string()],
+                error: Some("Agent rebooted during job execution".to_string()),
+                error_code: Some("AGENT_REBOOTED".to_string()),
+                exit_code: None,
+                command_stdout: None,
+                command_stderr: None,
+                rollback_job_id: None,
+                exclusive_mode: false,
+            };
+
+            state.jobs.insert(*id, job);
+            tracing::info!(
+                job_id = %id,
+                "Recovered orphaned job from previous boot — marked as failed (AGENT_REBOOTED)"
+            );
+        }
+    }
+
+    /// Persist current running/pending jobs to disk.
+    pub async fn persist_jobs(&self) {
+        let active = self.get_active_jobs().await;
+        crate::jobs::persistence::persist_running_jobs(&active).await;
     }
 
     pub async fn create_rollback_job(
