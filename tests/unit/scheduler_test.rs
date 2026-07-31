@@ -590,3 +590,64 @@ async fn mutation_cancellation_keeps_slot_until_blocking_completes() {
         "new mutation should succeed after blocking command completes"
     );
 }
+
+// =============================================================================
+// Orphaned job recovery (PR #200 regression — self-update false failure)
+// =============================================================================
+
+use linux_patch_api::jobs::manager::{Job, JobStatus};
+
+/// Build a minimal orphaned job record as it would be loaded from
+/// running_jobs.json after a restart.
+fn orphaned_job(operation: JobOperation) -> Job {
+    let mut job = Job::new(operation, vec!["linux-patch-api".to_string()]);
+    job.start(); // status = Running, as persisted
+    job
+}
+
+/// A self-update job orphaned by the postinst restart must be marked
+/// Completed — the new binary is running precisely because the upgrade
+/// succeeded. Marking it Failed (AGENT_REBOOTED) is the regression that
+/// broke self-upgrade reporting across all distros.
+#[tokio::test]
+async fn recover_orphaned_self_update_is_completed_not_failed() {
+    let scheduler = Scheduler::new(2, 10);
+    let orphaned = orphaned_job(JobOperation::SelfUpdate);
+    let id = orphaned.id;
+
+    scheduler.recover_orphaned_jobs(&[orphaned]).await;
+
+    let job = scheduler.get_job(&id).await.expect("job must be recovered");
+    assert_eq!(
+        job.status,
+        JobStatus::Completed,
+        "self-update orphan must be Completed (restart proves upgrade succeeded), not Failed"
+    );
+    assert!(
+        job.error_code.is_none(),
+        "completed self-update must not carry AGENT_REBOOTED error code"
+    );
+    assert!(
+        matches!(job.operation, JobOperation::SelfUpdate),
+        "operation must be preserved as SelfUpdate"
+    );
+}
+
+/// A non-self-update orphan (genuine crash / reboot during execution) must
+/// still be marked Failed with AGENT_REBOOTED.
+#[tokio::test]
+async fn recover_orphaned_regular_job_is_failed() {
+    let scheduler = Scheduler::new(2, 10);
+    let orphaned = orphaned_job(JobOperation::Update);
+    let id = orphaned.id;
+
+    scheduler.recover_orphaned_jobs(&[orphaned]).await;
+
+    let job = scheduler.get_job(&id).await.expect("job must be recovered");
+    assert_eq!(job.status, JobStatus::Failed);
+    assert_eq!(job.error_code.as_deref(), Some("AGENT_REBOOTED"));
+    assert!(
+        matches!(job.operation, JobOperation::Update),
+        "operation must be preserved as Update"
+    );
+}
