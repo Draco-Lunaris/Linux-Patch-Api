@@ -50,6 +50,20 @@ else
     for orphan_pid in $(pgrep -f '/usr/bin/linux-patch-api' 2>/dev/null); do
         kill -9 "$orphan_pid" 2>/dev/null
     done
+
+    # Wait for the port to be released (up to 5 seconds).
+    # Even after the process exits, the OS may take a moment to release
+    # the listening socket. Starting the new process too fast results in
+    # "Address already in use" and OpenRC marks the service as crashed.
+    PORT=$(grep -A 2 '^tls:' /etc/linux_patch_api/config.yaml 2>/dev/null | grep 'port:' | awk '{print $2}')
+    PORT=${PORT:-12443}
+    for i in 1 2 3 4 5; do
+        if ! nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    # Extra safety margin for socket cleanup.
     sleep 1
 
     rm -f "$PIDFILE" 2>/dev/null
