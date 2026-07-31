@@ -269,12 +269,12 @@ async fn main() -> Result<()> {
     // Recover orphaned jobs from a previous boot.
     // If the agent rebooted (e.g. after auto-reboot from patching), any
     // jobs that were running are lost from memory. Load them from disk
-    // and mark them as failed so the manager sees the terminal status.
+    // and recover them so the manager sees the terminal status.
     let orphaned_jobs = linux_patch_api::jobs::persistence::load_orphaned_jobs().await;
     if !orphaned_jobs.is_empty() {
         info!(
             count = orphaned_jobs.len(),
-            "Recovered orphaned jobs from previous boot — marking as failed"
+            "Recovered orphaned jobs from previous boot"
         );
         scheduler.recover_orphaned_jobs(&orphaned_jobs).await;
     } else {

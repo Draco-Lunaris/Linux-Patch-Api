@@ -1011,32 +1011,64 @@ impl Scheduler {
             .collect()
     }
 
-    /// Mark orphaned jobs (from a previous boot) as failed.
+    /// Recover orphaned jobs from a previous boot.
     ///
-    /// Called on startup with job IDs loaded from the persistence file.
-    /// Each orphaned job is inserted into the scheduler as a failed job
-    /// so the manager can see the terminal status when it polls.
-    pub async fn recover_orphaned_jobs(&self, orphaned_ids: &[Uuid]) {
-        if orphaned_ids.is_empty() {
+    /// Called on startup with jobs loaded from the persistence file.
+    /// Each orphaned job is inserted into the scheduler with a terminal
+    /// status so the manager can see it when it polls.
+    ///
+    /// Self-update jobs are marked as **completed** — a reboot during
+    /// self-update is the expected success path (the postinst script
+    /// restarts the service after installing the new package).
+    ///
+    /// All other jobs are marked as **failed** with `AGENT_REBOOTED` —
+    /// the agent cannot know if a patch_apply or reboot job completed
+    /// before the agent was killed.
+    pub async fn recover_orphaned_jobs(&self, orphaned_jobs: &[Job]) {
+        if orphaned_jobs.is_empty() {
             return;
         }
 
         let mut state = self.state.lock().await;
-        for id in orphaned_ids {
+        for job in orphaned_jobs {
             let now = Utc::now();
-            let job = Job {
-                id: *id,
-                status: JobStatus::Failed,
-                operation: JobOperation::Update, // Best guess — the manager knows the real type
-                created_at: now,
+
+            // Self-update jobs: a reboot is the expected success path.
+            // The new binary is running, which means the upgrade worked.
+            let (status, message, error_code) = match job.operation {
+                JobOperation::SelfUpdate => (
+                    JobStatus::Completed,
+                    "Self-update completed — agent rebooted with new version".to_string(),
+                    None,
+                ),
+                _ => (
+                    JobStatus::Failed,
+                    "Job failed: agent rebooted during execution".to_string(),
+                    Some("AGENT_REBOOTED".to_string()),
+                ),
+            };
+
+            let recovered = Job {
+                id: job.id,
+                status: status.clone(),
+                operation: job.operation.clone(),
+                created_at: job.created_at,
                 updated_at: now,
                 completed_at: Some(now),
-                packages: Vec::new(),
-                progress: 0,
-                message: "Job failed: agent rebooted during execution".to_string(),
-                logs: vec!["Agent rebooted — in-memory job state was lost".to_string()],
-                error: Some("Agent rebooted during job execution".to_string()),
-                error_code: Some("AGENT_REBOOTED".to_string()),
+                packages: job.packages.clone(),
+                progress: if status == JobStatus::Completed {
+                    100
+                } else {
+                    0
+                },
+                message: message.clone(),
+                logs: vec!["Agent rebooted — recovered from persistence file".to_string()],
+                error: if status == JobStatus::Failed {
+                    Some("Agent rebooted during job execution".to_string())
+                } else {
+                    None
+                },
+                error_code,
                 exit_code: None,
                 command_stdout: None,
                 command_stderr: None,
@@ -1044,10 +1076,12 @@ impl Scheduler {
                 exclusive_mode: false,
             };
 
-            state.jobs.insert(*id, job);
+            state.jobs.insert(job.id, recovered);
             tracing::info!(
-                job_id = %id,
-                "Recovered orphaned job from previous boot — marked as failed (AGENT_REBOOTED)"
+                job_id = %job.id,
+                operation = ?job.operation,
+                status = %status.as_str(),
+                "Recovered orphaned job from previous boot"
             );
         }
     }
