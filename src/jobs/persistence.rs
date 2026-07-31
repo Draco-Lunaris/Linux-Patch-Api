@@ -11,7 +11,6 @@
 use crate::jobs::manager::{Job, JobStatus};
 use std::path::PathBuf;
 use tokio::fs;
-use uuid::Uuid;
 
 /// Directory for persistent state files.
 const STATE_DIR: &str = "/var/lib/linux_patch_api/state";
@@ -64,10 +63,16 @@ pub async fn persist_running_jobs(jobs: &[Job]) {
 
 /// Load persisted running jobs from disk on startup.
 ///
-/// Returns the job IDs that were running when the agent last shut down.
-/// These jobs are orphaned — the agent has no way to know if they completed
-/// or not. The caller should mark them as failed.
-pub async fn load_orphaned_jobs() -> Vec<Uuid> {
+/// Returns the full `Job` records that were running when the agent last
+/// shut down. The caller decides each job's terminal status based on its
+/// `operation`:
+///
+/// - A `SelfUpdate` job found here means the postinst restart succeeded —
+///   the new binary is running precisely because the upgrade worked. It
+///   must be marked `Completed`, not failed.
+/// - Any other operation is a genuine orphan (crash / power loss / reboot
+///   during execution) and is marked failed with `AGENT_REBOOTED`.
+pub async fn load_orphaned_jobs() -> Vec<Job> {
     let path = jobs_path();
 
     let json = match fs::read_to_string(&path).await {
@@ -90,12 +95,10 @@ pub async fn load_orphaned_jobs() -> Vec<Uuid> {
         }
     };
 
-    let ids: Vec<Uuid> = jobs.iter().map(|j| j.id).collect();
-
     // Clean up the file — these jobs are now being handled.
     let _ = fs::remove_file(&path).await;
 
-    ids
+    jobs
 }
 
 /// Clear the persisted jobs file. Called after orphaned jobs have been

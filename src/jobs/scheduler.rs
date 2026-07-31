@@ -1011,44 +1011,91 @@ impl Scheduler {
             .collect()
     }
 
-    /// Mark orphaned jobs (from a previous boot) as failed.
+    /// Recover orphaned jobs (from a previous boot) into terminal states.
     ///
-    /// Called on startup with job IDs loaded from the persistence file.
-    /// Each orphaned job is inserted into the scheduler as a failed job
-    /// so the manager can see the terminal status when it polls.
-    pub async fn recover_orphaned_jobs(&self, orphaned_ids: &[Uuid]) {
-        if orphaned_ids.is_empty() {
+    /// Called on startup with the jobs loaded from the persistence file.
+    /// Each job is inserted into the scheduler with a terminal status so the
+    /// manager can see the outcome when it polls.
+    ///
+    /// The terminal status depends on the operation:
+    /// - `SelfUpdate`: the job is orphaned *because* the postinst restart
+    ///   killed the old process mid-flight. The new binary is running, which
+    ///   means the upgrade succeeded — mark `Completed`.
+    /// - anything else: a genuine orphan (crash / reboot during execution) —
+    ///   mark `Failed` with `AGENT_REBOOTED`.
+    pub async fn recover_orphaned_jobs(&self, orphaned_jobs: &[Job]) {
+        if orphaned_jobs.is_empty() {
             return;
         }
 
         let mut state = self.state.lock().await;
-        for id in orphaned_ids {
+        for orphaned in orphaned_jobs {
             let now = Utc::now();
-            let job = Job {
-                id: *id,
-                status: JobStatus::Failed,
-                operation: JobOperation::Update, // Best guess — the manager knows the real type
-                created_at: now,
-                updated_at: now,
-                completed_at: Some(now),
-                packages: Vec::new(),
-                progress: 0,
-                message: "Job failed: agent rebooted during execution".to_string(),
-                logs: vec!["Agent rebooted — in-memory job state was lost".to_string()],
-                error: Some("Agent rebooted during job execution".to_string()),
-                error_code: Some("AGENT_REBOOTED".to_string()),
-                exit_code: None,
-                command_stdout: None,
-                command_stderr: None,
-                rollback_job_id: None,
-                exclusive_mode: false,
+            let is_self_update = matches!(orphaned.operation, JobOperation::SelfUpdate);
+
+            let job = if is_self_update {
+                // The only way a self-update job is orphaned is if the
+                // postinst restart terminated the old process before it could
+                // persist the completion. The new process is running the new
+                // binary, so the upgrade succeeded by definition.
+                Job {
+                    id: orphaned.id,
+                    status: JobStatus::Completed,
+                    operation: orphaned.operation.clone(),
+                    created_at: orphaned.created_at,
+                    updated_at: now,
+                    completed_at: Some(now),
+                    packages: orphaned.packages.clone(),
+                    progress: 100,
+                    message: "Self-update completed — agent restarted into new version".to_string(),
+                    logs: vec![
+                        "Agent restarted during self-update (expected postinst restart)"
+                            .to_string(),
+                        "New binary is running — upgrade succeeded".to_string(),
+                    ],
+                    error: None,
+                    error_code: None,
+                    exit_code: None,
+                    command_stdout: None,
+                    command_stderr: None,
+                    rollback_job_id: None,
+                    exclusive_mode: false,
+                }
+            } else {
+                Job {
+                    id: orphaned.id,
+                    status: JobStatus::Failed,
+                    operation: orphaned.operation.clone(),
+                    created_at: orphaned.created_at,
+                    updated_at: now,
+                    completed_at: Some(now),
+                    packages: orphaned.packages.clone(),
+                    progress: 0,
+                    message: "Job failed: agent rebooted during execution".to_string(),
+                    logs: vec!["Agent rebooted — in-memory job state was lost".to_string()],
+                    error: Some("Agent rebooted during job execution".to_string()),
+                    error_code: Some("AGENT_REBOOTED".to_string()),
+                    exit_code: None,
+                    command_stdout: None,
+                    command_stderr: None,
+                    rollback_job_id: None,
+                    exclusive_mode: false,
+                }
             };
 
-            state.jobs.insert(*id, job);
-            tracing::info!(
-                job_id = %id,
-                "Recovered orphaned job from previous boot — marked as failed (AGENT_REBOOTED)"
-            );
+            if is_self_update {
+                tracing::info!(
+                    job_id = %orphaned.id,
+                    "Recovered orphaned self-update — marked as completed (restart proves upgrade succeeded)"
+                );
+            } else {
+                tracing::info!(
+                    job_id = %orphaned.id,
+                    "Recovered orphaned job from previous boot — marked as failed (AGENT_REBOOTED)"
+                );
+            }
+
+            state.jobs.insert(orphaned.id, job);
         }
     }
 
