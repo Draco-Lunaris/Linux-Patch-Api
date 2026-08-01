@@ -361,9 +361,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    // If this process started after a self-update restart, we do NOT clear
-    // the self-update flag yet. The state and marker are only cleared AFTER
-    // the listener is bound, the server is started, and READY=1 is sent to
     // Store scheduler and backend in web::Data for sharing
     let scheduler_data = web::Data::new(scheduler.clone());
     let backend_data = web::Data::new(package_backend);
@@ -715,32 +712,33 @@ fn notify_systemd_stopping() {
     info!("Notified systemd: STOPPING=1");
 }
 
-/// SIGTERM handler that waits for in-progress package operations to complete
-/// before stopping the HTTP server.
+/// SIGTERM handler that protects in-progress package operations.
 ///
-/// When systemd stops the service (`systemctl stop`), it sends SIGTERM, waits
-/// `TimeoutStopSec=90s`, then sends SIGKILL. If a package-manager operation
-/// (apt-get/dnf/apk/pacman) is mid-transaction when SIGKILL arrives, the
-/// package database is left in a half-configured state — packages unpacked
-/// but not configured, kernel installed but initramfs not generated, etc.
+/// Package-manager processes (apt-get/dnf/apk/pacman and their children —
+/// dpkg, rpm, postinst hooks) are spawned in their own process group via
+/// `process_group(0)` in the coordinator. When the init system stops the
+/// agent (SIGTERM → SIGKILL after `TimeoutStopSec`), the cgroup kill only
+/// affects the agent process — the package-manager transaction continues
+/// in its own process group and completes independently.
 ///
 /// This handler:
 /// 1. Catches SIGTERM
 /// 2. Freezes scheduler admission so no new jobs/mutations start
-/// 3. Checks if a package mutation is in progress (via the scheduler's
-///    `is_mutation_in_progress()`, which works across ALL backends)
-/// 4. If yes: waits up to 100s (leaving margin before SIGKILL) for it to complete
-/// 5. Stops the HTTP server gracefully (stops accepting new connections, drains)
-/// 6. If no operation in progress: stops immediately
-///
-/// The 100s deadline is based on the systemd service's `TimeoutStopSec=120s` —
-/// we leave a 20s margin: 100s for mutation drain + 10s for Actix graceful
-/// shutdown = 110s, leaving 10s safety margin before SIGKILL.
+/// 3. If a mutation is in progress: exits immediately. The package-manager
+///    transaction is protected by process-group isolation and will complete
+///    on its own. Waiting for it to "complete" would deadlock whenever the
+///    SIGTERM came from the agent's own postinst restart (systemctl restart
+///    --no-block): the mutation waits for dpkg → dpkg waits for postinst →
+///    postinst waits for systemctl restart → systemd waits for the agent
+///    to exit. The same deadlock applies to any patch_apply job that
+///    upgrades linux-patch-api via dist-upgrade, not just explicit
+///    self-update jobs.
+/// 4. Stops the HTTP server gracefully (stops accepting new connections,
+///    drains in-flight requests).
 async fn setup_sigterm_handler(
     server_handle: actix_web::dev::ServerHandle,
     scheduler: Arc<Scheduler>,
 ) {
-    use std::time::{Duration, Instant};
     use tokio::signal::unix::{signal, SignalKind};
 
     let mut sigterm = match signal(SignalKind::terminate()) {
@@ -762,65 +760,35 @@ async fn setup_sigterm_handler(
     // we drain in-flight operations.
     scheduler.freeze_admission().await;
 
-    // If a self-update is in progress, the SIGTERM was sent by the
-    // postinst script (rc-service restart / systemctl restart) during
-    // the package upgrade. The apk/dnf/dpkg transaction is running in
-    // its own process group and will complete independently of the
-    // agent process. We must NOT wait for the mutation to "complete"
-    // because the mutation's stdout/stderr pipes are held open by the
-    // postinst process, which is waiting for US to exit — creating a
-    // deadlock. Exit immediately and let the process-group isolation
-    // protect the package transaction.
-    if scheduler.is_self_update_in_progress().await {
+    // If a package mutation is in progress, exit immediately. The
+    // package-manager process is in its own process group and will
+    // complete the transaction independently of the agent process.
+    //
+    // We must NOT wait for the mutation to "complete" because:
+    //   - If the SIGTERM came from the agent's own postinst restart
+    //     (systemctl restart --no-block), the mutation's stdout/stderr
+    //     pipes are held open by the postinst process, which is waiting
+    //     for the agent to exit — creating a deadlock:
+    //       agent waits for mutation → mutation waits for pipes to close
+    //       → pipes held by postinst → postinst waits for agent to exit
+    //       → agent waits for mutation (deadlock)
+    //   - This applies to ANY job that upgrades linux-patch-api (explicit
+    //     self-update OR patch_apply via dist-upgrade), not just
+    //     SelfUpdate operations.
+    //   - Even for an external `systemctl stop`, waiting is futile: the
+    //     process-group isolation protects the transaction regardless.
+    //
+    // The old 100s wait was a pre-isolation safety measure that is now
+    // obsolete and actively harmful — it guarantees the deadlock whenever
+    // the agent's own package is being upgraded.
+    if scheduler.is_mutation_in_progress().await {
         info!(
-            "Self-update in progress — exiting immediately to avoid deadlock with postinst restart (package transaction protected by process-group isolation)"
+            "Package mutation in progress — exiting immediately (transaction protected by process-group isolation)"
         );
         let _ = server_handle.stop(true).await;
         return;
     }
 
-    // Check if a package mutation is in progress via the scheduler
-    if scheduler.is_mutation_in_progress().await {
-        info!("Package mutation in progress — waiting up to 100s for it to complete before shutting down");
-
-        let deadline = Instant::now() + Duration::from_secs(100);
-        let mut waited = 0u64;
-
-        while scheduler.is_mutation_in_progress().await {
-            let now = Instant::now();
-            if now >= deadline {
-                warn!(
-                    waited_seconds = waited,
-                    "Package mutation still in progress after 100s — shutting down anyway (systemd will SIGKILL in ~20s)"
-                );
-                break;
-            }
-
-            let remaining = deadline - now;
-            let sleep_dur = Duration::from_secs(1).min(remaining);
-            tokio::time::sleep(sleep_dur).await;
-            waited += sleep_dur.as_secs();
-
-            if scheduler.is_mutation_in_progress().await {
-                info!(
-                    waited_seconds = waited,
-                    "Still waiting for package mutation to complete..."
-                );
-            }
-        }
-
-        if !scheduler.is_mutation_in_progress().await {
-            info!(
-                waited_seconds = waited,
-                "Package mutation completed — proceeding with shutdown"
-            );
-        }
-    } else {
-        info!("No package mutation in progress — shutting down immediately");
-    }
-
-    // Stop the HTTP server gracefully — stops accepting new connections and
-    // drains in-flight requests. The server's own drain timeout is set by
-    // shutdown_timeout() on the server builder.
+    info!("No package mutation in progress — shutting down immediately");
     let _ = server_handle.stop(true).await;
 }

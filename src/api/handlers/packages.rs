@@ -365,9 +365,9 @@ pub async fn update_package(
 
     // Self-update guard: if updating linux-patch-api itself, block while other
     // jobs are running AND block new jobs from starting until the self-update
-    // completes. The delayed restart after self-update would kill any concurrent
-    // package operation mid-transaction, leaving the package manager in a
-    // broken state.
+    // completes. The postinst restart after self-update would kill any
+    // concurrent package operation mid-transaction, leaving the package
+    // manager in a broken state.
     let is_self_update = package_name == SELF_PACKAGE_NAME;
 
     if is_self_update {
@@ -380,10 +380,9 @@ pub async fn update_package(
         //   4. The postinst script restarts the service
         //   5. The manager's health poll sees the new version
         //
-        // No state machine, no marker file, no drain logic, no version
-        // verification, no repo self-heal. The package manager handles
-        // atomicity. The postinst handles restart. The manager handles
-        // version detection via its existing health poll.
+        // The package manager handles atomicity. The postinst handles
+        // restart. The manager handles version detection via its existing
+        // health poll.
 
         // Atomically reserve the self-update slot. This checks no running
         // jobs, no existing self-update, and sets the self_update flag —
