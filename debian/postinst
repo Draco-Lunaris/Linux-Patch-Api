@@ -3,7 +3,7 @@
 # Created by package build system
 #
 # Upgrade-aware: on upgrade ($2 is non-empty), we skip CRL/cert/config operations
-# and schedule a 30s delayed restart via systemd-run.
+# and restart the service immediately.
 
 set -e
 

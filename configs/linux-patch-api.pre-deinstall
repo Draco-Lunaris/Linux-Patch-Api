@@ -10,4 +10,4 @@
 # We cannot distinguish upgrade from removal here (apk passes no
 # argument), so we do nothing in pre-deinstall.
 
-echo "linux-patch-api pre-deinstall: service left running (delayed restart on upgrade, stop on removal)"
+echo "linux-patch-api pre-deinstall: service left running (immediate restart on upgrade, stop on removal)"

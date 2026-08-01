@@ -177,21 +177,23 @@ impl SystemCommandRunner {
         // putting apt-get/dnf/apk/pacman (and their children — dpkg, rpm, etc.)
         // into a new process group outside the agent's service cgroup.
         //
-        // This is critical for self-updates: when the package's postinst calls
-        // `systemctl restart` (or the OpenRC equivalent), the init system sends
-        // SIGTERM/SIGKILL to the agent's cgroup. Without process-group isolation,
-        // this kills apt-get/dpkg mid-transaction — leaving the package
-        // half-installed and the self-update job marked as failed.
+        // This is critical whenever the agent's own package is being upgraded
+        // (explicit self-update OR patch_apply via dist-upgrade): the
+        // package's postinst calls `systemctl restart` (or the OpenRC
+        // equivalent), and the init system sends SIGTERM/SIGKILL to the
+        // agent's cgroup. Without process-group isolation, this kills
+        // apt-get/dpkg mid-transaction — leaving the package half-installed
+        // and the job marked as failed.
         //
-        // With isolation, the package-manager process survives the agent restart
-        // and completes the upgrade. The new agent binary detects the completed
-        // upgrade on startup.
+        // With isolation, the package-manager process survives the agent
+        // restart and completes the upgrade. The new agent binary starts
+        // fresh and detects the completed upgrade on startup.
         //
         // We intentionally do NOT use `kill_on_drop(true)`: if the agent is
         // stopped/restarted while a package operation is in flight, the child
         // handle is dropped, and `kill_on_drop` would SIGKILL the very process
-        // we're trying to protect. Package-manager processes must be allowed to
-        // run to completion independently of the agent's lifecycle.
+        // we're trying to protect. Package-manager processes must be allowed
+        // to run to completion independently of the agent's lifecycle.
         cmd.as_std_mut().process_group(0);
 
         let mut child = match cmd.spawn() {

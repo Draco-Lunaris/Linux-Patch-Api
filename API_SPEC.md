@@ -417,7 +417,7 @@ All API responses use this standard structure:
 
 **Status:** Deprecated — use `PUT /api/v1/packages/{name}` (standard package update endpoint) instead.
 
-Self-updating the agent is a standard package update. The Manager calls `PUT /api/v1/packages/linux-patch-api` and the native package manager handles the upgrade. The prerm does NOT stop the service on upgrade; the postinst schedules a 300s delayed restart. No custom scripts, detached systemd units, or marker files are needed.
+Self-updating the agent is a standard package update. The Manager calls `PUT /api/v1/packages/linux-patch-api` and the native package manager handles the upgrade. The prerm does NOT stop the service on upgrade; the postinst triggers an immediate `systemctl restart --no-block`. Process-group isolation protects the package transaction. No custom scripts, detached systemd units, delayed timers, or marker files are needed.
 
 This endpoint may still exist in the codebase for backward compatibility but should be removed in a future cleanup pass.
 

@@ -278,9 +278,9 @@ Self-updating the agent is a standard package update — no different from updat
 1. Manager invokes `PUT /api/v1/packages/linux-patch-api` on the agent (standard package update endpoint)
 2. The agent's package update handler runs the native package manager upgrade command
 3. dpkg/apk/pacman replaces the files on disk — the prerm does NOT stop the service on upgrade
-4. The postinst schedules a 300s delayed service restart (`systemd-run --on-active=300s` on systemd distros, `nohup sleep 300` on Alpine)
-5. The agent keeps serving requests on the old binary in memory for 300s
-6. After 300s, the service restarts and the new binary loads
+4. The postinst triggers an immediate `systemctl restart --no-block` (or `rc-service` stop/wait/start on OpenRC)
+5. The agent's SIGTERM handler exits immediately — the package-manager transaction is protected by process-group isolation and completes independently
+6. The new binary starts fresh and detects the completed upgrade on startup
 
 ### GPG Signature Verification
 
@@ -288,19 +288,19 @@ Self-updating the agent is a standard package update — no different from updat
 - Verification is delegated to the native package manager — the agent performs no manual signature checks
 - Agent trusts the GPG public key because it was delivered inside the mTLS-authenticated enrollment bundle (existing trust root)
 
-### Delayed Restart Rationale
+### Immediate Restart Rationale
 
-The service is NOT stopped during upgrade. The running process keeps serving requests on the old binary while dpkg replaces files on disk. After 300s, the service restarts and loads the new binary. This:
-- Avoids interrupting in-flight requests during the upgrade
-- Lets any concurrent package operations finish
-- Eliminates the need for detached systemd units, custom scripts, health check loops, auto-rollback, marker files, and signal traps
-- Works across all distros (systemd-run on systemd distros, nohup sleep on Alpine/OpenRC)
+The service is restarted immediately by the postinst. This is safe because:
+- Package-manager processes (apt-get, dpkg, dnf, apk, pacman) are spawned in their own process group (`process_group(0)`), so the init system's cgroup kill only affects the agent process — the package transaction completes independently
+- The agent's SIGTERM handler exits immediately when a mutation is in progress, avoiding a deadlock with the postinst restart
+- No delayed restart timers, detached systemd units, marker files, or signal traps are needed
 
 ### Removed Mechanisms
 
 - `self-update.sh` and `linux-patch-api-update.service` are no longer needed — the native package manager and standard maintainer scripts handle everything
 - `POST /api/v1/system/update` and `GET /api/v1/system/update/status` endpoints are deprecated — use `PUT /api/v1/packages/{name}` and `GET /api/v1/jobs/{id}` instead
 - Marker files (`/var/lib/linux_patch_api/last_self_update.json`, `self-update.request`) are no longer used
+- The 300s delayed restart timer (`systemd-run --on-active=300s`) is removed — process-group isolation eliminates the race it worked around
 - The previous GitHub Releases download path is removed
 
 ## Audit Logging
