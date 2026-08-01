@@ -40,7 +40,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -51,7 +51,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - run: cargo test --all-features
 
   audit:
@@ -86,7 +86,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - run: cargo test --test enroll_identity
       - run: cargo test --test enrollment_test
       - run: cargo test --test enrollment_e2e
@@ -131,7 +131,7 @@ jobs:
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
       - name: Install system dependencies
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
@@ -157,7 +157,7 @@ jobs:
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
       - name: Install system dependencies
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
@@ -183,7 +183,7 @@ jobs:
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
       - name: Install system dependencies
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
@@ -209,7 +209,7 @@ jobs:
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
       - name: Install system dependencies
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
@@ -235,7 +235,7 @@ jobs:
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
       - name: Install system dependencies
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build .deb package
