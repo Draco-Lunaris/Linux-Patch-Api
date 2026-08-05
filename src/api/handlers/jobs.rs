@@ -117,6 +117,7 @@ fn parse_job_status(status_str: &str) -> Option<JobStatus> {
     match status_str.to_lowercase().as_str() {
         "pending" => Some(JobStatus::Pending),
         "running" => Some(JobStatus::Running),
+        "rebooting" => Some(JobStatus::Rebooting),
         "completed" => Some(JobStatus::Completed),
         "failed" => Some(JobStatus::Failed),
         "cancelled" => Some(JobStatus::Cancelled),
@@ -359,6 +360,8 @@ mod tests {
         assert_eq!(parse_job_status("pending"), Some(JobStatus::Pending));
         assert_eq!(parse_job_status("PENDING"), Some(JobStatus::Pending));
         assert_eq!(parse_job_status("running"), Some(JobStatus::Running));
+        assert_eq!(parse_job_status("rebooting"), Some(JobStatus::Rebooting));
+        assert_eq!(parse_job_status("REBOOTING"), Some(JobStatus::Rebooting));
         assert_eq!(parse_job_status("completed"), Some(JobStatus::Completed));
         assert_eq!(parse_job_status("failed"), Some(JobStatus::Failed));
         assert_eq!(parse_job_status("invalid"), None);

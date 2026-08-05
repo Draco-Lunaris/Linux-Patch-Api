@@ -262,7 +262,6 @@ pub async fn apply_patches(
 
                 match patch_result {
                     Ok(()) => {
-                        let _ = scheduler_clone.complete_job(&job_id_clone).await;
                         info!(job_id = %job_id_clone, "Patch application completed");
 
                         // Determine whether a reboot is needed after patching.
@@ -337,6 +336,20 @@ pub async fn apply_patches(
                             match scheduler_clone.reserve_reboot(true, false).await {
                                 Ok(guard) => {
                                     let reboot_job_id = guard.job_id;
+                                    // Core fix: the patches are applied but
+                                    // the operation is not complete until the
+                                    // reboot resolves. Transition the PATCH
+                                    // job to `Rebooting` (not `Completed`) so
+                                    // the manager sees an accurate in-progress
+                                    // state. Orphan recovery marks it
+                                    // `Completed` on the next boot (the
+                                    // restart proves the reboot fired).
+                                    let _ = scheduler_clone
+                                        .set_job_rebooting(
+                                            &job_id_clone,
+                                            "Patches applied; awaiting reboot".to_string(),
+                                        )
+                                        .await;
                                     let _ = scheduler_clone
                                         .add_job_log(
                                             &job_id_clone,
@@ -344,18 +357,25 @@ pub async fn apply_patches(
                                         )
                                         .await;
                                     // Transition the reboot job to
-                                    // Running before invoking the
+                                    // Rebooting before invoking the
                                     // backend reboot command.
                                     if !scheduler_clone.begin_reboot_execution(reboot_job_id).await
                                     {
+                                        // The reboot reservation was lost
+                                        // before the command could start.
+                                        // The patches are applied and the
+                                        // machine is up — mark the patch job
+                                        // completed with a warning. The guard
+                                        // drop will roll back the reservation.
                                         let _ = scheduler_clone
                                             .add_job_log(
                                                 &job_id_clone,
-                                                "Reboot reservation lost before command"
+                                                "Reboot reservation lost before command; \
+                                                 patches applied without reboot"
                                                     .to_string(),
                                             )
                                             .await;
-                                        // Guard drop will roll back.
+                                        let _ = scheduler_clone.complete_job(&job_id_clone).await;
                                     } else {
                                         match backend_clone
                                             .reboot_system(request.reboot_delay_seconds)
@@ -367,7 +387,15 @@ pub async fn apply_patches(
                                                         "Reboot command executed".to_string(),
                                                     )
                                                     .await;
-                                                // Commit: process is about to terminate.
+                                                // Flush the final log so it is
+                                                // durable before the process
+                                                // terminates.
+                                                let _ = scheduler_clone.persist_jobs().await;
+                                                // Commit: process is about to
+                                                // terminate. The patch job
+                                                // STAYS `Rebooting`; orphan
+                                                // recovery completes it on
+                                                // restart.
                                                 let _ = guard.commit();
                                             }
                                             Err(e) => {
@@ -375,7 +403,11 @@ pub async fn apply_patches(
                                                 // roll back the reservation
                                                 // (which also marks the
                                                 // reboot job Failed and
-                                                // reopens admission).
+                                                // reopens admission). The
+                                                // patches are applied and
+                                                // the machine is up, so mark
+                                                // the patch job completed
+                                                // with a reboot-failure log.
                                                 let _ = scheduler_clone
                                                     .rollback_reboot(
                                                         reboot_job_id,
@@ -385,29 +417,45 @@ pub async fn apply_patches(
                                                 let _ = scheduler_clone
                                                     .add_job_log(
                                                         &job_id_clone,
-                                                        format!("Reboot failed: {}", e),
+                                                        format!(
+                                                            "Reboot failed: {} — patches remain applied",
+                                                            e
+                                                        ),
                                                     )
+                                                    .await;
+                                                let _ = scheduler_clone
+                                                    .complete_job(&job_id_clone)
                                                     .await;
                                             }
                                         }
                                     }
                                 }
                                 Err(reboot_err) => {
+                                    // Reboot reservation rejected — patches
+                                    // succeeded but no reboot will happen.
                                     let _ = scheduler_clone
                                         .add_job_log(
                                             &job_id_clone,
                                             format!("Reboot reservation rejected: {}", reboot_err),
                                         )
                                         .await;
+                                    let _ = scheduler_clone.complete_job(&job_id_clone).await;
                                 }
                             }
-                        } else if request.allow_reboot {
-                            let _ = scheduler_clone
-                                .add_job_log(
-                                    &job_id_clone,
-                                    "No reboot required after patching (allow_reboot=true but no reboot-triggering packages applied)".to_string(),
-                                )
-                                .await;
+                        } else {
+                            // No reboot needed — patches succeeded, mark
+                            // completed. (Previously this branched on
+                            // `allow_reboot` only to log; we now always
+                            // complete here and log the no-reboot reason.)
+                            if request.allow_reboot {
+                                let _ = scheduler_clone
+                                    .add_job_log(
+                                        &job_id_clone,
+                                        "No reboot required after patching (allow_reboot=true but no reboot-triggering packages applied)".to_string(),
+                                    )
+                                    .await;
+                            }
+                            let _ = scheduler_clone.complete_job(&job_id_clone).await;
                         }
                     }
                     Err(e) => {

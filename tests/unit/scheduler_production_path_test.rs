@@ -2081,7 +2081,7 @@ async fn caller_cancellation_finalizes_self_update_job() {
 /// `reserve_reboot` creates the reboot job as Pending and then
 /// cancels all pre-existing Pending jobs. The reboot job itself
 /// must NOT be cancelled — it must remain Pending until
-/// `begin_reboot_execution` transitions it to Running.
+/// `begin_reboot_execution` transitions it to Rebooting.
 #[tokio::test]
 async fn reboot_job_not_cancelled_by_own_reservation() {
     let scheduler = Scheduler::new(5, 10);
@@ -2175,7 +2175,7 @@ async fn older_queued_jobs_cancelled_by_reboot_reservation() {
 // =============================================================================
 
 /// `begin_reboot_execution` must transition the reboot job from
-/// Pending to Running. This must happen before the backend reboot
+/// Pending to Rebooting. This must happen before the backend reboot
 /// command is invoked.
 #[tokio::test]
 async fn reboot_owner_reaches_running_before_backend_command() {
@@ -2188,19 +2188,19 @@ async fn reboot_owner_reaches_running_before_backend_command() {
     let job = scheduler.get_job(&reboot_job_id).await.unwrap();
     assert_eq!(job.status, JobStatus::Pending);
 
-    // Transition to Running.
+    // Transition to Rebooting.
     let result = scheduler.begin_reboot_execution(reboot_job_id).await;
     assert!(
         result,
         "begin_reboot_execution should succeed for the owner"
     );
 
-    // After: Running.
+    // After: Rebooting.
     let job = scheduler.get_job(&reboot_job_id).await.unwrap();
     assert_eq!(
         job.status,
-        JobStatus::Running,
-        "reboot job must be Running after begin_reboot_execution"
+        JobStatus::Rebooting,
+        "reboot job must be Rebooting after begin_reboot_execution"
     );
 
     // The reservation must still be held (not cleared by the transition).
@@ -2234,7 +2234,7 @@ async fn backend_failure_marks_reboot_failed_and_reopens_admission() {
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
     let reboot_job_id = guard.commit();
 
-    // Transition to Running (simulating the handler calling
+    // Transition to Rebooting (simulating the handler calling
     // begin_reboot_execution before the backend command).
     assert!(
         scheduler.begin_reboot_execution(reboot_job_id).await,
@@ -2287,7 +2287,7 @@ async fn successful_command_retains_reservation() {
     let guard = scheduler.reserve_reboot(false, false).await.unwrap();
     let reboot_job_id = guard.commit();
 
-    // Transition to Running.
+    // Transition to Rebooting.
     assert!(
         scheduler.begin_reboot_execution(reboot_job_id).await,
         "begin_reboot_execution should succeed"
@@ -2297,12 +2297,12 @@ async fn successful_command_retains_reservation() {
     // back. The reservation is retained.
     // (In production, the process terminates here.)
 
-    // The reboot job must still be Running.
+    // The reboot job must still be Rebooting.
     let job = scheduler.get_job(&reboot_job_id).await.unwrap();
     assert_eq!(
         job.status,
-        JobStatus::Running,
-        "reboot job must remain Running after successful command"
+        JobStatus::Rebooting,
+        "reboot job must remain Rebooting after successful command"
     );
 
     // The reservation must still be held.

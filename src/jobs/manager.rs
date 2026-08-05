@@ -12,6 +12,11 @@ use uuid::Uuid;
 pub enum JobStatus {
     Pending,
     Running,
+    /// Patches were applied (or a reboot was reserved) and the agent is
+    /// awaiting a system reboot to complete the operation. The job is
+    /// not terminal: on agent restart, orphan recovery marks it
+    /// `Completed` (the restart itself proves the reboot fired).
+    Rebooting,
     Completed,
     Failed,
     Cancelled,
@@ -24,11 +29,23 @@ impl JobStatus {
         match self {
             JobStatus::Pending => "pending",
             JobStatus::Running => "running",
+            JobStatus::Rebooting => "rebooting",
             JobStatus::Completed => "completed",
             JobStatus::Failed => "failed",
             JobStatus::Cancelled => "cancelled",
             JobStatus::TimedOut => "timed_out",
         }
+    }
+
+    /// Whether this status counts as "active" — occupying a slot and
+    /// blocking admission / self-update / reboot. Pending, Running, and
+    /// Rebooting are all active: a Rebooting job means the system is
+    /// mid-reboot and new mutations must not start.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            JobStatus::Pending | JobStatus::Running | JobStatus::Rebooting
+        )
     }
 }
 
@@ -131,6 +148,20 @@ impl Job {
         self.completed_at = Some(Utc::now());
         self.updated_at = self.completed_at.unwrap();
         self.add_log(String::from("Job completed successfully"));
+    }
+
+    /// Transition a job to the `Rebooting` status — the underlying
+    /// operation (e.g. patch apply) succeeded and the agent is now
+    /// awaiting a system reboot to finish. This is NOT terminal: the
+    /// job must not set `completed_at` or `progress = 100`, since the
+    /// operation is not yet complete. On agent restart, orphan recovery
+    /// marks a `Rebooting` job `Completed` (the restart proves the
+    /// reboot fired).
+    pub fn set_rebooting(&mut self, message: String) {
+        self.status = JobStatus::Rebooting;
+        self.message = message;
+        self.updated_at = Utc::now();
+        self.add_log(String::from("Patches applied; awaiting reboot"));
     }
 
     /// Mark job as failed
