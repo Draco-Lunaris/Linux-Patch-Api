@@ -14,8 +14,20 @@ use super::error_utils::CommandError;
 /// State file path for cache persistence
 const CACHE_STATE_PATH: &str = "/var/lib/linux_patch_api/state/cache.json";
 
-/// Default stale threshold: 15 minutes
-pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 15 * 60;
+/// Default stale threshold: 1 hour.
+///
+/// A fleet of agents all refreshing their package index at the same instant
+/// would overwhelm upstream mirrors. The default is therefore 1 hour, and
+/// each agent adds a random 0-300 second jitter at startup (see
+/// [`PackageCacheState::with_threshold`]) so refreshes are staggered across
+/// the fleet.
+pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 60 * 60;
+
+/// Maximum random jitter (in seconds) added to the stale threshold at agent
+/// startup. Each agent picks a value in `0..=JITTER_MAX_SECS` once and holds
+/// it for the lifetime of the process, so its effective threshold is stable
+/// across refreshes but different from other hosts.
+pub const JITTER_MAX_SECS: u64 = 300;
 
 /// Cache refresh command timeout: 300 seconds.
 ///
@@ -45,6 +57,9 @@ pub struct PackageCacheStatus {
 pub struct PackageCacheState {
     inner: Mutex<CacheStateInner>,
     stale_threshold_secs: u64,
+    /// Per-agent random jitter (0..=JITTER_MAX_SECS) generated once at startup.
+    /// The effective stale threshold is `stale_threshold_secs + jitter_secs`.
+    jitter_secs: u64,
 }
 
 struct CacheStateInner {
@@ -65,7 +80,23 @@ impl PackageCacheState {
     }
 
     /// Create a cache state with a custom stale threshold (in seconds).
+    ///
+    /// A random jitter of `0..=JITTER_MAX_SECS` seconds is generated once and
+    /// added to `stale_threshold_secs` so that a fleet of agents does not all
+    /// cross the stale threshold at the same instant and hammer upstream
+    /// package mirrors simultaneously.
     pub fn with_threshold(stale_threshold_secs: u64) -> Self {
+        use rand::Rng as _;
+        let jitter_secs = rand::thread_rng().gen_range(0..=JITTER_MAX_SECS);
+        Self::with_threshold_and_jitter(stale_threshold_secs, jitter_secs)
+    }
+
+    /// Create a cache state with an explicit jitter value.
+    ///
+    /// Primarily useful for tests that need deterministic behavior. In
+    /// production, use [`with_threshold`](Self::with_threshold) which
+    /// generates the jitter randomly.
+    pub fn with_threshold_and_jitter(stale_threshold_secs: u64, jitter_secs: u64) -> Self {
         // Try to load from state file on startup
         let inner = match Self::load_state_file() {
             Some(state) => CacheStateInner {
@@ -85,7 +116,23 @@ impl PackageCacheState {
         Self {
             inner: Mutex::new(inner),
             stale_threshold_secs,
+            jitter_secs,
         }
+    }
+
+    /// Returns the configured stale threshold (without jitter).
+    pub fn base_threshold_secs(&self) -> u64 {
+        self.stale_threshold_secs
+    }
+
+    /// Returns the per-agent jitter applied on top of the base threshold.
+    pub fn jitter_secs(&self) -> u64 {
+        self.jitter_secs
+    }
+
+    /// Returns the effective stale threshold (base + jitter) in seconds.
+    pub fn effective_threshold_secs(&self) -> u64 {
+        self.stale_threshold_secs.saturating_add(self.jitter_secs)
     }
 
     pub fn status(&self) -> PackageCacheStatus {
@@ -102,7 +149,7 @@ impl PackageCacheState {
         match inner.last_update {
             None => true,
             Some(t) => {
-                let threshold = Duration::from_secs(self.stale_threshold_secs);
+                let threshold = Duration::from_secs(self.effective_threshold_secs());
                 Utc::now() - t
                     > chrono::Duration::from_std(threshold).unwrap_or(chrono::TimeDelta::MAX)
             }
@@ -344,6 +391,49 @@ mod tests {
         // This test may vary based on state file existence,
         // but we can at least call is_stale without panic
         let _ = state.is_stale();
+    }
+
+    #[test]
+    fn test_jitter_within_bounds() {
+        for _ in 0..100 {
+            let state = PackageCacheState::with_threshold(3600);
+            assert!(state.jitter_secs() <= JITTER_MAX_SECS);
+        }
+    }
+
+    #[test]
+    fn test_effective_threshold_is_base_plus_jitter() {
+        let state = PackageCacheState::with_threshold_and_jitter(3600, 42);
+        assert_eq!(state.base_threshold_secs(), 3600);
+        assert_eq!(state.jitter_secs(), 42);
+        assert_eq!(state.effective_threshold_secs(), 3642);
+    }
+
+    #[test]
+    fn test_is_stale_respects_jitter() {
+        // With a 0-second threshold and 0 jitter, the cache is stale
+        // immediately after a successful update (since any elapsed time > 0).
+        let state = PackageCacheState::with_threshold_and_jitter(0, 0);
+        state.update_success();
+        // Sleep a tiny bit so elapsed > 0.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(state.is_stale(), "cache should be stale with 0 threshold");
+
+        // With a large threshold and 0 jitter, it should not be stale.
+        let state = PackageCacheState::with_threshold_and_jitter(3600, 0);
+        state.update_success();
+        assert!(
+            !state.is_stale(),
+            "cache should not be stale within threshold"
+        );
+
+        // With a large threshold but jitter applied, still not stale.
+        let state = PackageCacheState::with_threshold_and_jitter(3600, 300);
+        state.update_success();
+        assert!(
+            !state.is_stale(),
+            "cache should not be stale within threshold+jitter"
+        );
     }
 
     #[test]

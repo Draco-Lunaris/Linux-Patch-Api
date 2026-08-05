@@ -162,13 +162,15 @@ fn default_backend() -> String {
 pub struct CacheConfig {
     /// How long before the package index (apt-get update) is considered stale
     /// and must be refreshed before serving patch/package data. In seconds.
-    /// Default: 900 (15 minutes).
+    /// Default: 3600 (1 hour). A per-agent random jitter of 0-300 seconds is
+    /// added at startup so a fleet of agents does not all refresh simultaneously
+    /// and overwhelm upstream package mirrors.
     #[serde(default = "default_cache_stale_threshold_secs")]
     pub stale_threshold_secs: u64,
 }
 
 fn default_cache_stale_threshold_secs() -> u64 {
-    900 // 15 minutes
+    3600 // 1 hour
 }
 
 impl Default for CacheConfig {
@@ -723,7 +725,7 @@ enrollment:
     #[test]
     fn test_cache_config_defaults() {
         let config = CacheConfig::default();
-        assert_eq!(config.stale_threshold_secs, 900); // 15 minutes
+        assert_eq!(config.stale_threshold_secs, 3600); // 1 hour
     }
 
     #[test]
@@ -748,6 +750,6 @@ logging:
   level: "info"
 "#;
         let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.cache.stale_threshold_secs, 900); // 15 min default
+        assert_eq!(config.cache.stale_threshold_secs, 3600); // 1 hour default
     }
 }
