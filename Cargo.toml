@@ -1,6 +1,6 @@
 [package]
 name = "linux-patch-api"
-version = "2.6.13"
+version = "2.6.14"
 edition = "2021"
 authors = ["Draco-Lunaris-Echo"]
 license = "MIT"
@@ -108,6 +108,14 @@ path = "tests/unit/scheduler_production_path_test.rs"
 [[test]]
 name = "service_file_test"
 path = "tests/unit/service_file_test.rs"
+
+[[test]]
+name = "reboot_status_test"
+path = "tests/unit/reboot_status_test.rs"
+
+[[test]]
+name = "persistence_test"
+path = "tests/unit/persistence_test.rs"
 
 [[bench]]
 name = "api_benchmarks"

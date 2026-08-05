@@ -33,6 +33,7 @@ use linux_patch_api::auth::{
 };
 use linux_patch_api::config::loader::{validate_certs, CertStatus};
 use linux_patch_api::enroll;
+use linux_patch_api::jobs::manager::JobStatus;
 use linux_patch_api::jobs::scheduler::Scheduler;
 use linux_patch_api::packages::cache::PackageCacheState;
 use linux_patch_api::packages::create_backend;
@@ -266,21 +267,43 @@ async fn main() -> Result<()> {
         "Unified scheduler initialized"
     );
 
-    // Recover orphaned jobs from a previous boot.
-    // If the agent restarted (e.g. after auto-reboot from patching, or the
-    // postinst restart during a self-update), any jobs that were running are
-    // lost from memory. Load them from disk and give each a terminal status
-    // so the manager sees the outcome. A self-update orphan means the upgrade
-    // succeeded (the restart proves it); anything else is marked failed.
-    let orphaned_jobs = linux_patch_api::jobs::persistence::load_orphaned_jobs().await;
-    if !orphaned_jobs.is_empty() {
+    // Recover job state from a previous boot.
+    //
+    // The agent persists the full job history to disk. On startup we load
+    // every persisted job and split it into two groups:
+    //   - terminal jobs (Completed/Failed/Cancelled/TimedOut): reloaded
+    //     as-is so the manager can still query them after a restart; and
+    //   - non-terminal jobs (Pending/Running/Rebooting): genuine orphans
+    //     from a crash or reboot during execution. Each is given a
+    //     terminal status: a `SelfUpdate` orphan means the upgrade
+    //     succeeded (the restart proves it); a `Rebooting` orphan means
+    //     the reboot fired and is marked `Completed`; anything else is a
+    //     real crash mid-mutation and is marked `Failed` (AGENT_REBOOTED).
+    let loaded_jobs = linux_patch_api::jobs::persistence::load_all_jobs().await;
+    let (terminal, non_terminal): (Vec<_>, Vec<_>) = loaded_jobs.into_iter().partition(|j| {
+        matches!(
+            j.status,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled | JobStatus::TimedOut
+        )
+    });
+    if !terminal.is_empty() {
         info!(
-            count = orphaned_jobs.len(),
-            "Recovered orphaned jobs from previous boot — resolving terminal status"
+            count = terminal.len(),
+            "Loaded terminal job history from previous boot"
         );
-        scheduler.recover_orphaned_jobs(&orphaned_jobs).await;
+        scheduler.load_history(&terminal).await;
+    }
+    if !non_terminal.is_empty() {
+        info!(
+            count = non_terminal.len(),
+            "Recovered non-terminal jobs from previous boot — resolving terminal status"
+        );
+        scheduler.recover_orphaned_jobs(&non_terminal).await;
+        // Flush the resolved terminal statuses to the history file so a
+        // second restart before the manager polls still sees the outcome.
+        scheduler.persist_jobs().await;
     } else {
-        debug!("No orphaned jobs found from previous boot");
+        debug!("No non-terminal jobs found from previous boot");
     }
 
     // Initialize package manager backend

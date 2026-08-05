@@ -174,14 +174,10 @@ impl Scheduler {
         self.state.lock().await.admission
     }
 
-    /// Count active (running + pending) jobs.
+    /// Count active (running + pending + rebooting) jobs.
     pub async fn active_count(&self) -> usize {
         let state = self.state.lock().await;
-        state
-            .jobs
-            .values()
-            .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
-            .count()
+        state.jobs.values().filter(|j| j.status.is_active()).count()
     }
 
     /// Count running jobs only.
@@ -256,11 +252,7 @@ impl Scheduler {
             return Err(SelfUpdateAdmissionError::JobsInProgress { count: 1 });
         }
 
-        let active_count = state
-            .jobs
-            .values()
-            .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
-            .count();
+        let active_count = state.jobs.values().filter(|j| j.status.is_active()).count();
         if active_count > 0 {
             return Err(SelfUpdateAdmissionError::JobsInProgress {
                 count: active_count,
@@ -336,100 +328,103 @@ impl Scheduler {
         force: bool,
         ack_corruption_risk: bool,
     ) -> Result<RebootReservationGuard, RebootAdmissionError> {
-        let mut state = self.state.lock().await;
+        let job_id = {
+            let mut state = self.state.lock().await;
 
-        if state.admission != AdmissionMode::Open {
-            return Err(RebootAdmissionError::AdmissionClosed);
-        }
-        // A second reboot is never allowed.
-        if state.reboot_pending.is_some() {
-            return Err(RebootAdmissionError::JobsInProgress { count: 1 });
-        }
-
-        let self_update_active = state.self_update.is_some();
-        let mutation_active = state.active_mutation.is_some();
-        let active_jobs = state
-            .jobs
-            .values()
-            .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
-            .count();
-
-        if !force {
-            if self_update_active {
-                return Err(RebootAdmissionError::SelfUpdateInProgress);
+            if state.admission != AdmissionMode::Open {
+                return Err(RebootAdmissionError::AdmissionClosed);
             }
-            if active_jobs > 0 {
-                return Err(RebootAdmissionError::JobsInProgress { count: active_jobs });
+            // A second reboot is never allowed.
+            if state.reboot_pending.is_some() {
+                return Err(RebootAdmissionError::JobsInProgress { count: 1 });
             }
-        }
 
-        if force && !ack_corruption_risk && (self_update_active || mutation_active) {
-            if self_update_active {
-                return Err(RebootAdmissionError::SelfUpdateInProgress);
+            let self_update_active = state.self_update.is_some();
+            let mutation_active = state.active_mutation.is_some();
+            let active_jobs = state.jobs.values().filter(|j| j.status.is_active()).count();
+
+            if !force {
+                if self_update_active {
+                    return Err(RebootAdmissionError::SelfUpdateInProgress);
+                }
+                if active_jobs > 0 {
+                    return Err(RebootAdmissionError::JobsInProgress { count: active_jobs });
+                }
             }
-            return Err(RebootAdmissionError::PackageMutationInProgress);
-        }
 
-        if force && ack_corruption_risk && (self_update_active || mutation_active) {
-            tracing::error!(
+            if force && !ack_corruption_risk && (self_update_active || mutation_active) {
+                if self_update_active {
+                    return Err(RebootAdmissionError::SelfUpdateInProgress);
+                }
+                return Err(RebootAdmissionError::PackageMutationInProgress);
+            }
+
+            if force && ack_corruption_risk && (self_update_active || mutation_active) {
+                tracing::error!(
                 self_update_active,
                 mutation_active,
                 "AUDIT: Forced reboot accepted with package-database corruption risk acknowledged"
             );
-        }
-
-        if active_jobs >= state.max_queue_depth {
-            return Err(RebootAdmissionError::QueueFull);
-        }
-
-        let job = Job::new(JobOperation::Reboot, vec![]);
-        let job_id = job.id;
-        state.reboot_pending = Some(job_id);
-        state.jobs.insert(job_id, job);
-        emit_event(
-            &state,
-            "job_status",
-            &job_id,
-            &JobStatus::Pending,
-            0,
-            "Job created",
-        );
-
-        // Cancel pre-existing pending jobs: a reboot reservation means
-        // the machine is expected to terminate. Pending jobs must not
-        // wait indefinitely — mark them terminal now.
-        //
-        // CRITICAL: exclude the reboot owner's own job_id from
-        // cancellation. The reboot job was just inserted as Pending
-        // above. It must stay Pending until the reboot command begins,
-        // at which point `begin_reboot_execution` transitions it to
-        // Running.
-        let mut to_fail = Vec::new();
-        for (id, j) in state.jobs.iter() {
-            if *id != job_id && matches!(j.status, JobStatus::Pending) {
-                to_fail.push(*id);
             }
-        }
-        for id in to_fail {
-            if let Some(j) = state.jobs.get_mut(&id) {
-                j.status = JobStatus::Failed;
-                j.error = Some("Cancelled: reboot reservation in progress".to_string());
-                j.completed_at = Some(Utc::now());
-                j.updated_at = j.completed_at.unwrap();
-                j.add_log("Job cancelled by reboot reservation".to_string());
-                let event_data = (j.status.clone(), j.progress, j.message.clone());
-                emit_event(
-                    &state,
-                    "job_status",
-                    &id,
-                    &event_data.0,
-                    event_data.1,
-                    &event_data.2,
-                );
-            }
-        }
 
-        state.notify.notify_one();
+            if active_jobs >= state.max_queue_depth {
+                return Err(RebootAdmissionError::QueueFull);
+            }
+
+            let job = Job::new(JobOperation::Reboot, vec![]);
+            let job_id = job.id;
+            state.reboot_pending = Some(job_id);
+            state.jobs.insert(job_id, job);
+            emit_event(
+                &state,
+                "job_status",
+                &job_id,
+                &JobStatus::Pending,
+                0,
+                "Job created",
+            );
+
+            // Cancel pre-existing pending jobs: a reboot reservation means
+            // the machine is expected to terminate. Pending jobs must not
+            // wait indefinitely — mark them terminal now.
+            //
+            // CRITICAL: exclude the reboot owner's own job_id from
+            // cancellation. The reboot job was just inserted as Pending
+            // above. It must stay Pending until the reboot command begins,
+            // at which point `begin_reboot_execution` transitions it to
+            // Running.
+            let mut to_fail = Vec::new();
+            for (id, j) in state.jobs.iter() {
+                if *id != job_id && matches!(j.status, JobStatus::Pending) {
+                    to_fail.push(*id);
+                }
+            }
+            for id in to_fail {
+                if let Some(j) = state.jobs.get_mut(&id) {
+                    j.status = JobStatus::Failed;
+                    j.error = Some("Cancelled: reboot reservation in progress".to_string());
+                    j.completed_at = Some(Utc::now());
+                    j.updated_at = j.completed_at.unwrap();
+                    j.add_log("Job cancelled by reboot reservation".to_string());
+                    let event_data = (j.status.clone(), j.progress, j.message.clone());
+                    emit_event(
+                        &state,
+                        "job_status",
+                        &id,
+                        &event_data.0,
+                        event_data.1,
+                        &event_data.2,
+                    );
+                }
+            }
+
+            state.notify.notify_one();
+            job_id
+        };
+
+        // Persist the newly-created reboot job (and any cancelled pending jobs)
+        // so the reservation survives an agent restart. Lock is released above.
+        self.persist_jobs().await;
 
         Ok(RebootReservationGuard {
             scheduler: self.clone(),
@@ -463,31 +458,37 @@ impl Scheduler {
     /// current owner. This is the only way `reboot_pending` is cleared
     /// on failure — never unconditionally.
     pub async fn rollback_reboot(&self, job_id: Uuid, error: Option<String>) -> bool {
-        let mut state = self.state.lock().await;
-        if state.reboot_pending != Some(job_id) {
-            return false;
-        }
-        state.reboot_pending = None;
-        if let Some(job) = state.jobs.get_mut(&job_id) {
-            if let Some(err) = error {
-                job.fail(err);
-            } else {
-                job.status = JobStatus::Cancelled;
-                job.message = "Reboot reservation rolled back".to_string();
-                job.completed_at = Some(Utc::now());
-                job.updated_at = job.completed_at.unwrap();
+        let rolled_back = {
+            let mut state = self.state.lock().await;
+            if state.reboot_pending != Some(job_id) {
+                return false;
             }
-            let event_data = (job.status.clone(), job.progress, job.message.clone());
-            emit_event(
-                &state,
-                "job_status",
-                &job_id,
-                &event_data.0,
-                event_data.1,
-                &event_data.2,
-            );
+            state.reboot_pending = None;
+            if let Some(job) = state.jobs.get_mut(&job_id) {
+                if let Some(err) = error {
+                    job.fail(err);
+                } else {
+                    job.status = JobStatus::Cancelled;
+                    job.message = "Reboot reservation rolled back".to_string();
+                    job.completed_at = Some(Utc::now());
+                    job.updated_at = job.completed_at.unwrap();
+                }
+                let event_data = (job.status.clone(), job.progress, job.message.clone());
+                emit_event(
+                    &state,
+                    "job_status",
+                    &job_id,
+                    &event_data.0,
+                    event_data.1,
+                    &event_data.2,
+                );
+            }
+            state.notify.notify_one();
+            true
+        };
+        if rolled_back {
+            self.persist_jobs().await;
         }
-        state.notify.notify_one();
         true
     }
 
@@ -510,15 +511,24 @@ impl Scheduler {
     ///   - On success: retain the committed reservation (the process
     ///     is expected to terminate).
     pub async fn begin_reboot_execution(&self, job_id: Uuid) -> bool {
-        let mut state = self.state.lock().await;
-        if state.reboot_pending != Some(job_id) {
-            return false;
-        }
-        if let Some(job) = state.jobs.get_mut(&job_id) {
+        // Mutate under the lock; persist after releasing (persist_jobs
+        // re-acquires the lock, so it must not be called while held).
+        let transitioned = {
+            let mut state = self.state.lock().await;
+            if state.reboot_pending != Some(job_id) {
+                return false;
+            }
+            let Some(job) = state.jobs.get_mut(&job_id) else {
+                return false;
+            };
             if job.status != JobStatus::Pending {
                 return false;
             }
-            job.status = JobStatus::Running;
+            // Reboot is a system operation, not a package-manager command.
+            // Use the dedicated `Rebooting` status (not `Running`) so the
+            // manager sees an unambiguous in-progress reboot state and so
+            // orphan recovery recognises it on restart.
+            job.status = JobStatus::Rebooting;
             job.updated_at = Utc::now();
             job.add_log("Reboot command starting".to_string());
             let event_data = (job.status.clone(), job.progress, job.message.clone());
@@ -530,9 +540,58 @@ impl Scheduler {
                 event_data.1,
                 &event_data.2,
             );
-            return true;
+            state.notify.notify_one();
+            true
+        };
+        if transitioned {
+            self.persist_jobs().await;
         }
-        false
+        true
+    }
+
+    /// Transition a job to the `Rebooting` status — the underlying
+    /// operation (e.g. patch apply) succeeded and the agent is now
+    /// awaiting a system reboot to complete it. Only valid for a job
+    /// currently `Running`. Persists state to disk so the `Rebooting`
+    /// status (and accumulated logs) survive an agent restart; orphan
+    /// recovery then marks the job `Completed` on the next boot.
+    ///
+    /// This is the core fix for premature "completed" reporting: the
+    /// patch job stays `Rebooting` (not `Completed`) until the reboot
+    /// resolves, so the manager sees an accurate in-progress state.
+    pub async fn set_job_rebooting(&self, job_id: &Uuid, message: String) -> Result<()> {
+        let transitioned = {
+            let mut state = self.state.lock().await;
+            let Some(job) = state.jobs.get_mut(job_id) else {
+                return Err(anyhow::anyhow!(
+                    "set_job_rebooting: job {} not found",
+                    job_id
+                ));
+            };
+            if job.status != JobStatus::Running {
+                return Err(anyhow::anyhow!(
+                    "set_job_rebooting: job {} is not Running (status={:?})",
+                    job_id,
+                    job.status
+                ));
+            }
+            job.set_rebooting(message);
+            let event_data = (job.status.clone(), job.progress, job.message.clone());
+            emit_event(
+                &state,
+                "job_status",
+                job_id,
+                &event_data.0,
+                event_data.1,
+                &event_data.2,
+            );
+            state.notify.notify_one();
+            true
+        };
+        if transitioned {
+            self.persist_jobs().await;
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -789,6 +848,17 @@ impl Scheduler {
                                 event_data.1,
                                 &event_data.2,
                             );
+                        } else {
+                            // Defensive: the job is not Running/Pending (e.g.
+                            // it has already transitioned to Rebooting or a
+                            // terminal state via another path). Do NOT
+                            // overwrite it — a stale watchdog must not clobber
+                            // a Rebooting job (which orphan recovery owns).
+                            tracing::warn!(
+                                job_id = %job_id_owned,
+                                status = ?job.status,
+                                "Watchdog: job not Running/Pending, leaving status as-is"
+                            );
                         }
                     }
                 }
@@ -843,10 +913,14 @@ impl Scheduler {
     ) -> Result<()> {
         let mut state = self.state.lock().await;
 
-        // max_concurrent: if a job is being transitioned to Running,
-        // enforce. We do NOT call this from handler dispatch; we only
-        // allow this for jobs already running.
-        if status == JobStatus::Running {
+        // max_concurrent: if a job is being transitioned to Running (or
+        // Rebooting, which likewise occupies a slot), enforce. We do NOT
+        // call this from handler dispatch; the production reboot path
+        // uses `set_job_rebooting`. This guard prevents a manual
+        // `update_job` call from bypassing slot enforcement. The count is
+        // Running-only — a Rebooting job is no longer consuming a mutation
+        // slot (the mutation finished; it is awaiting reboot).
+        if status == JobStatus::Running || status == JobStatus::Rebooting {
             let already_running = state
                 .jobs
                 .get(job_id)
@@ -984,23 +1058,35 @@ impl Scheduler {
     }
 
     pub async fn delete_job(&self, job_id: &Uuid) -> Result<bool> {
-        let mut state = self.state.lock().await;
-        if let Some(job) = state.jobs.get(job_id) {
-            if matches!(
-                job.status,
-                JobStatus::Completed
-                    | JobStatus::Failed
-                    | JobStatus::Cancelled
-                    | JobStatus::TimedOut
-            ) {
-                state.jobs.remove(job_id);
-                return Ok(true);
+        let removed = {
+            let mut state = self.state.lock().await;
+            if let Some(job) = state.jobs.get(job_id) {
+                if matches!(
+                    job.status,
+                    JobStatus::Completed
+                        | JobStatus::Failed
+                        | JobStatus::Cancelled
+                        | JobStatus::TimedOut
+                ) {
+                    state.jobs.remove(job_id);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+        if removed {
+            // Sync the removal to the durable history file.
+            self.persist_jobs().await;
         }
-        Ok(false)
+        Ok(removed)
     }
 
-    /// Get all jobs that are currently running or pending — for persistence.
+    /// Get all jobs that are currently running or pending — used for
+    /// admission/active-count queries. (Persistence now writes all jobs;
+    /// see `persist_jobs`.)
     pub async fn get_active_jobs(&self) -> Vec<Job> {
         let state = self.state.lock().await;
         state
@@ -1011,18 +1097,30 @@ impl Scheduler {
             .collect()
     }
 
+    /// Get every job regardless of status — for durable history persistence.
+    pub async fn get_all_jobs(&self) -> Vec<Job> {
+        let state = self.state.lock().await;
+        state.jobs.values().cloned().collect()
+    }
+
     /// Recover orphaned jobs (from a previous boot) into terminal states.
     ///
-    /// Called on startup with the jobs loaded from the persistence file.
-    /// Each job is inserted into the scheduler with a terminal status so the
-    /// manager can see the outcome when it polls.
+    /// Called on startup with the non-terminal jobs loaded from the
+    /// persistence file. Each is inserted into the scheduler with a terminal
+    /// status so the manager can see the outcome when it polls.
     ///
-    /// The terminal status depends on the operation:
+    /// The terminal status depends on the persisted status and operation:
     /// - `SelfUpdate`: the job is orphaned *because* the postinst restart
     ///   killed the old process mid-flight. The new binary is running, which
     ///   means the upgrade succeeded — mark `Completed`.
-    /// - anything else: a genuine orphan (crash / reboot during execution) —
-    ///   mark `Failed` with `AGENT_REBOOTED`.
+    /// - persisted status `Rebooting` (any operation): the agent was
+    ///   awaiting a reboot-driven restart. The fact that recovery is running
+    ///   means the reboot fired and the machine came back — mark `Completed`,
+    ///   preserving the job's accumulated logs. This covers both a `Reboot`
+    ///   job and a `PatchApply` job that transitioned to `Rebooting` after
+    ///   patches were applied.
+    /// - anything else (genuine `Running`/`Pending` orphan): a crash or
+    ///   power loss during execution — mark `Failed` with `AGENT_REBOOTED`.
     pub async fn recover_orphaned_jobs(&self, orphaned_jobs: &[Job]) {
         if orphaned_jobs.is_empty() {
             return;
@@ -1032,6 +1130,7 @@ impl Scheduler {
         for orphaned in orphaned_jobs {
             let now = Utc::now();
             let is_self_update = matches!(orphaned.operation, JobOperation::SelfUpdate);
+            let was_rebooting = orphaned.status == JobStatus::Rebooting;
 
             let job = if is_self_update {
                 // The only way a self-update job is orphaned is if the
@@ -1061,6 +1160,31 @@ impl Scheduler {
                     rollback_job_id: None,
                     exclusive_mode: false,
                 }
+            } else if was_rebooting {
+                // The agent was mid-reboot when it died. Recovery running
+                // means the reboot fired and the host came back. Preserve
+                // the accumulated logs and append a recovery marker.
+                let mut logs = orphaned.logs.clone();
+                logs.push("Agent restarted after reboot — marking completed".to_string());
+                Job {
+                    id: orphaned.id,
+                    status: JobStatus::Completed,
+                    operation: orphaned.operation.clone(),
+                    created_at: orphaned.created_at,
+                    updated_at: now,
+                    completed_at: Some(now),
+                    packages: orphaned.packages.clone(),
+                    progress: 100,
+                    message: "Reboot completed — agent restarted after patching".to_string(),
+                    logs,
+                    error: None,
+                    error_code: None,
+                    exit_code: None,
+                    command_stdout: None,
+                    command_stderr: None,
+                    rollback_job_id: orphaned.rollback_job_id,
+                    exclusive_mode: orphaned.exclusive_mode,
+                }
             } else {
                 Job {
                     id: orphaned.id,
@@ -1088,6 +1212,12 @@ impl Scheduler {
                     job_id = %orphaned.id,
                     "Recovered orphaned self-update — marked as completed (restart proves upgrade succeeded)"
                 );
+            } else if was_rebooting {
+                tracing::info!(
+                    job_id = %orphaned.id,
+                    op = ?orphaned.operation,
+                    "Recovered orphaned Rebooting job — marked completed (restart proves reboot fired)"
+                );
             } else {
                 tracing::info!(
                     job_id = %orphaned.id,
@@ -1099,10 +1229,36 @@ impl Scheduler {
         }
     }
 
-    /// Persist current running/pending jobs to disk.
+    /// Load terminal jobs from the previous boot back into scheduler state
+    /// as durable history. Called on startup with jobs that were already
+    /// terminal when the agent last shut down (Completed/Failed/Cancelled/
+    /// TimedOut). They are inserted as-is so the manager can still query
+    /// them after a restart. No events are emitted (no WebSocket clients at
+    /// startup).
+    pub async fn load_history(&self, history_jobs: &[Job]) {
+        if history_jobs.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().await;
+        for job in history_jobs {
+            state.jobs.insert(job.id, job.clone());
+        }
+        tracing::info!(
+            count = history_jobs.len(),
+            "Loaded terminal job history from previous boot"
+        );
+    }
+
+    /// Persist the full job history to disk.
+    ///
+    /// Clones all jobs under the state lock, releases the lock, then writes
+    /// the file — so this is deadlock-safe to call from lifecycle methods
+    /// after their locked section completes. Writes ALL jobs (including
+    /// terminal) so the manager can query completed jobs after an agent
+    /// restart. Retention trimming is applied by the persistence layer.
     pub async fn persist_jobs(&self) {
-        let active = self.get_active_jobs().await;
-        crate::jobs::persistence::persist_running_jobs(&active).await;
+        let all_jobs = self.get_all_jobs().await;
+        crate::jobs::persistence::persist_all_jobs(&all_jobs).await;
     }
 
     pub async fn create_rollback_job(
@@ -1578,11 +1734,7 @@ fn admit_job_inner(
         return Err(JobAdmissionError::AdmissionFrozen);
     }
 
-    let active_count = state
-        .jobs
-        .values()
-        .filter(|j| j.status == JobStatus::Running || j.status == JobStatus::Pending)
-        .count();
+    let active_count = state.jobs.values().filter(|j| j.status.is_active()).count();
     if active_count >= state.max_queue_depth {
         return Err(JobAdmissionError::QueueFull);
     }
