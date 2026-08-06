@@ -98,21 +98,42 @@ if [ "$1" = "configure" ]; then
         echo "Upgrading linux-patch-api from $2 ..."
         # DO NOT touch: config.yaml, whitelist.yaml, certs/, CRL
         systemctl daemon-reload
-        
-        # Restart the service immediately to pick up the new binary.
+
+        # Schedule a DELAYED restart from a transient unit that runs in its
+        # OWN cgroup, outside linux-patch-api.service. Do NOT restart the
+        # agent immediately here.
         #
-        # This is safe because the agent spawns package-manager processes
-        # (apt-get, dpkg) in their own process group (process_group(0)),
-        # so systemd's KillMode=control-group only kills the agent process —
-        # not the apt-get/dpkg transaction that invoked this postinst.
-        # The package operation completes in its own process group while
-        # the new agent binary starts fresh.
+        # Why immediate restart is unsafe: this postinst runs INSIDE the
+        # apt/dpkg transaction that the agent itself launched (the agent's
+        # self-update runs apt-get/dpkg as a child process in the agent's
+        # systemd cgroup). The unit has no explicit KillMode, so it defaults
+        # to KillMode=control-group, which kills the ENTIRE agent cgroup —
+        # including the apt/dpkg process that is still mid-configure when
+        # this script returns. dpkg dies mid-configure ("dpkg failed
+        # (signal)"), the package is left half-configured, and the agent's
+        # own periodic `dpkg --configure -a` pre-flight re-runs this postinst
+        # on the next health check, killing dpkg again — an infinite crash
+        # loop that bricks the host on a half-configured package and blocks
+        # all future upgrades. This exact bug left 6 hosts crash-looping on
+        # a half-configured 2.6.14 during the 2.6.15 rollout.
         #
-        # Use --no-block so the postinst doesn't wait for the service to
-        # stop (which would deadlock with the agent's SIGTERM handler
-        # waiting for apt-get to finish). --no-block returns immediately;
-        # the agent process is killed by systemd shortly after.
-        systemctl restart --no-block linux-patch-api.service
+        # `process_group(0)`/setsid does NOT prevent this: setsid creates a
+        # new session/process group but does NOT escape a systemd cgroup
+        # (cgroup membership is inherited and unchanged by setsid), so
+        # KillMode=control-group still reaches the apt/dpkg child.
+        #
+        # Fix: `systemd-run` launches the restart in a new transient unit
+        # (lpa-postinst-restart) in its own cgroup, decoupled from the
+        # agent's cgroup. The 30s --on-active delay lets dpkg/apt finish
+        # configuring this package (and any pending triggers) BEFORE the
+        # agent's cgroup is torn down and the new binary starts. --collect
+        # garbage-collects the transient unit after it fires, so the unit
+        # name is reusable on the next upgrade. If a previous scheduled
+        # restart is still lingering (rapid re-upgrade), reset it first.
+        systemctl reset-failed lpa-postinst-restart.service 2>/dev/null || true
+        systemd-run --on-active=30s --unit=lpa-postinst-restart \
+            --description="Linux Patch API post-upgrade restart" --collect \
+            -- systemctl restart linux-patch-api.service
     fi
 fi
 

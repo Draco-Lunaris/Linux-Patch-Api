@@ -6,9 +6,9 @@ set -e
 
 # Stop the service before removal only — NOT on upgrade.
 # On upgrade, dpkg replaces files on disk while the old binary keeps
-# running. The postinst triggers an immediate restart to load the
-# new binary. Process-group isolation protects the dpkg transaction
-# from the service restart.
+# running, then the postinst schedules a delayed restart (via
+# systemd-run --on-active) that fires AFTER dpkg finishes, so the
+# in-flight dpkg transaction is never killed by the restart.
 if [ "$1" = "remove" ]; then
     echo "Stopping linux-patch-api service for removal..."
     
