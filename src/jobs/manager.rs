@@ -121,6 +121,18 @@ impl Job {
         }
     }
 
+    /// Internal bookkeeping job — a background cache-refresh anchor, not a real
+    /// package mutation. Admitted with sentinel package names (`__*__`) purely to
+    /// track the dispatch on the scheduler job map (see `system.rs`
+    /// `__health_refresh__` and `patches.rs` `__patch_list_refresh__`). These
+    /// must never block agent self-update, reboots, or queue capacity, and must
+    /// never hold the mutation slot longer than the refresh timeout.
+    pub fn is_internal(&self) -> bool {
+        self.packages
+            .iter()
+            .any(|p| p.starts_with("__") && p.ends_with("__"))
+    }
+
     /// Add a log entry
     pub fn add_log(&mut self, message: String) {
         self.logs.push(message);

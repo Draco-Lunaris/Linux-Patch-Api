@@ -60,10 +60,12 @@ use anyhow::Result;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, Notify};
 use uuid::Uuid;
 
 use crate::jobs::manager::{Job, JobOperation, JobStatus, JobStatusEvent};
+use crate::packages::coordinator::{CACHE_REFRESH_TIMEOUT, PACKAGE_OP_TIMEOUT};
 
 /// Admission mode for the scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,11 +250,28 @@ impl Scheduler {
         if state.reboot_pending.is_some() {
             return Err(SelfUpdateAdmissionError::AlreadyInProgress);
         }
-        if state.active_mutation.is_some() {
-            return Err(SelfUpdateAdmissionError::JobsInProgress { count: 1 });
+        if let Some(mid) = state.active_mutation {
+            // An internal tracking job (background cache refresh) holding the
+            // mutation slot must NOT block self-update admission — the
+            // self-update will simply wait for the slot (≤300s normally, ≤360s
+            // under the watchdog backstop). Only a real mutation holding the
+            // slot rejects self-update here. This is the check that bricked
+            // haproxy when a stuck refresh held the slot forever.
+            let held_by_internal = state
+                .jobs
+                .get(&mid)
+                .map(|j| j.is_internal())
+                .unwrap_or(false);
+            if !held_by_internal {
+                return Err(SelfUpdateAdmissionError::JobsInProgress { count: 1 });
+            }
         }
 
-        let active_count = state.jobs.values().filter(|j| j.status.is_active()).count();
+        let active_count = state
+            .jobs
+            .values()
+            .filter(|j| j.status.is_active() && !j.is_internal())
+            .count();
         if active_count > 0 {
             return Err(SelfUpdateAdmissionError::JobsInProgress {
                 count: active_count,
@@ -341,7 +360,13 @@ impl Scheduler {
 
             let self_update_active = state.self_update.is_some();
             let mutation_active = state.active_mutation.is_some();
-            let active_jobs = state.jobs.values().filter(|j| j.status.is_active()).count();
+            // Internal tracking jobs (background cache refresh) are bookkeeping
+            // and must not count toward the "jobs in progress" reboot gate.
+            let active_jobs = state
+                .jobs
+                .values()
+                .filter(|j| j.status.is_active() && !j.is_internal())
+                .count();
 
             if !force {
                 if self_update_active {
@@ -741,6 +766,16 @@ impl Scheduler {
             let job_id_owned = job_id;
             let result_tx = result_tx.clone();
 
+            // Compute the watchdog backstop from the job while we still hold
+            // the lock. Internal tracking jobs (cache refresh) get a tight
+            // backstop; real mutations get one sized over the worst legitimate
+            // closure. See `watchdog_backstop_for`.
+            let backstop = state
+                .jobs
+                .get(&job_id)
+                .map(watchdog_backstop_for)
+                .unwrap_or(PACKAGE_OP_TIMEOUT + CACHE_REFRESH_TIMEOUT + Duration::from_secs(300));
+
             // Drop state lock before spawning to keep the critical
             // section short. The blocking task runs outside the lock.
             drop(state);
@@ -751,9 +786,28 @@ impl Scheduler {
 
             tokio::spawn(async move {
                 let join_handle = tokio::task::spawn_blocking(f);
-                let result = match join_handle.await {
-                    Ok(inner) => inner,
-                    Err(join_err) => Err(anyhow::anyhow!("Mutation task panicked: {}", join_err)),
+                // Backstop: bound the closure's wall-clock runtime so a hung
+                // closure cannot hold `active_mutation` forever. The inner
+                // subprocess timeout bounds the realistic hang; this catches
+                // hangs the inner timeout can't see. On elapsed, detach the
+                // blocking task (spawn_blocking can't be cancelled — the inner
+                // subprocess timeout reaps it) and force-finalize below.
+                let result = match tokio::time::timeout(backstop, join_handle).await {
+                    Ok(Ok(inner)) => inner,
+                    Ok(Err(join_err)) => {
+                        Err(anyhow::anyhow!("Mutation task panicked: {}", join_err))
+                    }
+                    Err(_elapsed) => {
+                        tracing::error!(
+                            job_id = %job_id_owned,
+                            backstop_secs = backstop.as_secs(),
+                            "Watchdog backstop elapsed — force-finalizing stuck mutation"
+                        );
+                        Err(anyhow::anyhow!(
+                            "Mutation timed out after {} seconds (watchdog backstop)",
+                            backstop.as_secs()
+                        ))
+                    }
                 };
 
                 // Watchdog: always clear active_mutation and finalize
@@ -1719,6 +1773,55 @@ fn next_generation() -> u64 {
     GENERATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Watchdog backstop: the maximum wall-clock time a mutation closure may run
+/// before the scheduler force-finalizes it and releases the `active_mutation`
+/// slot. This is a defense-in-depth backstop, NOT the primary operation timeout
+/// — the inner subprocess timeout (`CACHE_REFRESH_TIMEOUT` / `PACKAGE_OP_TIMEOUT`
+/// in `coordinator.rs`) already bounds the realistic hang. The backstop catches
+/// closures that hang despite the inner timeout (e.g. a static APT mutex
+/// deadlock, a `dpkg --configure -a` preflight hang, `spawn_blocking` pool
+/// starvation, or a future backend method that skips `run_with_timeout`).
+///
+/// Without this, a hung closure leaves the job `Running` and `active_mutation`
+/// held forever, which blocks every self-update (admission rejects at the
+/// `active_mutation` check) — the failure mode that bricked haproxy on 2.6.12.
+///
+/// Internal tracking jobs (cache refresh) get a tight backstop over their 300s
+/// inner timeout; real mutations get a backstop over the worst legitimate
+/// closure (self-update does refresh 300s + install 1800s).
+fn watchdog_backstop_for(job: &Job) -> Duration {
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        // Tests shrink the backstop so a hung closure is force-finalized in
+        // ~1s rather than minutes. See `set_test_watchdog_backstop`.
+        if let Some(d) = test_watchdog_backstop() {
+            return d;
+        }
+    }
+    if job.is_internal() {
+        CACHE_REFRESH_TIMEOUT + Duration::from_secs(60) // 360s
+    } else {
+        PACKAGE_OP_TIMEOUT + CACHE_REFRESH_TIMEOUT + Duration::from_secs(300) // 2400s
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+static TEST_WATCHDOG_BACKSTOP: std::sync::Mutex<Option<Duration>> = std::sync::Mutex::new(None);
+
+#[cfg(any(test, feature = "test-utils"))]
+fn test_watchdog_backstop() -> Option<Duration> {
+    TEST_WATCHDOG_BACKSTOP.lock().ok().and_then(|g| *g)
+}
+
+/// Test-only: override the watchdog backstop for the duration of a test so a
+/// hung closure can be force-finalized quickly. Pass `None` to restore defaults.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_test_watchdog_backstop(dur: Option<Duration>) {
+    if let Ok(mut g) = TEST_WATCHDOG_BACKSTOP.lock() {
+        *g = dur;
+    }
+}
+
 fn admit_job_inner(
     state: &mut SchedulerState,
     operation: JobOperation,
@@ -1734,7 +1837,13 @@ fn admit_job_inner(
         return Err(JobAdmissionError::AdmissionFrozen);
     }
 
-    let active_count = state.jobs.values().filter(|j| j.status.is_active()).count();
+    // Internal tracking jobs (background cache refresh) don't consume
+    // user-facing queue capacity.
+    let active_count = state
+        .jobs
+        .values()
+        .filter(|j| j.status.is_active() && !j.is_internal())
+        .count();
     if active_count >= state.max_queue_depth {
         return Err(JobAdmissionError::QueueFull);
     }
