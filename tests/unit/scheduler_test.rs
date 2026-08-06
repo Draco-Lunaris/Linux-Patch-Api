@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use linux_patch_api::jobs::manager::JobOperation;
+use linux_patch_api::jobs::manager::{Job, JobOperation, JobStatus};
 use linux_patch_api::jobs::scheduler::{
-    AdmissionMode, JobAdmissionError, RebootAdmissionError, Scheduler, SelfUpdateAdmissionError,
-    TryMutationError,
+    set_test_watchdog_backstop, AdmissionMode, JobAdmissionError, RebootAdmissionError, Scheduler,
+    SelfUpdateAdmissionError, TryMutationError,
 };
 
 // =============================================================================
@@ -595,8 +595,6 @@ async fn mutation_cancellation_keeps_slot_until_blocking_completes() {
 // Orphaned job recovery (PR #200 regression — self-update false failure)
 // =============================================================================
 
-use linux_patch_api::jobs::manager::{Job, JobStatus};
-
 /// Build a minimal orphaned job record as it would be loaded from
 /// running_jobs.json after a restart.
 fn orphaned_job(operation: JobOperation) -> Job {
@@ -650,4 +648,278 @@ async fn recover_orphaned_regular_job_is_failed() {
         matches!(job.operation, JobOperation::Update),
         "operation must be preserved as Update"
     );
+}
+
+// =============================================================================
+// Internal tracking jobs (background cache refresh) must not block
+// self-update / reboot / queue, and a hung refresh closure must be
+// force-finalized by the watchdog backstop so it can't hold the slot forever.
+// =============================================================================
+
+/// `Job::is_internal()` identifies the sentinel-package tracking jobs and
+/// rejects ordinary package jobs.
+#[tokio::test]
+async fn is_internal_predicate_identifies_tracking_jobs() {
+    assert!(
+        Job::new(
+            JobOperation::Install,
+            vec!["__health_refresh__".to_string()]
+        )
+        .is_internal(),
+        "__health_refresh__ tracking job is internal"
+    );
+    assert!(
+        Job::new(
+            JobOperation::Install,
+            vec!["__patch_list_refresh__".to_string()]
+        )
+        .is_internal(),
+        "__patch_list_refresh__ tracking job is internal"
+    );
+    assert!(
+        !Job::new(JobOperation::Install, vec!["nginx".to_string()]).is_internal(),
+        "a real package job is not internal"
+    );
+    assert!(
+        !Job::new(JobOperation::PatchApply, vec![]).is_internal(),
+        "a patch job is not internal"
+    );
+}
+
+/// A mutation closure that hangs past the watchdog backstop is force-finalized:
+/// the job reaches a terminal state and the mutation slot is released so a
+/// subsequent mutation (e.g. self-update) can proceed. This is the fix for the
+/// haproxy failure mode where a stuck refresh held the slot forever.
+#[tokio::test]
+async fn watchdog_backstop_force_finalizes_hung_closure() {
+    // Shrink the backstop to ~1s for the test.
+    set_test_watchdog_backstop(Some(std::time::Duration::from_secs(1)));
+    // Restore the default at the end of the test so it doesn't leak.
+    struct BackstopGuard;
+    impl Drop for BackstopGuard {
+        fn drop(&mut self) {
+            set_test_watchdog_backstop(None);
+        }
+    }
+    let _guard = BackstopGuard;
+
+    let scheduler = Scheduler::new(5, 10);
+    let job_id = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg".to_string()])
+        .await
+        .unwrap();
+
+    // A closure that blocks past the 1s backstop. Use a channel recv (released
+    // at test exit) rather than a long sleep so the detached blocking task
+    // doesn't linger on the blocking pool after the test returns.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let sched = scheduler.clone();
+    let handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(job_id, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+    // Keep release_tx alive for the test body; dropping it (at end of scope)
+    // unblocks the detached closure so its blocking thread can exit.
+    let _release_tx = release_tx;
+
+    // Wait for the mutation to acquire the slot.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        scheduler.is_mutation_in_progress().await,
+        "slot held while closure runs"
+    );
+
+    // The backstop must fire and release the slot well before the test budget.
+    for _ in 0..50 {
+        if !scheduler.is_mutation_in_progress().await {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        !scheduler.is_mutation_in_progress().await,
+        "watchdog backstop must release the mutation slot"
+    );
+
+    // The caller's dispatch_mutation must have received the timeout error.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+        .await
+        .expect("dispatch_mutation must return after backstop");
+    assert!(
+        result.unwrap().is_err(),
+        "dispatch_mutation must return Err on backstop timeout"
+    );
+
+    // The watchdog leaves the job Running when the caller is alive (the handler
+    // is responsible for the terminal transition). Mimic a handler: fail_job.
+    let _ = scheduler
+        .fail_job(&job_id, "watchdog backstop elapsed".to_string())
+        .await;
+    let job = scheduler.get_job(&job_id).await.unwrap();
+    assert_eq!(
+        job.status,
+        JobStatus::Failed,
+        "job must be Failed after the handler finalizes the backstop timeout"
+    );
+
+    // A second mutation can now acquire the slot — self-update would unblock.
+    let j2 = scheduler
+        .admit_job(JobOperation::Install, vec!["pkg2".to_string()])
+        .await
+        .unwrap();
+    let r2 = scheduler
+        .dispatch_mutation(j2, || Ok::<(), anyhow::Error>(()))
+        .await;
+    assert!(
+        r2.is_ok(),
+        "a second mutation must run after the backstop frees the slot"
+    );
+    let _ = scheduler.complete_job(&j2).await;
+    let _ = scheduler.delete_job(&j2).await;
+    let _ = scheduler.delete_job(&job_id).await;
+}
+
+/// While an internal tracking job (background cache refresh) holds the mutation
+/// slot, `try_reserve_self_update` must admit (not reject with
+/// `JobsInProgress`) — a read-ish cache refresh must not block an agent
+/// upgrade. The self-update would then wait for the slot, which the backstop
+/// bounds.
+#[tokio::test]
+async fn internal_tracking_job_does_not_block_self_update_admission() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let tracking_id = scheduler
+        .admit_job(
+            JobOperation::Install,
+            vec!["__health_refresh__".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // Hold the mutation slot with the tracking job's "refresh" closure.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let sched = scheduler.clone();
+    let _tracking_handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(tracking_id, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+
+    // Wait for the tracking job to acquire the slot.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        scheduler.is_mutation_in_progress().await,
+        "tracking job holds the slot"
+    );
+    assert_eq!(
+        scheduler.get_job(&tracking_id).await.unwrap().status,
+        JobStatus::Running
+    );
+
+    // Self-update admission must succeed despite the held slot, because the
+    // holder is an internal tracking job.
+    let guard = scheduler
+        .try_reserve_self_update(vec!["linux-patch-api".to_string()], "1.0.0", "2.0.0")
+        .await;
+    assert!(
+        guard.is_ok(),
+        "self-update admission must succeed while an internal tracking job holds the slot"
+    );
+    let job_id = guard.unwrap().commit();
+    assert!(scheduler.is_self_update_in_progress().await);
+
+    // Release the tracking job's closure so the test can clean up.
+    drop(release_tx);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let _ = scheduler.release_self_update(&job_id).await;
+    let _ = scheduler.delete_job(&tracking_id).await;
+}
+
+/// An internal tracking job must not consume user-facing queue capacity: with
+/// `max_queue_depth = 1`, a pending tracking job must not prevent a real package
+/// job from being admitted.
+#[tokio::test]
+async fn internal_tracking_job_does_not_consume_queue_depth() {
+    let scheduler = Scheduler::new(5, 1);
+
+    let tracking_id = scheduler
+        .admit_job(
+            JobOperation::Install,
+            vec!["__patch_list_refresh__".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scheduler.get_job(&tracking_id).await.unwrap().status,
+        JobStatus::Pending
+    );
+
+    // A real package job must still be admitted despite the pending tracking
+    // job — the queue-depth gate excludes internal jobs.
+    let real_id = scheduler
+        .admit_job(JobOperation::Install, vec!["nginx".to_string()])
+        .await
+        .expect("real job must be admitted — tracking job does not consume queue depth");
+
+    let _ = scheduler.delete_job(&tracking_id).await;
+    let _ = scheduler.delete_job(&real_id).await;
+}
+
+/// An internal tracking job holding the mutation slot must not block a
+/// non-force reboot reservation — the active-jobs gate excludes internal jobs.
+#[tokio::test]
+async fn internal_tracking_job_does_not_block_reboot() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let tracking_id = scheduler
+        .admit_job(
+            JobOperation::Install,
+            vec!["__patch_list_refresh__".to_string()],
+        )
+        .await
+        .unwrap();
+
+    // Hold the slot with the tracking job so the reboot gate's mutation slot is
+    // occupied by an internal job.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let sched = scheduler.clone();
+    let _tracking_handle = tokio::spawn(async move {
+        sched
+            .dispatch_mutation(tracking_id, move || -> anyhow::Result<()> {
+                let _ = release_rx.lock().unwrap().recv();
+                Ok(())
+            })
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        scheduler.is_mutation_in_progress().await,
+        "tracking job holds the slot"
+    );
+
+    // Non-force reboot reservation must succeed — the active-jobs gate excludes
+    // the internal tracking job.
+    let reboot_guard = scheduler
+        .reserve_reboot(false, false)
+        .await
+        .expect("non-force reboot must succeed while an internal tracking job runs");
+    // Drop without commit to roll back the reservation (clears reboot_pending).
+    drop(reboot_guard);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Release and clean up.
+    drop(release_tx);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let _ = scheduler.delete_job(&tracking_id).await;
 }
