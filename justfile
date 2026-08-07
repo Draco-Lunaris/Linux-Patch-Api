@@ -48,13 +48,13 @@ deps-alpine:
     apk add --no-cache bash git curl tar gcc musl-dev openssl-dev openssl elogind-dev alpine-sdk abuild
 
 pkg-deb:
-    ./scripts/build-package.sh
+    chmod +x scripts/build-package.sh && ./scripts/build-package.sh
 pkg-rpm: build
-    SKIP_CARGO_BUILD=1 ./build-rpm.sh
+    chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
 pkg-arch: build
-    SKIP_CARGO_BUILD=1 ./build-arch.sh
+    chmod +x build-arch.sh && SKIP_CARGO_BUILD=1 ./build-arch.sh
 pkg-alpine: build-musl
-    SKIP_CARGO_BUILD=1 ./build-alpine.sh
+    chmod +x build-alpine.sh && SKIP_CARGO_BUILD=1 ./build-alpine.sh
 
 # --- release (CI remains the official builder) ---
 release KIND:
