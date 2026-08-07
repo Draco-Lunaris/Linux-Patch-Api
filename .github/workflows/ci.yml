@@ -344,28 +344,19 @@ jobs:
     name: Build .apk (Alpine)
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
-    runs-on: ubuntu-latest
-    container:
-      image: alpine:latest
-      env:
-        HOME: /root
+    runs-on: [self-hosted, linux, alpine]
+    # build-alpine.sh generates abuild signing keys into /root/.abuild and writes
+    # /etc/abuild.conf, so the build must run as root. The job executes as the echo
+    # user, so deps/pkg run via sudo -E with root's rustup (in /root/.cargo/bin).
     steps:
-      - name: Install prerequisites for actions/checkout + just
-        run: apk add --no-cache bash git curl tar
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Install Alpine build dependencies
-        run: apk add --no-cache gcc musl-dev openssl-dev openssl elogind-dev alpine-sdk abuild
-      - name: Install just
-        run: curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sh -s -- --to /usr/local/bin
-      - name: Install Rust via rustup
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: alpine-musl
-      - run: just deps-alpine
-      - run: just pkg-alpine
+      - name: Build .apk (as root; abuild signing requires root)
+        run: |
+          sudo -E env "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin" just deps-alpine
+          sudo -E env "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin" just pkg-alpine
+          sudo chown -R echo:echo releases/ || true
       - name: Rename APK to strip release number
         run: |
           cd releases
