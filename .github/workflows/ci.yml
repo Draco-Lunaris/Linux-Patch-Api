@@ -275,12 +275,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Disable lpa-repo during build (runner is also a production agent)
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/lpa.repo
-            echo "Disabled lpa-repo for CI build"
-          fi
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@v2
@@ -292,13 +286,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.rpm
-      - name: Re-enable lpa-repo after build
-        if: always()
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=0/enabled=1/' /etc/yum.repos.d/lpa.repo
-            echo "Re-enabled lpa-repo after CI build"
-          fi
 
   build-rpm-almalinux:
     name: Build .rpm (AlmaLinux 10)
@@ -309,12 +296,6 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Disable lpa-repo during build (runner is also a production agent)
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/lpa.repo
-            echo "Disabled lpa-repo for CI build"
-          fi
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@v2
@@ -326,13 +307,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.rpm
-      - name: Re-enable lpa-repo after build
-        if: always()
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=0/enabled=1/' /etc/yum.repos.d/lpa.repo
-            echo "Re-enabled lpa-repo after CI build"
-          fi
 
   build-arch:
     name: Build .pkg.tar.zst (Arch Linux)
