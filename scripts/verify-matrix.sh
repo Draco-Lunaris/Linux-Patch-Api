@@ -64,7 +64,7 @@ FLEET=(
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-declare -A LOG PID
+declare -A LOG PID START
 
 # Build on one runner. Output goes to the caller's redirected stdout/stderr.
 # The unquoted heredoc expands local vars ($BRANCH, $mode, $deps, $pkg, $SSH_USER);
@@ -80,8 +80,8 @@ git checkout -B "$BRANCH" "origin/$BRANCH"
 git clean -fd
 if [ "$mode" = root ]; then
     sudo rm -rf releases
-    sudo -E env "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin" just deps-$deps
-    sudo -E env "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin" just pkg-$pkg
+    sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just deps-$deps
+    sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just pkg-$pkg
     sudo chown -R $SSH_USER:$SSH_USER releases/ || true
 else
     rm -rf releases
@@ -107,6 +107,7 @@ for entry in "${FLEET[@]}"; do
     LOG[$label]="$TMPDIR/$label.log"
     run_one "$ip" "$label" "$deps" "$pkg" "$mode" >"${LOG[$label]}" 2>&1 &
     PID[$label]=$!
+    START[$label]=$(date +%s)
     printf "  launched %-12s (%s)\n" "$label" "$ip"
 done
 
@@ -124,9 +125,8 @@ fail=0
 for entry in "${FLEET[@]}"; do
     IFS=: read -r ip label deps pkg mode <<< "$entry"
     [ -z "${PID[$label]:-}" ] && continue
-    start=$(date +%s)
     wait "${PID[$label]}"; rc=$?
-    elapsed=$(( $(date +%s) - start ))
+    elapsed=$(( $(date +%s) - ${START[$label]} ))
     if [ "$rc" -eq 0 ]; then
         printf "PASS  %-12s  (%ds)\n" "$label" "$elapsed"
     else

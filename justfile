@@ -39,7 +39,7 @@ build-musl:
 
 # system deps (lifted from ci.yml; run on the matching distro)
 deps-deb:
-    sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
+    sudo dpkg --configure -a && sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
 deps-rpm:
     sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
 deps-arch:
