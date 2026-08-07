@@ -75,20 +75,25 @@ run_one() {
     timeout "$RUN_TIMEOUT" ssh $SSH_OPTS "${SSH_USER}@${ip}" 'bash -s' <<REMOTE
 set -e
 cd ~/Linux-Patch-Api
+# Previous runs may leave root-owned build artifacts (pkg-rpm/build-alpine.sh run
+# via sudo). chown the whole tree back to the SSH user so echo-side cleanup works.
+sudo chown -R $SSH_USER:$SSH_USER .
 git fetch --quiet --all
 git checkout -B "$BRANCH" "origin/$BRANCH"
+git reset --hard "origin/$BRANCH"
 git clean -fd
 if [ "$mode" = root ]; then
     sudo rm -rf releases
     sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just deps-$deps
     sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just pkg-$pkg
-    sudo chown -R $SSH_USER:$SSH_USER releases/ || true
 else
     rm -rf releases
     export PATH="\$HOME/.cargo/bin:\$PATH"
     just deps-$deps
     just pkg-$pkg
 fi
+# Leave the tree echo-owned so the next run's cleanup doesn't hit root-owned files.
+sudo chown -R $SSH_USER:$SSH_USER . || true
 echo "VERIFY-BUILD-OK"
 REMOTE
 }
