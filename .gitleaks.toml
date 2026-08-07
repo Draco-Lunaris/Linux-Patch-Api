@@ -1,0 +1,19 @@
+# Gitleaks allowlist for Linux-Patch-Api test-only certs/keys and test fixtures.
+#
+# Per design: the ONLY real keys/certs live on lpm.moon-dragon.us. Every fresh
+# install generates its own certs/keys. Nothing committed to this repo is a real
+# secret. The entries below are test/example certs and inline test fixtures
+# (polling_token values, test PEM constants) used by integration/e2e tests and docs.
+
+[allowlist]
+  description = "Test-only certs/keys and inline test fixtures (not real secrets)"
+  paths = [
+    '''configs/certs/.*\.(pem|key)''',
+    '''tests/e2e/certs/.*\.key''',
+    '''src/enroll/provision\.rs''',
+    '''src/enroll/client\.rs''',
+    '''tests/integration/enrollment_test\.rs''',
+    '''tests/e2e/test_enrollment_e2e\.rs''',
+    '''API_DOCUMENTATION\.md''',
+    '''tasks/todo\.md''',
+  ]
