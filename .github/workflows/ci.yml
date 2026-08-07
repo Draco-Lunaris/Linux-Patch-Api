@@ -1,13 +1,12 @@
 name: CI
 
+# Releases-only: CI fires on version tags (+ manual dispatch).
+# Local dev/test uses `just check` on the dev box; this workflow is the
+# release-time gate + the official per-distro package builder.
 on:
   push:
-    branches: [master]
     tags: ['v*.*.*']
-  pull_request:
-    branches: [master]
-  schedule:
-    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,8 +15,12 @@ env:
 permissions:
   contents: write
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # ── Quality Gates (GitHub-hosted, all triggers) ──────────────────────────
+  # ── Quality Gates (release-time; local dev uses `just check`) ─────────────
 
   fmt:
     name: fmt
@@ -28,7 +31,10 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just fmt
 
   clippy:
     name: Clippy
@@ -39,9 +45,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just clippy
 
   test:
     name: Tests
@@ -50,9 +58,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
-      - run: cargo test --all-features
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just test
 
   audit:
     name: Security Audit
@@ -62,8 +72,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
-      - run: cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0205
+          tool: cargo-audit,just
+      - run: just audit
 
   gitleaks:
     name: Secret scanning
@@ -85,11 +95,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
-      - run: cargo test --test enroll_identity
-      - run: cargo test --test enrollment_test
-      - run: cargo test --test enrollment_e2e
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just enrollment-test
 
   # ── Release Preparation (tag push only) ───────────────────────────────────
 
@@ -130,12 +140,13 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build .deb package
-        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just pkg-deb
       - name: Rename package with distro suffix
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
@@ -156,12 +167,13 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build .deb package
-        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just pkg-deb
       - name: Rename package with distro suffix
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
@@ -182,12 +194,13 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build .deb package
-        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just pkg-deb
       - name: Rename package with distro suffix
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
@@ -208,12 +221,13 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build .deb package
-        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just pkg-deb
       - name: Rename package with distro suffix
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
@@ -234,12 +248,13 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: sudo dpkg --configure -a && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libsystemd-dev pkg-config libssl-dev
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build .deb package
-        run: chmod +x scripts/build-package.sh && scripts/build-package.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-deb
+      - run: just pkg-deb
       - name: Rename package with distro suffix
         run: |
           FILE=$(ls linux-patch-api_*_amd64.deb 2>/dev/null | head -1)
@@ -260,31 +275,17 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Disable lpa-repo during build (runner is also a production agent)
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/lpa.repo
-            echo "Disabled lpa-repo for CI build"
-          fi
-      - name: Install system dependencies
-        run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build release binary
-        run: cargo build --release
-      - name: Build RPM package
-        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-rpm
+      - run: just pkg-rpm
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.rpm
-      - name: Re-enable lpa-repo after build
-        if: always()
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=0/enabled=1/' /etc/yum.repos.d/lpa.repo
-            echo "Re-enabled lpa-repo after CI build"
-          fi
 
   build-rpm-almalinux:
     name: Build .rpm (AlmaLinux 10)
@@ -295,31 +296,17 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Disable lpa-repo during build (runner is also a production agent)
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/lpa.repo
-            echo "Disabled lpa-repo for CI build"
-          fi
-      - name: Install system dependencies
-        run: sudo dnf install -y systemd-devel openssl-devel pkg-config gcc make
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build release binary
-        run: cargo build --release
-      - name: Build RPM package
-        run: chmod +x build-rpm.sh && SKIP_CARGO_BUILD=1 sudo -E ./build-rpm.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-rpm
+      - run: just pkg-rpm
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: releases/linux-patch-api-*.rpm
-      - name: Re-enable lpa-repo after build
-        if: always()
-        run: |
-          if [ -f /etc/yum.repos.d/lpa.repo ]; then
-            sudo sed -i 's/^enabled=0/enabled=1/' /etc/yum.repos.d/lpa.repo
-            echo "Re-enabled lpa-repo after CI build"
-          fi
 
   build-arch:
     name: Build .pkg.tar.zst (Arch Linux)
@@ -330,20 +317,13 @@ jobs:
       - name: Clean previous build artifacts from root
         run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Stop agent service (runner is also a production agent)
-        run: |
-          sudo systemctl stop linux-patch-api.service 2>/dev/null || true
-          sudo rc-service linux-patch-api stop 2>/dev/null || true
-          # Remove stale pacman lock if present
-          sudo rm -f /var/lib/pacman/db.lck
-      - name: Install system dependencies
-        run: sudo pacman -Syu --noconfirm systemd openssl pkg-config gcc
       - name: Add Rust to PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build release binary
-        run: cargo build --release
-      - name: Build Arch package
-        run: chmod +x build-arch.sh && SKIP_CARGO_BUILD=1 ./build-arch.sh
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just deps-arch
+      - run: just pkg-arch
       - name: Rename packages to strip release number
         run: |
           cd releases
@@ -364,29 +344,25 @@ jobs:
     name: Build .apk (Alpine)
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
-    runs-on: ubuntu-latest
-    container:
-      image: alpine:latest
-      env:
-        HOME: /root
+    runs-on: [self-hosted, linux, alpine]
+    # build-alpine.sh generates abuild signing keys into /root/.abuild and writes
+    # /etc/abuild.conf, so the build must run as root. The job executes as the echo
+    # user, so deps/pkg run via sudo -E with root's rustup (in /root/.cargo/bin).
     steps:
-      - name: Install prerequisites for actions/checkout
-        run: apk add --no-cache bash git curl tar
+      - name: Clean previous build artifacts from root
+        run: sudo rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Install Alpine build dependencies
-        run: apk add --no-cache gcc musl-dev openssl-dev openssl elogind-dev alpine-sdk abuild
-      - name: Install Rust via rustup
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-      - name: Add Rust to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Add musl target
-        run: rustup target add x86_64-unknown-linux-musl
-      - name: Build release binary (musl target)
-        run: cargo build --release --target x86_64-unknown-linux-musl
-      - name: Build Alpine package
+      - name: Build .apk (as root; abuild signing requires root)
         run: |
-          chmod +x build-alpine.sh
-          SKIP_CARGO_BUILD=1 ./build-alpine.sh
+          sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just deps-alpine
+          sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just pkg-alpine
+          sudo chown -R echo:echo releases/ || true
+      - name: Rename APK to strip release number
+        run: |
+          cd releases
+          for f in linux-patch-api-*.apk; do
+            [ -f "$f" ] && mv "$f" "$(echo "$f" | sed 's/-r[0-9]\+\.apk/.apk/')"
+          done
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
