@@ -42,6 +42,12 @@ pub struct SystemInfoData {
     pub last_update_check: Option<String>,
     pub last_update_apply: Option<String>,
     pub pending_reboot: bool,
+    /// Whether the package database is clean (no half-configured / unpacked /
+    /// failed packages). Read-only `dpkg --audit` on Debian/Ubuntu; `true` for
+    /// backends with no audit. The manager uses this as a safe-to-reboot gate
+    /// so a host with a half-configured kernel is never rebooted into an
+    /// unbootable state. `true` if the audit could not run (fail-open).
+    pub package_db_clean: bool,
 }
 
 /// Health check response data
@@ -105,6 +111,10 @@ pub async fn get_system_info(
 
     match backend.get_system_info() {
         Ok(sys_info) => {
+            // Read-only package-database cleanliness audit. Fail-open (true)
+            // if the audit cannot run, so a healthy host is never spuriously
+            // flagged dirty. This never mutates package state.
+            let package_db_clean = backend.package_database_clean().unwrap_or(true);
             let response = ApiResponse::success(SystemInfoData {
                 hostname: sys_info.hostname,
                 os: sys_info.os,
@@ -114,6 +124,7 @@ pub async fn get_system_info(
                 last_update_check: sys_info.last_update_check,
                 last_update_apply: sys_info.last_update_apply,
                 pending_reboot: sys_info.pending_reboot,
+                package_db_clean,
             });
 
             HttpResponse::Ok().json(response)

@@ -1,7 +1,7 @@
 //! Tests for the new `Rebooting` status, the patch-job-timing fix, and
 //! orphan recovery of `Rebooting` jobs after an agent restart.
 
-use linux_patch_api::jobs::manager::{Job, JobOperation, JobStatus};
+use linux_patch_api::jobs::manager::{current_boot_id, Job, JobOperation, JobStatus};
 use linux_patch_api::jobs::scheduler::Scheduler;
 
 /// `set_job_rebooting` transitions a Running job to `Rebooting` (not
@@ -131,21 +131,89 @@ async fn recover_rebooting_reboot_job_as_completed() {
     assert!(recovered.error_code.is_none());
 }
 
-/// A genuine `Running` orphan (crash mid-mutation, NOT a reboot-driven
-/// restart) is still recovered as `Failed` with `AGENT_REBOOTED`.
+/// A genuine `Running` orphan whose persisted `boot_id` differs from the
+/// current boot_id (i.e. the machine actually rebooted) is recovered as
+/// `Failed` with `AGENT_REBOOTED`. We simulate the reboot by overwriting the
+/// orphan's boot_id with a value that cannot match the running host.
 #[tokio::test]
-async fn recover_running_orphan_as_failed() {
+async fn recover_running_orphan_different_boot_id_is_reboot() {
     let scheduler = Scheduler::new(5, 10);
 
     let mut orphan = Job::new(JobOperation::Install, vec![]);
     orphan.start();
+    // A real reboot changes boot_id — pretend the job was created on a
+    // previous boot.
+    orphan.boot_id = Some("00000000-0000-0000-0000-differentboot".to_string());
     let orphan_id = orphan.id;
 
     scheduler.recover_orphaned_jobs(&[orphan]).await;
 
     let recovered = scheduler.get_job(&orphan_id).await.unwrap();
     assert_eq!(recovered.status, JobStatus::Failed);
-    assert_eq!(recovered.error_code.as_deref(), Some("AGENT_REBOOTED"));
+    assert_eq!(
+        recovered.error_code.as_deref(),
+        Some("AGENT_REBOOTED"),
+        "a real reboot (boot_id changed) must keep AGENT_REBOOTED"
+    );
+}
+
+/// A `Running` orphan whose `boot_id` matches the current boot_id was NOT
+/// rebooted — the agent process restarted (crash / OOM / `systemctl restart`
+/// / dpkg-postinst self-restart) on the same boot. This is recovered as
+/// `Failed` with the distinct `AGENT_RESTARTED` code, NOT `AGENT_REBOOTED`,
+/// because a process restart is not the boot-brick failure mode.
+#[tokio::test]
+async fn recover_running_orphan_same_boot_id_is_process_restart() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let mut orphan = Job::new(JobOperation::PatchApply, vec!["pkg".to_string()]);
+    orphan.start();
+    // Same boot as recovery → process restart, not a reboot.
+    orphan.boot_id = current_boot_id();
+    assert!(
+        orphan.boot_id.is_some(),
+        "test host must expose /proc boot_id"
+    );
+    let orphan_id = orphan.id;
+
+    scheduler.recover_orphaned_jobs(&[orphan]).await;
+
+    let recovered = scheduler.get_job(&orphan_id).await.unwrap();
+    assert_eq!(recovered.status, JobStatus::Failed);
+    assert_eq!(
+        recovered.error_code.as_deref(),
+        Some("AGENT_RESTARTED"),
+        "a same-boot process restart must be AGENT_RESTARTED, not AGENT_REBOOTED"
+    );
+    assert!(
+        recovered.message.contains("process restart"),
+        "message should clarify it was a process restart: {}",
+        recovered.message
+    );
+}
+
+/// An internal tracking job (e.g. `__health_refresh__`) orphaned by a restart
+/// is recovered as `Cancelled`, NOT `Failed/AGENT_REBOOTED` — it is ephemeral
+/// bookkeeping and must never surface as a scary reboot failure.
+#[tokio::test]
+async fn recover_internal_tracking_job_is_cancelled() {
+    let scheduler = Scheduler::new(5, 10);
+
+    let mut orphan = Job::new(
+        JobOperation::Install,
+        vec!["__health_refresh__".to_string()],
+    );
+    orphan.start();
+    let orphan_id = orphan.id;
+
+    scheduler.recover_orphaned_jobs(&[orphan]).await;
+
+    let recovered = scheduler.get_job(&orphan_id).await.unwrap();
+    assert_eq!(recovered.status, JobStatus::Cancelled);
+    assert!(
+        recovered.error_code.is_none(),
+        "internal tracking job must not get an error code"
+    );
 }
 
 /// While a patch job is `Rebooting` (reboot reserved), new package jobs

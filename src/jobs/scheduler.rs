@@ -64,8 +64,9 @@ use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, Notify};
 use uuid::Uuid;
 
-use crate::jobs::manager::{Job, JobOperation, JobStatus, JobStatusEvent};
+use crate::jobs::manager::{current_boot_id, Job, JobOperation, JobStatus, JobStatusEvent};
 use crate::packages::coordinator::{CACHE_REFRESH_TIMEOUT, PACKAGE_OP_TIMEOUT};
+use crate::packages::error_utils::error_code;
 
 /// Admission mode for the scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1213,6 +1214,7 @@ impl Scheduler {
                     command_stderr: None,
                     rollback_job_id: None,
                     exclusive_mode: false,
+                    boot_id: orphaned.boot_id.clone(),
                 }
             } else if was_rebooting {
                 // The agent was mid-reboot when it died. Recovery running
@@ -1238,8 +1240,64 @@ impl Scheduler {
                     command_stderr: None,
                     rollback_job_id: orphaned.rollback_job_id,
                     exclusive_mode: orphaned.exclusive_mode,
+                    boot_id: orphaned.boot_id.clone(),
+                }
+            } else if orphaned.is_internal() {
+                // Internal tracking jobs (e.g. `__health_refresh__`) are
+                // ephemeral bookkeeping, not real mutations. They must never
+                // surface as a scary `AGENT_REBOOTED` failure — drop them as
+                // Cancelled. (persist_all_jobs also avoids writing non-terminal
+                // internal jobs, so this is the defensive path for legacy
+                // history files that still contain one.)
+                Job {
+                    id: orphaned.id,
+                    status: JobStatus::Cancelled,
+                    operation: orphaned.operation.clone(),
+                    created_at: orphaned.created_at,
+                    updated_at: now,
+                    completed_at: Some(now),
+                    packages: orphaned.packages.clone(),
+                    progress: 0,
+                    message: "Internal tracking job dropped after agent restart".to_string(),
+                    logs: vec![
+                        "Internal bookkeeping job (cache refresh) — discarded after restart"
+                            .to_string(),
+                    ],
+                    error: None,
+                    error_code: None,
+                    exit_code: None,
+                    command_stdout: None,
+                    command_stderr: None,
+                    rollback_job_id: None,
+                    exclusive_mode: false,
+                    boot_id: orphaned.boot_id.clone(),
                 }
             } else {
+                // Genuine orphan of a real mutation. Distinguish a real machine
+                // reboot (boot_id changed) from a mere agent process restart
+                // (crash / OOM / `systemctl restart` / dpkg-postinst self-restart
+                // — same boot_id). A process restart is NOT a reboot and is not
+                // the boot-brick failure mode, so it gets its own code.
+                let same_boot = orphaned
+                    .boot_id
+                    .as_ref()
+                    .zip(current_boot_id())
+                    .is_some_and(|(a, b)| a == &b);
+                let (code, msg, log, error) = if same_boot {
+                    (
+                        error_code::AGENT_RESTARTED,
+                        "Job interrupted by agent process restart (not a system reboot)",
+                        "Agent process restarted (same boot) — in-memory job state was lost",
+                        "Agent process restarted during job execution (not a reboot)",
+                    )
+                } else {
+                    (
+                        error_code::AGENT_REBOOTED,
+                        "Job failed: agent rebooted during execution",
+                        "Agent rebooted — in-memory job state was lost",
+                        "Agent rebooted during job execution",
+                    )
+                };
                 Job {
                     id: orphaned.id,
                     status: JobStatus::Failed,
@@ -1249,15 +1307,16 @@ impl Scheduler {
                     completed_at: Some(now),
                     packages: orphaned.packages.clone(),
                     progress: 0,
-                    message: "Job failed: agent rebooted during execution".to_string(),
-                    logs: vec!["Agent rebooted — in-memory job state was lost".to_string()],
-                    error: Some("Agent rebooted during job execution".to_string()),
-                    error_code: Some("AGENT_REBOOTED".to_string()),
+                    message: format!("Job failed: {}", msg),
+                    logs: vec![log.to_string()],
+                    error: Some(error.to_string()),
+                    error_code: Some(code.to_string()),
                     exit_code: None,
                     command_stdout: None,
                     command_stderr: None,
                     rollback_job_id: None,
                     exclusive_mode: false,
+                    boot_id: orphaned.boot_id.clone(),
                 }
             };
 
@@ -1271,6 +1330,21 @@ impl Scheduler {
                     job_id = %orphaned.id,
                     op = ?orphaned.operation,
                     "Recovered orphaned Rebooting job — marked completed (restart proves reboot fired)"
+                );
+            } else if orphaned.is_internal() {
+                tracing::info!(
+                    job_id = %orphaned.id,
+                    "Recovered internal tracking job — marked cancelled (ephemeral, dropped)"
+                );
+            } else if orphaned
+                .boot_id
+                .as_ref()
+                .zip(current_boot_id())
+                .is_some_and(|(a, b)| a == &b)
+            {
+                tracing::info!(
+                    job_id = %orphaned.id,
+                    "Recovered orphaned job — marked failed (AGENT_RESTARTED: process restart, not a reboot)"
                 );
             } else {
                 tracing::info!(
