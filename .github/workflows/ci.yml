@@ -344,19 +344,30 @@ jobs:
     name: Build .apk (Alpine)
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
-    runs-on: [self-hosted, linux, alpine]
-    # build-alpine.sh generates abuild signing keys into /root/.abuild and writes
-    # /etc/abuild.conf, so the build must run as root. The job executes as the echo
-    # user, so deps/pkg run via sudo -E with root's rustup (in /root/.cargo/bin).
+    # The GitHub Actions runner is .NET-based and cannot run on Alpine/musl
+    # (libcoreclr.so __isnan/__isnanf relocation failures even with gcompat),
+    # so a self-hosted Alpine runner is not viable. Build inside an Alpine
+    # container on a GitHub-hosted runner instead. build-alpine.sh already has
+    # /github/home fallback paths for container jobs (HOME=/github/home here).
+    runs-on: ubuntu-latest
+    container: alpine:3.21
     steps:
-      - name: Clean previous build artifacts from root
-        run: sudo rm -rf releases/ || true
+      - name: Clean previous build artifacts
+        run: rm -rf releases/ || true
       - uses: actions/checkout@v7
-      - name: Build .apk (as root; abuild signing requires root)
+      - name: Install build deps + rustup
         run: |
-          sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just deps-alpine
-          sudo env "HOME=/root" "PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" just pkg-alpine
-          sudo chown -R echo:echo releases/ || true
+          apk add --no-cache bash git curl tar gcc musl-dev openssl-dev openssl \
+            elogind-dev alpine-sdk abuild
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal
+      - name: Build .apk
+        run: |
+          . "$HOME/.cargo/env"
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl
+          chmod +x build-alpine.sh
+          SKIP_CARGO_BUILD=1 ./build-alpine.sh
       - name: Rename APK to strip release number
         run: |
           cd releases
