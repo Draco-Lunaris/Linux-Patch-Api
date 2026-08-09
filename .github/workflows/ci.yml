@@ -346,10 +346,12 @@ jobs:
     needs: [fmt, clippy, test, enrollment-tests, audit, prepare-release]
     # The GitHub Actions runner is .NET-based and cannot run on Alpine/musl
     # (libcoreclr.so __isnan/__isnanf relocation failures even with gcompat),
-    # so a self-hosted Alpine runner is not viable. Build inside an Alpine
-    # container on a GitHub-hosted runner instead. build-alpine.sh already has
-    # /github/home fallback paths for container jobs (HOME=/github/home here).
-    runs-on: ubuntu-latest
+    # so a native Alpine self-hosted runner is not viable. Build inside an
+    # Alpine container on a self-hosted Docker-capable runner instead (LXC 110,
+    # `gitea-runner-u2404-docker`, labeled `docker`). This keeps the Alpine
+    # build on the self-hosted fleet (same workflow as the other distros);
+    # build-alpine.sh has /github/home fallback paths for container jobs.
+    runs-on: [self-hosted, linux, docker]
     container: alpine:3.21
     steps:
       - name: Clean previous build artifacts
