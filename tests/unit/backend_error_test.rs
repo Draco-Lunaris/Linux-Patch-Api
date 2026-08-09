@@ -288,6 +288,39 @@ mod apt_tests {
         assert!(result.is_ok(), "install should succeed: {:?}", result.err());
     }
 
+    /// `package_database_clean` is the read-only safe-to-reboot audit: empty
+    /// `dpkg --audit` output → clean (true). It must NOT mutate.
+    #[test]
+    fn apt_package_database_clean_true_when_dpkg_audit_empty() {
+        let mock = MockCommandRunner::new();
+        mock.add_response("dpkg", &["--audit"], MockResponse::success_empty());
+        let backend = make_backend(&mock);
+        assert!(
+            backend.package_database_clean().unwrap(),
+            "empty dpkg --audit output means the package db is clean"
+        );
+    }
+
+    /// A non-empty `dpkg --audit` (half-configured packages, e.g. a kernel
+    /// whose postinst never ran) → dirty (false). The manager uses this to
+    /// refuse rebooting a host into an unbootable state.
+    #[test]
+    fn apt_package_database_clean_false_when_dpkg_audit_dirty() {
+        let mock = MockCommandRunner::new();
+        mock.add_response(
+            "dpkg",
+            &["--audit"],
+            MockResponse::success(
+                "The following packages are only half configured:\n  linux-image-7.0.0-30-generic\n",
+            ),
+        );
+        let backend = make_backend(&mock);
+        assert!(
+            !backend.package_database_clean().unwrap(),
+            "non-empty dpkg --audit output means the package db is dirty (half-configured)"
+        );
+    }
+
     #[test]
     fn apt_install_nonzero_exit_returns_error() {
         let mock = MockCommandRunner::new();

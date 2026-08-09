@@ -46,6 +46,17 @@ pub mod error_code {
     pub const REBOOT_ERROR: &str = "REBOOT_ERROR";
     /// Job exceeded the configured timeout.
     pub const TIMEOUT: &str = "TIMEOUT";
+    /// Agent rebooted (machine `boot_id` changed) while a job was in flight,
+    /// orphaning its in-memory state. Set by orphan recovery for a non-terminal
+    /// job whose persisted `boot_id` differs from the current boot_id (or is
+    /// `None` for legacy jobs).
+    pub const AGENT_REBOOTED: &str = "AGENT_REBOOTED";
+    /// Agent process restarted (crash, OOM, manual `systemctl restart`, or the
+    /// dpkg-postinst self-restart) while a job was in flight, but the machine did
+    /// NOT reboot (same `boot_id`). Distinct from `AGENT_REBOOTED`: no reboot
+    /// occurred, so this is not evidence of a half-configured kernel and is not
+    /// the boot-brick failure mode.
+    pub const AGENT_RESTARTED: &str = "AGENT_RESTARTED";
     /// Catch-all for errors that don't match a more specific code.
     pub const UNKNOWN_ERROR: &str = "UNKNOWN_ERROR";
 }

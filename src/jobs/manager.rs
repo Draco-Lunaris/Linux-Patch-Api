@@ -7,6 +7,22 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+/// Read the current machine `boot_id` from `/proc/sys/kernel/random/boot_id`.
+///
+/// Used by orphan recovery to distinguish a **real machine reboot** (the
+/// `boot_id` changes between when the job was created and when the agent
+/// restarts) from a **mere agent process restart** (crash, OOM kill, manual
+/// `systemctl restart`, or the dpkg-postinst self-restart) — which leaves the
+/// `boot_id` unchanged and is NOT a reboot. Returns `None` if the file is
+/// unavailable (non-Linux, restricted environment, or tests); a persisted job
+/// whose `boot_id` is `None` is treated as a real reboot on recovery.
+pub fn current_boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Job status
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum JobStatus {
@@ -45,6 +61,17 @@ impl JobStatus {
         matches!(
             self,
             JobStatus::Pending | JobStatus::Running | JobStatus::Rebooting
+        )
+    }
+
+    /// Whether this status is terminal (no longer active and not occupying a
+    /// slot). Terminal jobs are reloaded as history on agent restart; only
+    /// non-terminal jobs go to orphan recovery. This is the same partition
+    /// `main.rs` uses on startup.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled | JobStatus::TimedOut
         )
     }
 }
@@ -94,6 +121,11 @@ pub struct Job {
     pub command_stderr: Option<String>,
     pub rollback_job_id: Option<Uuid>,
     pub exclusive_mode: bool,
+    /// The machine `boot_id` (see [`current_boot_id`]) at the time the job was
+    /// created. Lets orphan recovery tell a real machine reboot from a process
+    /// restart. `None` for jobs persisted by older agents (treated as a reboot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
 }
 
 impl Job {
@@ -118,6 +150,7 @@ impl Job {
             command_stderr: None,
             rollback_job_id: None,
             exclusive_mode: false,
+            boot_id: current_boot_id(),
         }
     }
 

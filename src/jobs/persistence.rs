@@ -92,6 +92,17 @@ pub async fn persist_all_jobs(jobs: &[Job]) {
 
     // Trim to the most recent N jobs by created_at (newest first).
     let mut kept: Vec<&Job> = jobs.iter().collect();
+
+    // Internal tracking jobs (e.g. `__health_refresh__`, `__patch_list_refresh__`)
+    // are ephemeral bookkeeping, not real mutations. Never persist them while
+    // non-terminal: a non-terminal internal job written to disk would be
+    // orphan-recovered on the next restart as a scary `AGENT_REBOOTED` failure —
+    // the exact source of the false "Agent rebooted during job execution" noise
+    // (a process restart mid-cache-refresh left a Running internal job on disk).
+    // Terminal internal jobs (a genuinely Completed/Failed refresh) are kept so
+    // the history reflects real cache-refresh outcomes.
+    kept.retain(|j| !j.is_internal() || j.status.is_terminal());
+
     if kept.len() > HISTORY_RETENTION_COUNT {
         kept.sort_by_key(|j| std::cmp::Reverse(j.created_at));
         kept.truncate(HISTORY_RETENTION_COUNT);

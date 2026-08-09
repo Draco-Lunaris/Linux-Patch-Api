@@ -631,12 +631,15 @@ async fn recover_orphaned_self_update_is_completed_not_failed() {
     );
 }
 
-/// A non-self-update orphan (genuine crash / reboot during execution) must
-/// still be marked Failed with AGENT_REBOOTED.
+/// A non-self-update orphan whose persisted `boot_id` differs from the
+/// current boot_id (i.e. the machine actually rebooted) must be marked Failed
+/// with AGENT_REBOOTED. We simulate the reboot by setting a boot_id that
+/// cannot match the running host.
 #[tokio::test]
 async fn recover_orphaned_regular_job_is_failed() {
     let scheduler = Scheduler::new(2, 10);
-    let orphaned = orphaned_job(JobOperation::Update);
+    let mut orphaned = orphaned_job(JobOperation::Update);
+    orphaned.boot_id = Some("00000000-0000-0000-0000-previousboot".to_string());
     let id = orphaned.id;
 
     scheduler.recover_orphaned_jobs(&[orphaned]).await;
@@ -648,6 +651,28 @@ async fn recover_orphaned_regular_job_is_failed() {
         matches!(job.operation, JobOperation::Update),
         "operation must be preserved as Update"
     );
+}
+
+/// A non-self-update orphan whose `boot_id` matches the current boot_id was
+/// NOT rebooted — the agent process restarted (crash/OOM/`systemctl restart`/
+/// dpkg-postinst) on the same boot. It must be marked Failed with the distinct
+/// AGENT_RESTARTED code, not AGENT_REBOOTED.
+#[tokio::test]
+async fn recover_orphaned_regular_job_same_boot_is_restarted() {
+    let scheduler = Scheduler::new(2, 10);
+    let mut orphaned = orphaned_job(JobOperation::Update);
+    orphaned.boot_id = linux_patch_api::jobs::manager::current_boot_id();
+    assert!(
+        orphaned.boot_id.is_some(),
+        "test host must expose /proc boot_id"
+    );
+    let id = orphaned.id;
+
+    scheduler.recover_orphaned_jobs(&[orphaned]).await;
+
+    let job = scheduler.get_job(&id).await.expect("job must be recovered");
+    assert_eq!(job.status, JobStatus::Failed);
+    assert_eq!(job.error_code.as_deref(), Some("AGENT_RESTARTED"));
 }
 
 // =============================================================================

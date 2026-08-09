@@ -255,6 +255,25 @@ pub trait PackageManagerBackend: Send + Sync {
         Ok(())
     }
 
+    /// Read-only check: is the package database clean (no half-configured /
+    /// unpacked / failed packages)?
+    ///
+    /// This is a **read-only audit** — it must NOT mutate. The manager uses it
+    /// as a "safe-to-reboot" gate before issuing a reboot, so a host with a
+    /// half-configured kernel (no initramfs / GRUB repointed) is never rebooted
+    /// into an unbootable state.
+    ///
+    /// - APT: runs `dpkg --audit` (read-only) — empty output = clean.
+    /// - Other backends: default `Ok(true)` (no read-only audit defined yet).
+    ///
+    /// Returns `Ok(true)` if clean, `Ok(false)` if half-configured packages
+    /// exist, `Err` only if the audit itself could not run. On error the caller
+    /// should treat the host as clean (fail-open) to avoid spuriously blocking
+    /// reboots for reasons unrelated to a dirty package db.
+    fn package_database_clean(&self) -> Result<bool> {
+        Ok(true)
+    }
+
     /// Restart the agent's own service (not the whole system).
     ///
     /// On systemd: `systemctl restart linux-patch-api.service`
@@ -1462,6 +1481,16 @@ impl PackageManagerBackend for AptBackend {
         self.verify_dpkg_clean()?;
         info!("APT package database repair completed successfully");
         Ok(())
+    }
+
+    /// Read-only `dpkg --audit`: empty output means no half-configured /
+    /// unpacked / failed packages. Unlike [`Self::verify_dpkg_clean`] this does
+    /// NOT fall back to `dpkg --configure -a` on a dirty result — it only
+    /// reports, so it is safe to call before a reboot and from a read-only
+    /// context (e.g. the system-info handler the manager polls).
+    fn package_database_clean(&self) -> Result<bool> {
+        let output = self.run_dpkg(&["--audit"])?;
+        Ok(output.trim().is_empty())
     }
 
     fn get_installed_version(&self, name: &str) -> Result<Option<String>> {

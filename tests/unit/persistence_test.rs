@@ -192,3 +192,53 @@ async fn delete_job_removes_from_disk() {
 
     clear_state_dir_for_testing();
 }
+
+/// Non-terminal internal tracking jobs (e.g. `__health_refresh__`) are NOT
+/// persisted, so they can never be orphan-recovered as `AGENT_REBOOTED` on the
+/// next restart (the source of the false "Agent rebooted during job
+/// execution"). Terminal internal jobs (a genuinely completed/failed refresh)
+/// are still kept for history.
+#[tokio::test]
+#[serial]
+async fn persist_all_jobs_drops_nonterminal_internal_jobs() {
+    let dir = TempDir::new().unwrap();
+    set_state_dir_for_testing(dir.path().to_path_buf());
+
+    let mut running_internal = Job::new(
+        JobOperation::Install,
+        vec!["__health_refresh__".to_string()],
+    );
+    running_internal.start();
+    let mut completed_internal = Job::new(
+        JobOperation::Install,
+        vec!["__patch_list_refresh__".to_string()],
+    );
+    completed_internal.start();
+    completed_internal.complete();
+    let mut running_real = Job::new(JobOperation::PatchApply, vec!["kernel".to_string()]);
+    running_real.start();
+
+    let jobs = vec![running_internal, completed_internal, running_real];
+    let running_internal_id = jobs[0].id;
+    let completed_internal_id = jobs[1].id;
+    let running_real_id = jobs[2].id;
+
+    persist_all_jobs(&jobs).await;
+    let loaded = load_all_jobs().await;
+    let has = |id| loaded.iter().any(|j| j.id == id);
+
+    assert!(
+        !has(running_internal_id),
+        "a non-terminal internal job must NOT be persisted (would be orphan-recovered as AGENT_REBOOTED)"
+    );
+    assert!(
+        has(completed_internal_id),
+        "a terminal internal job must be kept for history"
+    );
+    assert!(
+        has(running_real_id),
+        "a non-internal Running job must be kept"
+    );
+
+    clear_state_dir_for_testing();
+}
