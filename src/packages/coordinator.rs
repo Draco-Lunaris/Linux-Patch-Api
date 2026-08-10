@@ -206,101 +206,151 @@ impl SystemCommandRunner {
             }
         };
 
-        // Take the stdout/stderr handles so we can read them without consuming `child`.
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        // Read stdout/stderr concurrently with the wait+timeout.
-        let stdout_fut = async {
-            if let Some(mut h) = stdout_handle {
+        // Spawn the stdout/stderr reads as independent drain tasks.
+        //
+        // Two reasons:
+        // (1) Prevent the OS pipe-buffer deadlock. A child that writes more
+        //     than ~64KB before exiting fills the pipe, blocks on its next
+        //     write, never exits, and `child.wait()` never resolves. Draining
+        //     concurrently keeps the pipe clear.
+        // (2) Let a *timed-out* child's pipes close promptly. The drain tasks
+        //     reach EOF once the child (and any subprocesses it spawned) has
+        //     been killed. We collect the drained buffers AFTER killing, so
+        //     the deadline actually bounds the wall-clock time the runner
+        //     blocks — see the timeout arm below.
+        //
+        // The previous implementation used `tokio::join!(timeout(wait),
+        // stdout_fut, stderr_fut)`. `join!` waits for ALL three futures and
+        // does not short-circuit when the timeout resolves, so a child that
+        // held its pipes open (e.g. `apt-get update` stuck on `gpgv` against a
+        // dead network connection) kept `join!` waiting for the pipe reads
+        // forever — `kill_child` never ran and the deadline was meaningless.
+        // That was the root cause of agents hanging until manual restart.
+        let stdout_task = child.stdout.take().map(|mut h| {
+            tokio::spawn(async move {
                 let mut buf = Vec::new();
                 tokio::io::AsyncReadExt::read_to_end(&mut h, &mut buf)
                     .await
                     .ok();
                 buf
-            } else {
-                Vec::new()
-            }
-        };
-        let stderr_fut = async {
-            if let Some(mut h) = stderr_handle {
+            })
+        });
+        let stderr_task = child.stderr.take().map(|mut h| {
+            tokio::spawn(async move {
                 let mut buf = Vec::new();
                 tokio::io::AsyncReadExt::read_to_end(&mut h, &mut buf)
                     .await
                     .ok();
                 buf
-            } else {
-                Vec::new()
-            }
-        };
+            })
+        });
 
-        let wait_fut = child.wait();
-
+        // Wait for the child, bounded by the deadline. On timeout, kill the
+        // process group FIRST (closing the pipes so the drain tasks complete),
+        // then reap and collect. Collection is itself bounded — if the kill
+        // signal somehow doesn't reach the child (e.g. systemd cgroup
+        // isolation) we still return rather than block forever.
         match timeout {
-            Some(dur) => {
-                let (wait_result, stdout_buf, stderr_buf) =
-                    tokio::join!(tokio::time::timeout(dur, wait_fut), stdout_fut, stderr_fut);
-
-                match wait_result {
-                    Ok(Ok(status)) => {
-                        if !status.success() {
-                            return Err(anyhow::Error::new(CommandError {
-                                program: program.to_string(),
-                                args: args.iter().map(|s| s.to_string()).collect(),
-                                exit_code: status.code(),
-                                stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
-                                stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
-                                spawn_error: None,
-                                timed_out: false,
-                            }));
-                        }
-                        Ok(CommandOutput {
-                            status_code: status.code(),
-                            stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
-                            stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
-                            timed_out: false,
-                        })
-                    }
-                    Ok(Err(e)) => Err(anyhow::Error::new(CommandError::from_spawn_error(
-                        program, args, &e,
-                    ))
-                    .context(format!("Failed to wait on {}", program))),
-                    Err(_) => {
-                        // Deadline elapsed — kill the child.
-                        debug!(
-                            program = program,
-                            timeout_secs = dur.as_secs(),
-                            "command timed out, killing child"
-                        );
-                        Self::kill_child(&mut child).await;
-                        let ce = CommandError::from_timeout(program, args, dur.as_secs());
-                        Err(anyhow::Error::new(ce).context(format!(
-                            "{} timed out after {}s",
-                            program,
-                            dur.as_secs()
-                        )))
-                    }
-                }
-            }
-            None => match wait_fut.await {
-                Ok(status) => {
-                    let stdout_buf = stdout_fut.await;
-                    let stderr_buf = stderr_fut.await;
+            Some(dur) => match tokio::time::timeout(dur, child.wait()).await {
+                Ok(Ok(status)) => {
+                    let stdout_str = Self::collect_drain(stdout_task, Duration::from_secs(5)).await;
+                    let stderr_str = Self::collect_drain(stderr_task, Duration::from_secs(5)).await;
                     if !status.success() {
                         return Err(anyhow::Error::new(CommandError {
                             program: program.to_string(),
                             args: args.iter().map(|s| s.to_string()).collect(),
                             exit_code: status.code(),
-                            stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
-                            stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
+                            stdout: stdout_str,
+                            stderr: stderr_str,
                             spawn_error: None,
                             timed_out: false,
                         }));
                     }
                     Ok(CommandOutput {
                         status_code: status.code(),
-                        stdout: String::from_utf8_lossy(&stdout_buf).to_string(),
-                        stderr: String::from_utf8_lossy(&stderr_buf).to_string(),
+                        stdout: stdout_str,
+                        stderr: stderr_str,
+                        timed_out: false,
+                    })
+                }
+                Ok(Err(e)) => Err(anyhow::Error::new(CommandError::from_spawn_error(
+                    program, args, &e,
+                ))
+                .context(format!("Failed to wait on {}", program))),
+                Err(_) => {
+                    debug!(
+                        program = program,
+                        timeout_secs = dur.as_secs(),
+                        "command timed out, killing child"
+                    );
+                    // Kill the process group FIRST (closing the pipes so the
+                    // drain tasks can complete), then reap.
+                    let killed = Self::kill_child(&mut child).await;
+                    let reaped_code = match killed {
+                        Some(s) => s.code(),
+                        None => {
+                            // kill_child SIGKILLed the group but didn't reap
+                            // during its grace window. Reap now, but bound it:
+                            // if the kill signal somehow didn't reach the
+                            // child (e.g. systemd cgroup isolation) we must
+                            // still return rather than block forever. The OS
+                            // will reap any orphaned child on its own.
+                            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                                Ok(Ok(s)) => s.code(),
+                                _ => {
+                                    warn!(
+                                        program = program,
+                                        "child did not reap after timeout kill; \
+                                         abandoning (OS will reap the orphan)"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                    };
+                    // Collect whatever the child printed before the kill
+                    // (bounded — the pipes close once the group is dead).
+                    let stdout_str = Self::collect_drain(stdout_task, Duration::from_secs(2)).await;
+                    let stderr_str = Self::collect_drain(stderr_task, Duration::from_secs(2)).await;
+                    let ce = CommandError {
+                        program: program.to_string(),
+                        args: args.iter().map(|s| s.to_string()).collect(),
+                        exit_code: reaped_code,
+                        stdout: stdout_str,
+                        stderr: if stderr_str.is_empty() {
+                            format!("{} timed out after {}s", program, dur.as_secs())
+                        } else {
+                            stderr_str
+                        },
+                        spawn_error: None,
+                        timed_out: true,
+                    };
+                    Err(anyhow::Error::new(ce).context(format!(
+                        "{} timed out after {}s",
+                        program,
+                        dur.as_secs()
+                    )))
+                }
+            },
+            None => match child.wait().await {
+                Ok(status) => {
+                    let stdout_str = Self::collect_drain(stdout_task, Duration::from_secs(5)).await;
+                    let stderr_str = Self::collect_drain(stderr_task, Duration::from_secs(5)).await;
+                    if !status.success() {
+                        return Err(anyhow::Error::new(CommandError {
+                            program: program.to_string(),
+                            args: args.iter().map(|s| s.to_string()).collect(),
+                            exit_code: status.code(),
+                            stdout: stdout_str,
+                            stderr: stderr_str,
+                            spawn_error: None,
+                            timed_out: false,
+                        }));
+                    }
+                    Ok(CommandOutput {
+                        status_code: status.code(),
+                        stdout: stdout_str,
+                        stderr: stderr_str,
                         timed_out: false,
                     })
                 }
@@ -312,15 +362,39 @@ impl SystemCommandRunner {
         }
     }
 
-    /// Best-effort child kill: SIGTERM, short grace, then SIGKILL.
-    async fn kill_child(child: &mut tokio::process::Child) {
-        // The child is in its own process group (process_group(0) was set
-        // before spawn). To kill the entire group — the child plus any
-        // subprocesses it spawned (dpkg, rpm, postinst hooks, etc.) — we
-        // send signals to the negative PID (the process group ID).
+    /// Collect a drained pipe buffer, bounded so a kill that didn't reach the
+    /// child can't pin the runner forever. Returns whatever was drained
+    /// (possibly empty) when the drain task finishes within `bound`, lossy
+    /// converted to a string (matching the rest of the runner).
+    async fn collect_drain(
+        task: Option<tokio::task::JoinHandle<Vec<u8>>>,
+        bound: Duration,
+    ) -> String {
+        let buf = match task {
+            Some(t) => match tokio::time::timeout(bound, t).await {
+                Ok(Ok(buf)) => buf,
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    /// Best-effort child kill: SIGTERM the whole process group, short grace,
+    /// then SIGKILL. Returns the child's exit status if it was reaped during
+    /// the SIGTERM grace window; otherwise the caller must reap the (now
+    /// SIGKILLed) child itself.
+    ///
+    /// The child is in its own process group (process_group(0) was set before
+    /// spawn). To kill the entire group — the child plus any subprocesses it
+    /// spawned (dpkg, rpm, postinst hooks, etc.) — signals target the negative
+    /// PID (the process-group ID). SIGTERM-first lets package managers clean
+    /// up (e.g. dpkg finishing its state write); a direct SIGKILL risks leaving
+    /// dpkg half-configured.
+    async fn kill_child(child: &mut tokio::process::Child) -> Option<std::process::ExitStatus> {
         let pgid = child.id().map(|p| p as i32);
 
-        // Try SIGTERM first for graceful shutdown of the whole group.
+        // SIGTERM the whole group.
         if let Some(pgid) = pgid {
             let ret = unsafe { libc::kill(-pgid, libc::SIGTERM) };
             if ret != 0 {
@@ -333,17 +407,21 @@ impl SystemCommandRunner {
             warn!(error = %e, "failed to SIGTERM child during timeout");
         }
 
-        // Give the child a 5-second grace period to exit cleanly.
+        // Wait up to 5s for a graceful exit. If the child reaps here, hand its
+        // status back so the caller doesn't need to wait again.
         let grace = Duration::from_secs(5);
-        if tokio::time::timeout(grace, child.wait()).await.is_err() {
-            // Still alive — escalate to SIGKILL the whole group.
-            warn!("child did not exit after SIGTERM, escalating to SIGKILL");
-            if let Some(pgid) = pgid {
-                unsafe {
-                    libc::kill(-pgid, libc::SIGKILL);
+        match tokio::time::timeout(grace, child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            Ok(Err(_)) => None,
+            Err(_) => {
+                // Still alive after SIGTERM — escalate to SIGKILL the group.
+                // The caller reaps the now-dead child.
+                warn!("child did not exit after SIGTERM, escalating to SIGKILL");
+                if let Some(pgid) = pgid {
+                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
                 }
+                None
             }
-            let _ = child.kill().await;
         }
     }
 }
@@ -493,5 +571,35 @@ mod tests {
         let ce = ce.unwrap();
         assert!(ce.timed_out, "CommandError should be marked as timed_out");
         assert_eq!(ce.program, "sleep");
+    }
+
+    #[test]
+    fn test_system_command_runner_timeout_bounded_in_wallclock() {
+        // A child that holds its stdout pipe open without writing (a stand-in
+        // for `apt-get update` stuck on `gpgv` against a dead connection) must
+        // be killed near the deadline — NOT held until its natural exit. The
+        // previous `tokio::join!` of wait+stdout+stderr waited for the pipe
+        // read to EOF, so this child pinned the runner for its full lifetime
+        // and the deadline was meaningless. This test pins wall-clock time.
+        let runner = SystemCommandRunner;
+        let start = std::time::Instant::now();
+        let result = runner.run_with_timeout("sleep", &["30"], Duration::from_secs(1));
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "should error on timeout");
+        let err = result.unwrap_err();
+        let ce = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<CommandError>())
+            .expect("error chain should contain a CommandError");
+        assert!(ce.timed_out, "should be marked timed_out");
+        assert_eq!(ce.program, "sleep");
+        // deadline 1s + SIGTERM grace 5s + reap/collect bound ~5s ≈ 11s worst
+        // case. Must be well under sleep's 30s natural exit — that is the
+        // whole point: the timeout now actually bounds wall-clock time.
+        assert!(
+            elapsed.as_secs() < 20,
+            "timeout should bound wall-clock time, took {:?}",
+            elapsed
+        );
     }
 }
