@@ -11,7 +11,7 @@ pub mod error_utils;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use coordinator::CommandRunner;
-use error_utils::{format_error_for_cache, CommandError};
+use error_utils::{extract_stderr, format_error_for_cache, CommandError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
@@ -1097,6 +1097,57 @@ impl AptBackend {
         coordinator::run_command_timed(self.runner.as_ref(), "apt-cache", args, QUICK_OP_TIMEOUT)
     }
 
+    /// Fall back to `apt-get upgrade -y` after `dist-upgrade` was blocked by
+    /// held packages, and return the held-package list so the caller can
+    /// report the job as failed.
+    ///
+    /// `apt-get upgrade` keeps held packages — and anything whose upgrade
+    /// would force a held package to change — back instead of aborting, so it
+    /// patches the safe subset without breaking a held package's dependencies.
+    /// The held and entangled packages remain upgradable and are reported as
+    /// unpatched by the post-apply `list_patches` re-scan.
+    ///
+    /// We patch the safe subset BUT the job is reported as **failed** (the
+    /// caller returns an error naming the held packages) so admins are alerted
+    /// to the ongoing risk on the device — a silent Completed would hide the
+    /// fact that the held packages and their entangled dependencies could not
+    /// be patched. The safe subset is not lost; the failure surfaces the debt.
+    ///
+    /// Returns the held-package names (best-effort, for the caller's error
+    /// message) on success, or the upgrade error if the fallback itself fails.
+    fn fallback_to_hold_respecting_upgrade(&self) -> Result<String> {
+        let held = coordinator::run_command_timed(
+            self.runner.as_ref(),
+            "apt-mark",
+            &["showhold"],
+            QUICK_OP_TIMEOUT,
+        )
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+        tracing::warn!(
+            held_packages = %held,
+            "dist-upgrade blocked by held packages — falling back to `apt-get upgrade` \
+             (hold-respecting); the safe subset will be patched but the job will be \
+             reported as failed so the held-package risk is surfaced to admins"
+        );
+        self.run_apt(&["upgrade", "-y"])?;
+        Ok(held)
+    }
+
+    /// Build the "partial patch — held packages remain" failure that the
+    /// caller returns after a successful held-package fallback. The safe
+    /// subset was patched; this error surfaces the ongoing risk so the job
+    /// reports failed and admins are alerted.
+    fn held_package_partial_failure(held: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "dist-upgrade blocked by held packages [{}]; the safe subset was upgraded \
+             but the held packages and their entangled dependencies remain unpatched — \
+             manual review required (the post-apply patch scan lists what stayed unpatched)",
+            held
+        )
+    }
+
     /// Parse package list from `apt list` output.
     ///
     /// Format: `name/repos version arch [status]`
@@ -1401,13 +1452,57 @@ impl PackageManagerBackend for AptBackend {
             }
             Err(e) => {
                 // run_apt_safe already ran dpkg --configure -a cleanup on failure.
+                //
+                // Detection MUST inspect the full error chain, not `e.to_string()`.
+                // In production, run_apt_safe wraps the runner's CommandError with
+                // `.context("Failed to execute apt command")`, so `e.to_string()`
+                // is just that outer context and the apt stderr lives one level
+                // down. `extract_stderr` walks the chain and returns the raw
+                // CommandError.stderr — matching on it works in both production
+                // (Err arm) and tests (non-zero-output arm).
+                let stderr = extract_stderr(&e).unwrap_or_default().to_lowercase();
+
+                // Held-package block (apply-all / dist-upgrade only). apt emits
+                // this when the upgrade set is dependency-entangled with a held
+                // package and would have to change it. We must NOT override the
+                // hold (--allow-change-held-packages) — holds are intentional
+                // (e.g. a pinned load balancer) and forcing the change could
+                // break the held package or its config. Fall back to
+                // `apt-get upgrade`, which keeps held packages — and anything
+                // whose upgrade would force a held package to change — back
+                // instead of aborting, patching the safe subset. The held and
+                // entangled packages remain upgradable and are reported as
+                // unpatched by the post-apply list_patches scan.
+                //
+                // This only applies to the apply-all path; a targeted install
+                // that hits a held package is an explicit request to patch a
+                // held package and should surface as an error, not a silent skip.
+                if packages.is_none()
+                    && stderr.contains("held packages were changed")
+                    && stderr.contains("--allow-change-held-packages")
+                {
+                    // Patch the safe subset (hold-respecting `apt-get upgrade`),
+                    // then report the job as FAILED so admins are alerted to the
+                    // ongoing held-package risk. The safe subset is not lost;
+                    // the failure surfaces the held + entangled packages that
+                    // could not be patched.
+                    return match self.fallback_to_hold_respecting_upgrade() {
+                        Ok(held) => Err(Self::held_package_partial_failure(&held)),
+                        Err(upgrade_err) => Err(upgrade_err.context(
+                            "held-package fallback (apt-get upgrade) failed — dist-upgrade \
+                             was blocked by held packages and the fallback upgrade also failed",
+                        )),
+                    };
+                }
+
                 // If the error looks like a dependency issue, try fix-broken +
-                // one retry. For any other error, return immediately — the
-                // cleanup has already been done.
-                let err_str = e.to_string().to_lowercase();
-                if err_str.contains("unmet dependencies")
-                    || err_str.contains("broken")
-                    || err_str.contains("dependency")
+                // one retry. The retry goes through the same held-package
+                // fallback check so a dist-upgrade that fails with a held block
+                // after fix-broken still falls back instead of failing the job.
+                // For any other error, return immediately — cleanup is done.
+                if stderr.contains("unmet dependencies")
+                    || stderr.contains("broken")
+                    || stderr.contains("dependency")
                 {
                     tracing::warn!(error = ?e, "dist-upgrade failed with dependency issues — running fix-broken and retrying once");
                     match self.run_apt(&["-f", "install", "-y"]) {
@@ -1419,7 +1514,29 @@ impl PackageManagerBackend for AptBackend {
                             ));
                         }
                     }
-                    self.run_apt(&args).map(|_| ())
+                    match self.run_apt(&args) {
+                        Ok(_) => Ok(()),
+                        Err(retry_err) => {
+                            let retry_stderr = extract_stderr(&retry_err)
+                                .unwrap_or_default()
+                                .to_lowercase();
+                            if packages.is_none()
+                                && retry_stderr.contains("held packages were changed")
+                                && retry_stderr.contains("--allow-change-held-packages")
+                            {
+                                match self.fallback_to_hold_respecting_upgrade() {
+                                    Ok(held) => Err(Self::held_package_partial_failure(&held)),
+                                    Err(upgrade_err) => Err(upgrade_err.context(
+                                        "held-package fallback (apt-get upgrade) failed on \
+                                         dist-upgrade retry — blocked by held packages and the \
+                                         fallback upgrade also failed",
+                                    )),
+                                }
+                            } else {
+                                Err(retry_err)
+                            }
+                        }
+                    }
                 } else {
                     Err(e)
                 }

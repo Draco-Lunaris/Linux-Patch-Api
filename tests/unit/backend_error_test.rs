@@ -633,6 +633,209 @@ mod apt_tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some("2.2.0".to_string()));
     }
+
+    // -------------------------------------------------------------------------
+    // apply_patches: held-package fallback (option B)
+    // -------------------------------------------------------------------------
+    //
+    // These tests build the backend around a shared `Arc<MockCommandRunner>`
+    // (instead of `make_backend`, which clones the mock with a fresh call log)
+    // so the test can inspect which commands the backend actually ran.
+    //
+    // `dpkg --configure -a` and `dpkg --audit` must always be programmed
+    // because `run_apt_safe` runs them as pre/post-flight around every
+    // apt-get call. Dist-upgrade failures use `MockResponse::error` (the
+    // `return_as_error: true` path), which makes the mock return
+    // `Err(CommandError)` — the same shape `SystemCommandRunner` produces in
+    // production for a non-zero exit. `run_apt_safe` then wraps that with
+    // `.context("Failed to execute apt command")`, so detection must work via
+    // `extract_stderr` (chain walk), not `e.to_string()`. These tests prove
+    // that.
+
+    fn held_stderr() -> &'static str {
+        "E: Held packages were changed and -y was used without --allow-change-held-packages."
+    }
+
+    #[test]
+    fn apt_apply_held_block_falls_back_to_upgrade() {
+        let mock = Arc::new(MockCommandRunner::new());
+        mock.add_response(
+            "dpkg",
+            &["--configure", "-a"],
+            MockResponse::success_empty(),
+        );
+        mock.add_response("dpkg", &["--audit"], MockResponse::success_empty());
+        // fix-broken pre-flight succeeds
+        mock.add_response(
+            "apt-get",
+            &["-f", "install", "-y"],
+            MockResponse::success_empty(),
+        );
+        // dist-upgrade is blocked by a held package (production Err path)
+        mock.add_response(
+            "apt-get",
+            &["dist-upgrade", "-y"],
+            MockResponse::error(100, held_stderr()),
+        );
+        // the fallback captures the held set for the audit log
+        mock.add_response(
+            "apt-mark",
+            &["showhold"],
+            MockResponse::success("haproxy\n"),
+        );
+        // the hold-respecting fallback succeeds
+        mock.add_response("apt-get", &["upgrade", "-y"], MockResponse::success_empty());
+
+        let backend = AptBackend::new(mock.clone());
+        let result = backend.apply_patches(None);
+
+        // The safe subset IS patched (the fallback `apt-get upgrade` ran), but
+        // the job is reported as FAILED so admins are alerted to the ongoing
+        // held-package risk — not a silent Completed.
+        assert!(
+            result.is_err(),
+            "held-block should patch the safe subset but report the job as failed: {:?}",
+            result
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("held packages") && err_msg.contains("haproxy"),
+            "failure should name the held packages: {}",
+            err_msg
+        );
+        mock.assert_called("apt-get", &["dist-upgrade", "-y"]);
+        mock.assert_called("apt-get", &["upgrade", "-y"]);
+        mock.assert_called("apt-mark", &["showhold"]);
+    }
+
+    #[test]
+    fn apt_apply_held_block_fallback_failure_propagates() {
+        let mock = Arc::new(MockCommandRunner::new());
+        mock.add_response(
+            "dpkg",
+            &["--configure", "-a"],
+            MockResponse::success_empty(),
+        );
+        mock.add_response("dpkg", &["--audit"], MockResponse::success_empty());
+        mock.add_response(
+            "apt-get",
+            &["-f", "install", "-y"],
+            MockResponse::success_empty(),
+        );
+        mock.add_response(
+            "apt-get",
+            &["dist-upgrade", "-y"],
+            MockResponse::error(100, held_stderr()),
+        );
+        mock.add_response("apt-mark", &["showhold"], MockResponse::success_empty());
+        // the fallback itself fails
+        mock.add_response(
+            "apt-get",
+            &["upgrade", "-y"],
+            MockResponse::error(100, "E: upgrade failed"),
+        );
+
+        let backend = AptBackend::new(mock.clone());
+        let result = backend.apply_patches(None);
+
+        assert!(result.is_err(), "fallback failure should propagate");
+        mock.assert_called("apt-get", &["upgrade", "-y"]);
+    }
+
+    #[test]
+    fn apt_apply_non_held_error_does_not_fall_back() {
+        let mock = Arc::new(MockCommandRunner::new());
+        mock.add_response(
+            "dpkg",
+            &["--configure", "-a"],
+            MockResponse::success_empty(),
+        );
+        mock.add_response("dpkg", &["--audit"], MockResponse::success_empty());
+        mock.add_response(
+            "apt-get",
+            &["-f", "install", "-y"],
+            MockResponse::success_empty(),
+        );
+        // a generic, non-held, non-dependency error
+        mock.add_response(
+            "apt-get",
+            &["dist-upgrade", "-y"],
+            MockResponse::error(100, "E: Some non-dependency apt failure."),
+        );
+
+        let backend = AptBackend::new(mock.clone());
+        let result = backend.apply_patches(None);
+
+        assert!(result.is_err(), "non-held error should propagate");
+        let upgrade_called = mock
+            .calls()
+            .iter()
+            .any(|(p, a)| p == "apt-get" && a.join(" ") == "upgrade -y");
+        assert!(
+            !upgrade_called,
+            "upgrade fallback must not run for a non-held error; calls: {:?}",
+            mock.calls()
+        );
+    }
+
+    #[test]
+    fn apt_apply_dependency_retry_fires_in_production() {
+        // Regression for the dead dependency-retry detection: it matched on
+        // `e.to_string()`, which in production is just "Failed to execute apt
+        // command" (the apt stderr is one level down the chain), so the retry
+        // never fired. With chain-walking via extract_stderr, a "broken"
+        // signature now triggers fix-broken + one retry.
+        let mock = Arc::new(MockCommandRunner::new());
+        mock.add_response(
+            "dpkg",
+            &["--configure", "-a"],
+            MockResponse::success_empty(),
+        );
+        mock.add_response("dpkg", &["--audit"], MockResponse::success_empty());
+        // fix-broken succeeds both as pre-flight and as the retry's fix-broken
+        mock.add_response(
+            "apt-get",
+            &["-f", "install", "-y"],
+            MockResponse::success_empty(),
+        );
+        // dist-upgrade fails with a dependency/broken signature (production Err path)
+        mock.add_response(
+            "apt-get",
+            &["dist-upgrade", "-y"],
+            MockResponse::error(
+                100,
+                "E: Unable to correct problems, you have held broken packages.\nE: Broken count, you have held broken packages.",
+            ),
+        );
+
+        let backend = AptBackend::new(mock.clone());
+        let result = backend.apply_patches(None);
+
+        assert!(result.is_err(), "retry that fails again should propagate");
+        // fix-broken must be called twice: once as pre-flight, once as the
+        // dependency-retry fix-broken. This is the proof the detection fired.
+        let fix_broken_count = mock
+            .calls()
+            .iter()
+            .filter(|(p, a)| p == "apt-get" && a.join(" ") == "-f install -y")
+            .count();
+        assert_eq!(
+            fix_broken_count,
+            2,
+            "fix-broken should run twice (pre-flight + dependency retry); calls: {:?}",
+            mock.calls()
+        );
+        // and the held-package fallback must NOT have run for a broken signature
+        let upgrade_called = mock
+            .calls()
+            .iter()
+            .any(|(p, a)| p == "apt-get" && a.join(" ") == "upgrade -y");
+        assert!(
+            !upgrade_called,
+            "held fallback must not run for a dependency error; calls: {:?}",
+            mock.calls()
+        );
+    }
 }
 
 // =============================================================================
