@@ -1,3 +1,9 @@
+linux-patch-api (2.6.22) unstable; urgency=low
+
+  * Release v2.6.22
+
+ -- Draco-Lunaris-Echo  Tue, 11 Aug 2026 17:34:37 -0500
+
 linux-patch-api (2.6.21) unstable; urgency=low
 
   * Release v2.6.21
