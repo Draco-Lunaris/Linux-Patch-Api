@@ -23,8 +23,9 @@ test:
 enrollment-test:
     cargo test --test enroll_identity --test enrollment_test --test enrollment_e2e
 
+# RUSTSEC-2026-0258: h2 0.3 (via actix-http http2) has no patched release; mitigated by mTLS
 audit:
-    cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0205
+    cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0190 --ignore RUSTSEC-2026-0204 --ignore RUSTSEC-2026-0205 --ignore RUSTSEC-2026-0258
 
 check: fmt clippy test audit
     @echo "all gates passed"
